@@ -13,7 +13,7 @@ AMINO_ACIDS = tuple("ACDEFGHIKLMNPQRSTVWY")
 AA_SET = set(AMINO_ACIDS)
 GB1_WT_SITES = "VDGV"
 GB1_POSITIONS = (39, 40, 41, 54)
-SOURCE_URL = "https://github.com/facebookresearch/FLIP/tree/main/splits/gb1"
+SOURCE_URL = "https://github.com/J-SNACKKB/FLIP/tree/main/splits/gb1"
 
 
 def canonical_mutation_notation(

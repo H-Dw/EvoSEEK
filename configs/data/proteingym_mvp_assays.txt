@@ -1,0 +1,11 @@
+# ProteinGym MVP assay list (DMS_ids, one per line).
+# Covers: complete landscape (GB1), long multi-mutant sequence (GFP),
+# mutation-depth OOD (AAV), cross-assay validation (TEM-1 x2),
+# and multi-objective constraints (Spike binding vs expression).
+SPG1_STRSG_Wu_2016
+GFP_AEQVI_Sarkisyan_2016
+CAPSD_AAV2S_Sinai_2021
+BLAT_ECOLX_Stiffler_2015
+BLAT_ECOLX_Firnberg_2014
+SPIKE_SARS2_Starr_2020_binding
+SPIKE_SARS2_Starr_2020_expression

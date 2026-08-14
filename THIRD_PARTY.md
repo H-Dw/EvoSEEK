@@ -3,7 +3,7 @@
 This repository contains a new implementation. It does not vendor source code from the projects
 below. Their public interfaces and experiment organization informed the design:
 
-- FLIP (`facebookresearch/FLIP`, AFL-3.0): GB1 schema and benchmark provenance. Raw GB1 data is
+- FLIP (`J-SNACKKB/FLIP`, AFL-3.0): GB1 schema and benchmark provenance. Raw GB1 data is
   CC BY 4.0. Downloaded data keeps the upstream license and citation metadata.
 - ALDE (`jsunn-y/ALDE`, MIT): discrete batch optimization concepts (Greedy/UCB/TS), uncertainty
   recording, and fixed-budget campaign organization.
@@ -16,4 +16,3 @@ below. Their public interfaces and experiment organization informed the design:
 
 EVOLVEpro is intentionally not included in this version. In particular, this repository does not
 implement its lightweight PLM + random-forest architecture.
-

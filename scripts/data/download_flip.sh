@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
-# Backward-compatible wrapper. The download logic now lives in the registry
-# engine (configs/data/datasets.yaml + src/fitness_agents/data/download.py);
-# this script preserves the old entry point for docs and automation.
+# Download the FLIP sources used by this project: GB1 + AAV (+ active splits).
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -13,4 +11,5 @@ if [[ "${FITNESS_AGENTS_FORCE_DOWNLOAD:-0}" == "1" ]]; then
 fi
 
 "${PYTHON_BIN}" "${ROOT_DIR}/scripts/data/download_profile.py" \
-  --dataset flip_gb1 "${EXTRA_ARGS[@]}" "$@"
+  --dataset flip_gb1 --dataset flip_aav --dataset flip_aav_splits \
+  "${EXTRA_ARGS[@]}" "$@"

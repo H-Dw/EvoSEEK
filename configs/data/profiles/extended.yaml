@@ -1,0 +1,8 @@
+# Extended profile: core + FLIP2 (7 datasets, 16 splits) for real
+# engineering OOD generalization (new positions, new wild-types, low-to-high).
+profile: extended
+description: "core + all FLIP2 splits for position/wild-type/fitness-direction OOD"
+includes:
+  - core
+datasets:
+  - flip2_full

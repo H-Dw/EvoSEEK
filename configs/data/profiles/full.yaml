@@ -1,0 +1,13 @@
+# Full profile: complete local mirror of every registered source (~8 GB).
+# ProteinGym full substitutions + CV folds + indels + all MSAs + structures + FLIP2.
+profile: full
+description: "all registered datasets; cross-protein scale evaluation and indel engineering"
+includes:
+  - core
+datasets:
+  - proteingym_substitutions_full
+  - proteingym_cv_folds
+  - proteingym_indels
+  - proteingym_structures
+  - proteingym_msa_full
+  - flip2_full

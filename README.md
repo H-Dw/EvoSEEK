@@ -37,7 +37,7 @@ python scripts/check_environment.py
 
 ## 2. 数据下载与准备
 
-下载脚本固定到已核验的 FLIP commit，并检查压缩包 SHA-256：
+下载脚本固定到已核验的 `J-SNACKKB/FLIP` commit，并检查压缩包 SHA-256；固定地址不可用时会回退到同一仓库的 `main`，但任何回退文件仍必须通过相同校验：
 
 ```bash
 bash scripts/data/download_flip_gb1.sh
@@ -45,6 +45,16 @@ python scripts/data/prepare_gb1.py \
   --source data/raw/flip/gb1/four_mutations_full_data.csv
 python scripts/data/validate_data.py
 ```
+
+若曾使用旧版脚本并看到 GitHub Raw `404`，请确认脚本中的仓库为 `J-SNACKKB/FLIP`，然后强制重新下载：
+
+```bash
+grep 'REPOSITORY=' scripts/data/download_flip_gb1.sh
+FITNESS_AGENTS_FORCE_DOWNLOAD=1 bash scripts/data/download_flip_gb1.sh
+```
+
+成功时会显示 `Verified archive`；期望 SHA-256 为
+`85692d808dcd3ae54fa2ac31f4e590858d4582369b6c7b05df299b9b6c383bff`。
 
 生成两套数据：
 

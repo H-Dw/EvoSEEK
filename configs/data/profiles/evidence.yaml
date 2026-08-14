@@ -1,0 +1,9 @@
+# Evidence profile: core + structure/conservation resources for
+# knowledge-enhancement and ablation experiments (~6.5 GB, MSA archive is large).
+profile: evidence
+description: "core + AF2 structures + MVP-assay MSAs for structure/conservation ablations"
+includes:
+  - core
+datasets:
+  - proteingym_structures
+  - proteingym_msa_mvp

@@ -1,0 +1,11 @@
+# Core profile: everything needed for the main validation claims beyond GB1.
+# ~1.2 GB download. FLIP GB1 + FLIP AAV (incl. active splits) +
+# ProteinGym metadata + MVP assays (GFP, AAV, GB1, TEM-1).
+profile: core
+description: "GB1 + AAV + ProteinGym MVP assays; validates acquisition, UQ and mutation-depth generalization"
+datasets:
+  - flip_gb1
+  - flip_aav
+  - flip_aav_splits
+  - proteingym_reference
+  - proteingym_substitutions_mvp

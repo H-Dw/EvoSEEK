@@ -1,0 +1,5 @@
+# Smoke profile: minimal download for CI and quick regression (~3 MB).
+profile: smoke
+description: "FLIP GB1 demo only; verifies the download pipeline end to end"
+datasets:
+  - flip_gb1

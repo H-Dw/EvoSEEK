@@ -23,6 +23,6 @@
   },
   "raw_license": "CC BY 4.0",
   "rows_clean": 149361,
-  "source": ".codex_tmp\\gb1peek\\four_mutations_full_data.csv",
-  "source_url": "https://github.com/facebookresearch/FLIP/tree/main/splits/gb1"
+  "source": "data\\raw\\flip\\gb1\\four_mutations_full_data.csv",
+  "source_url": "https://github.com/J-SNACKKB/FLIP/tree/main/splits/gb1"
 }
