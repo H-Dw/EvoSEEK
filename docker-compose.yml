@@ -1,0 +1,13 @@
+services:
+  fitness-agents:
+    build: .
+    working_dir: /workspace
+    volumes:
+      - ./artifacts:/workspace/artifacts
+      - ./data:/workspace/data
+      - ./models:/workspace/models
+    environment:
+      FITNESS_AGENTS_LLM_API_KEY: ${FITNESS_AGENTS_LLM_API_KEY:-}
+      FITNESS_AGENTS_LLM_MODEL: ${FITNESS_AGENTS_LLM_MODEL:-gpt-5-mini}
+    command: ["python", "scripts/run_demo.py", "--rounds", "1", "--budget", "4"]
+

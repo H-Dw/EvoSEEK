@@ -1,0 +1,11 @@
+task_id: gb1_binding_full
+protein_id: GB1
+assay_id: GB1_IgG_binding_Wu2016
+wild_type_sites: VDGV
+mutable_positions: [39, 40, 41, 54]
+objective: maximize
+public_data_path: data/processed/gb1_full_public.csv
+oracle_data_path: data/processed/gb1_full_oracle.csv
+sequence_column: variant
+fitness_column: fitness
+

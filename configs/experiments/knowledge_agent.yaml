@@ -1,0 +1,16 @@
+mode: knowledge_agent
+seed: 11
+rounds: 3
+budget_per_round: 16
+candidate_limit: 220
+acquisition: greedy
+ucb_beta: 1.5
+diversity_lambda: 0.10
+task_config: configs/task/gb1_binding.yaml
+model_config: configs/model/baseline.yaml
+knowledge_config: configs/knowledge/gb1.yaml
+output_root: artifacts/runs
+llm_provider: mock
+knowledge_enabled: true
+score_shuffle: false
+evidence_deletion: false

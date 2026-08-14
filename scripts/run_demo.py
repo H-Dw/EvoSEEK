@@ -1,0 +1,32 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+
+from fitness_agents.config import load_experiment_config, project_root
+from fitness_agents.loop import run_campaign
+
+
+def main() -> None:
+    root = project_root()
+    parser = argparse.ArgumentParser(description="Run one reproducible virtual evolution demo")
+    parser.add_argument(
+        "--config", type=Path, default=root / "configs/experiments/knowledge_agent.yaml"
+    )
+    parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--rounds", type=int, default=None)
+    parser.add_argument("--budget", type=int, default=None)
+    args = parser.parse_args()
+    overrides = {key: value for key, value in {
+        "seed": args.seed, "rounds": args.rounds, "budget_per_round": args.budget
+    }.items() if value is not None}
+    config = load_experiment_config(args.config, overrides=overrides)
+    summary = run_campaign(config)
+    print(json.dumps(summary, indent=2))
+
+
+if __name__ == "__main__":
+    main()
+

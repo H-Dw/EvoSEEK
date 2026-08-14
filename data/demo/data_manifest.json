@@ -1,0 +1,28 @@
+{
+  "demo_split_counts": {
+    "final_test": 64,
+    "initial_observed": 64,
+    "oracle_pool": 352,
+    "validation": 32
+  },
+  "derived_license": "AFL-3.0",
+  "fitness_max": 8.76196565571,
+  "fitness_min": 0.0,
+  "full_split_counts": {
+    "final_test": 2048,
+    "initial_observed": 96,
+    "oracle_pool": 147121,
+    "validation": 96
+  },
+  "hamming_depth_counts": {
+    "0": 1,
+    "1": 76,
+    "2": 2091,
+    "3": 26019,
+    "4": 121174
+  },
+  "raw_license": "CC BY 4.0",
+  "rows_clean": 149361,
+  "source": ".codex_tmp\\gb1peek\\four_mutations_full_data.csv",
+  "source_url": "https://github.com/facebookresearch/FLIP/tree/main/splits/gb1"
+}

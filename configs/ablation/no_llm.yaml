@@ -1,0 +1,6 @@
+physchem: true
+conservation: true
+structure: true
+kg: true
+mode: fitness_direct
+
