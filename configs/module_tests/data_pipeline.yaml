@@ -1,0 +1,24 @@
+seed: 20260816
+output_dir: artifacts/module_tests/data_pipeline
+sample:
+  reference: VDGV
+  positions: [39, 40, 41, 54]
+  residues_by_site:
+    - [V, A, C]
+    - [D, E, W]
+    - [G, A, S]
+    - [V, I, F]
+split:
+  n_folds: 2
+  al96_closed_loop:
+    protocol_version: module-test-al96-v1
+    initial_budget: 9
+    test_depth_min: 2
+    validation_size: 8
+  flip_static_ood:
+    protocol_version: module-test-flip-v1
+    ood_rule: two_vs_rest
+    population: full
+  mutation_identity_ood:
+    protocol_version: module-test-mutation-v1
+    mutation_row_policy: contains_unseen

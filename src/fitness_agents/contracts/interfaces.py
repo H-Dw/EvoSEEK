@@ -7,10 +7,16 @@ from typing import Any, Protocol
 import numpy as np
 
 from .schemas import (
+    ApprovedBatch,
     CampaignState,
+    ConflictReport,
+    CritiqueDecision,
+    DraftBatch,
     Evidence,
+    FalsificationCriterion,
     FitnessObservation,
     Hypothesis,
+    HypothesisAssessment,
     Prediction,
     SelectionRecord,
     Variant,
@@ -58,6 +64,21 @@ class EvidenceProvider(Protocol):
     def evaluate(self, variant: Variant, *, round_id: int) -> Evidence: ...
 
 
+class KnowledgeGraphTool(Protocol):
+    """Allow-listed, read-only graph queries available to scientist agents."""
+
+    tool_name: str
+
+    def hypothesis_context(
+        self,
+        *,
+        round_id: int,
+        limit: int | None = None,
+    ) -> dict[str, Any]: ...
+
+    def explain_variant(self, variant_id: str, *, round_id: int) -> dict[str, Any]: ...
+
+
 class AcquisitionPolicy(Protocol):
     name: str
 
@@ -86,6 +107,14 @@ class ExperimentBackend(Protocol):
     def open_final_test(self) -> list[FitnessObservation]: ...
 
 
+class ApprovedExperimentBackend(Protocol):
+    def submit(self, batch: ApprovedBatch) -> str: ...
+
+    def collect(self, experiment_run_id: str) -> list[FitnessObservation]: ...
+
+    def open_final_test(self) -> list[FitnessObservation]: ...
+
+
 class LLMClient(Protocol):
     provider_name: str
 
@@ -96,6 +125,36 @@ class LLMClient(Protocol):
         evidence: Sequence[Evidence],
         output_schema: dict[str, Any],
     ) -> Hypothesis: ...
+
+
+class CriticClient(Protocol):
+    provider_name: str
+
+    def review(self, *, context: dict[str, Any], output_schema: dict[str, Any]) -> CritiqueDecision: ...
+
+
+class BatchValidator(Protocol):
+    version: str
+
+    def validate(self, draft: DraftBatch, **context: Any) -> ConflictReport: ...
+
+
+class SignalDetector(Protocol):
+    name: str
+    version: str
+
+    def evaluate(
+        self,
+        criterion: FalsificationCriterion,
+        observations: Sequence[FitnessObservation],
+        context: dict[str, Any],
+    ) -> Any: ...
+
+
+class HypothesisEvaluator(Protocol):
+    version: str
+
+    def evaluate(self, **context: Any) -> HypothesisAssessment: ...
 
 
 class ArtifactWriter(Protocol):

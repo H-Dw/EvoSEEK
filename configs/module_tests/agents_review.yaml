@@ -1,0 +1,33 @@
+seed: 20260816
+output_dir: artifacts/module_tests/agents_review
+batch_budget: 3
+max_revision_attempts: 1
+critic:
+  enabled: true
+  mode: rule
+  provider: mock
+  model: null
+  temperature: 0.0
+  max_revision_attempts: 1
+  max_model_retries: 1
+  on_reject: abort_round
+  on_exhausted: abort_round
+  fallback_policy: rule
+  require_counterevidence_search: false
+  rationale_visibility: structured_claims_only
+  profile: scientific_v1
+  ood_warning_threshold: 0.8
+  model_disagreement_threshold: 0.5
+  min_batch_distance: 1
+
+# Offline mode is the default. To exercise the real API, replace the placeholders and pass
+# --enable-remote to the module test script. The script copies the key into the process
+# environment only; it never writes the real value to result artifacts.
+remote_llm:
+  enabled: false
+  provider: openai_compatible
+  api_key: REPLACE_WITH_REAL_LLM_API_KEY
+  base_url: REPLACE_WITH_OPENAI_COMPATIBLE_BASE_URL_OR_DELETE
+  scientist_model: REPLACE_WITH_SCIENTIST_MODEL_NAME
+  critic_model: REPLACE_WITH_CRITIC_MODEL_NAME
+

@@ -1,0 +1,22 @@
+dataset_id: GB1
+assay_id: GB1_IgG_binding_Wu2016
+adapter: flip_gb1
+source: ../../../data/raw/flip/gb1/four_mutations_full_data.csv
+sequence_column: sequence
+model_sequence_column: sequence
+variant_column: Variants
+target_column: Fitness
+mutation_count_column: HD
+default_backbone_id: GB1_WT
+dataset_scope: complete_measured_four_site_landscape
+target_conflict_tolerance: 0.0
+replicate_policy: mean
+source_url: https://github.com/J-SNACKKB/FLIP/tree/main/splits/gb1
+components:
+  - component_id: GB1
+    reference: VDGV
+    positions: [39, 40, 41, 54]
+metadata:
+  raw_license: CC BY 4.0
+  derived_license: AFL-3.0
+

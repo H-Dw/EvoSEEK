@@ -1,0 +1,3 @@
+{"case":"clean_review","verdict":"APPROVE","falsification_readiness":"ready","required_changes":[]}
+{"case":"missing_preregistration","verdict":"REVISE","falsification_readiness":"needs_revision","required_changes":[{"action":"MAKE_FALSIFICATION_EXECUTABLE"}]}
+{"case":"hard_sequence_conflict","verdict":"REJECT","falsification_readiness":"untestable","required_changes":[{"action":"ABORT_ROUND"}]}

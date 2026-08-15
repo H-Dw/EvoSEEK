@@ -5,6 +5,7 @@ import json
 from collections.abc import Sequence
 from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,8 @@ def _jsonable(value: Any) -> Any:
         return value.item()
     if isinstance(value, Path):
         return str(value)
+    if isinstance(value, Enum):
+        return value.value
     return value
 
 
@@ -64,4 +67,3 @@ class JsonArtifactWriter:
             writer.writeheader()
             writer.writerows(rows)
         return target
-

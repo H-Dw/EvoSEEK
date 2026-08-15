@@ -1,4 +1,7 @@
 name: onehot_heterogeneous_ensemble
+device: cpu
+allow_device_fallback: false
+batch_size: 32
 feature_provider: gb1_onehot_pairwise
 ridge_members: 5
 extra_trees_estimators: 160
@@ -6,4 +9,3 @@ ridge_alpha: 10.0
 bootstrap_fraction: 0.85
 conformal_alpha: 0.10
 include_gaussian_process: false
-

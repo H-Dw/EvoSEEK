@@ -1,0 +1,11 @@
+# ProteinNPT's official repository should be wrapped by the backend_factory contract.
+name: proteinnpt
+device: cpu
+allow_device_fallback: false
+batch_size: 8
+backend_factory: null  # e.g. fitness_agents_proteinnpt.backend:create_backend
+checkpoint: null
+options:
+  mode: supervised
+  assay_context: GB1_IgG_binding_Wu2016
+  calibrate_output: true

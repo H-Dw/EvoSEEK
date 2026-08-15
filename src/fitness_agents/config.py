@@ -32,15 +32,43 @@ class TaskConfig:
     wild_type_sites: str
     mutable_positions: list[int]
     objective: str
-    public_data_path: Path
-    oracle_data_path: Path
+    public_data_path: Path | None = None
+    oracle_data_path: Path | None = None
+    split_root: Path | None = None
+    fold_index: int = 0
+    expected_split_strategy: str | None = None
+    expected_protocol_version: str | None = None
+    expected_manifest_sha256: str | None = None
+    expected_assignment_sha256: str | None = None
     sequence_column: str = "variant"
     fitness_column: str = "fitness"
+    fitness_scale: str = "raw_assay"
+    fitness_transform: str = "identity"
+
+    def __post_init__(self) -> None:
+        uses_manifest = self.split_root is not None
+        uses_legacy = self.public_data_path is not None or self.oracle_data_path is not None
+        if uses_manifest and uses_legacy:
+            raise ValueError("Task config cannot mix split_root with legacy public/oracle paths")
+        if not uses_manifest and not (
+            self.public_data_path is not None and self.oracle_data_path is not None
+        ):
+            raise ValueError(
+                "Task config requires split_root or both public_data_path and oracle_data_path"
+            )
+        if self.fold_index < 0:
+            raise ValueError("fold_index must be non-negative")
 
 
 @dataclass
 class ModelConfig:
     name: str = "onehot_heterogeneous_ensemble"
+    device: str = "cpu"
+    allow_device_fallback: bool = False
+    batch_size: int = 32
+    backend_factory: str | None = None
+    checkpoint: str | None = None
+    options: dict[str, Any] = field(default_factory=dict)
     feature_provider: str = "gb1_onehot_pairwise"
     ridge_members: int = 5
     extra_trees_estimators: int = 160
@@ -61,6 +89,38 @@ class KnowledgeConfig:
 
 
 @dataclass
+class CriticConfig:
+    enabled: bool = True
+    mode: str = "rule"
+    provider: str = "mock"
+    model: str | None = None
+    temperature: float = 0.0
+    max_revision_attempts: int = 2
+    max_model_retries: int = 2
+    on_reject: str = "abort_round"
+    on_exhausted: str = "abort_round"
+    fallback_policy: str = "rule"
+    require_counterevidence_search: bool = False
+    rationale_visibility: str = "structured_claims_only"
+    profile: str = "scientific_v1"
+    ood_warning_threshold: float | None = None
+    model_disagreement_threshold: float | None = None
+    min_batch_distance: int = 1
+
+    def __post_init__(self) -> None:
+        if self.mode not in {"rule", "remote"}:
+            raise ValueError("critic.mode must be 'rule' or 'remote'")
+        if self.max_revision_attempts not in {0, 1, 2}:
+            raise ValueError("critic.max_revision_attempts must be between 0 and 2")
+        if self.max_model_retries < 0:
+            raise ValueError("critic.max_model_retries must be non-negative")
+        if self.on_reject not in {"abort_round", "safe_fallback"}:
+            raise ValueError("critic.on_reject must be abort_round or safe_fallback")
+        if self.on_exhausted not in {"abort_round", "safe_fallback"}:
+            raise ValueError("critic.on_exhausted must be abort_round or safe_fallback")
+
+
+@dataclass
 class ExperimentConfig:
     mode: str
     seed: int
@@ -74,6 +134,7 @@ class ExperimentConfig:
     model: ModelConfig
     knowledge: KnowledgeConfig
     output_root: Path
+    critic: CriticConfig = field(default_factory=CriticConfig)
     llm_provider: str = "mock"
     knowledge_enabled: bool = False
     score_shuffle: bool = False
@@ -104,16 +165,23 @@ def load_experiment_config(
             if key in ablation:
                 raw[key] = ablation[key]
 
-    task = TaskConfig(
-        **{
-            **task_raw,
-            "public_data_path": root / task_raw["public_data_path"],
-            "oracle_data_path": root / task_raw["oracle_data_path"],
-        }
-    )
+    task_values = dict(task_raw)
+    for key in ("public_data_path", "oracle_data_path", "split_root"):
+        if task_values.get(key):
+            path = Path(task_values[key])
+            task_values[key] = path if path.is_absolute() else root / path
+        else:
+            task_values[key] = None
+    task = TaskConfig(**task_values)
     profiles = {int(key): value for key, value in knowledge_raw.pop("site_profiles", {}).items()}
     knowledge = KnowledgeConfig(site_profiles=profiles, **knowledge_raw)
     model = ModelConfig(**model_raw)
+    critic_raw = (
+        read_yaml(raw["critic_config"], root)
+        if raw.get("critic_config")
+        else (raw.get("critic", {}) or {})
+    )
+    critic = CriticConfig(**critic_raw)
     return ExperimentConfig(
         mode=raw["mode"],
         seed=int(raw["seed"]),
@@ -126,6 +194,7 @@ def load_experiment_config(
         task=task,
         model=model,
         knowledge=knowledge,
+        critic=critic,
         output_root=root / raw.get("output_root", "artifacts/runs"),
         llm_provider=raw.get("llm_provider", "mock"),
         knowledge_enabled=bool(raw.get("knowledge_enabled", False)),

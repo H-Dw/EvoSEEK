@@ -1,0 +1,12 @@
+# Pythia-PPI is an auxiliary PPI delta-delta-G scorer; its backend must orient scores so higher
+# fitness_mean always means better GB1 assay fitness.
+name: pythia_ppi
+device: cpu
+allow_device_fallback: false
+batch_size: 8
+backend_factory: null  # e.g. fitness_agents_pythia.backend:create_backend
+checkpoint: null
+options:
+  complex_structure_path: null
+  score_direction: lower_delta_delta_g_is_better
+  calibrate_to_assay: true

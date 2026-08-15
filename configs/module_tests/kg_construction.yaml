@@ -1,0 +1,15 @@
+output_dir: artifacts/module_tests/kg_construction
+run_id: module-test-kg-build
+round_id: 1
+protein_id: GB1
+assay_id: module_test_assay
+condition_id: buffered_binding
+full_profile:
+  enabled_adapters: null
+  enabled_layers: null
+  enabled_modalities: null
+observations_only_profile:
+  enabled_adapters: [campaign_observations]
+  enabled_layers: [identity, experimental, sequence, provenance]
+  enabled_modalities: [tabular, sequence, time_series]
+

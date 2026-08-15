@@ -1,0 +1,17 @@
+seed: 20260816
+output_dir: artifacts/module_tests/knowledge_runtime
+assay_id: module_test_assay
+query_round: 1
+max_query_rows: 4
+knowledge:
+  physchem: true
+  conservation: true
+  structure: true
+  kg: true
+  soft_weight: 0.4
+  site_profiles:
+    "39": {wild_type: V, tolerated: [V, F, W, Y, L, I, M], structure_risk: 0.20}
+    "40": {wild_type: D, tolerated: [D, E, N, Q, H, W], structure_risk: 0.35}
+    "41": {wild_type: G, tolerated: [G, A, S, C, T], structure_risk: 0.75}
+    "54": {wild_type: V, tolerated: [V, I, L, M, A, F], structure_risk: 0.30}
+

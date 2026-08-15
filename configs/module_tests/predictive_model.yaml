@@ -1,0 +1,51 @@
+seed: 20260816
+output_dir: artifacts/module_tests/predictive_model
+train_size: 24
+validation_size: 8
+prediction_size: 12
+
+baseline:
+  name: onehot_heterogeneous_ensemble
+  device: cpu
+  allow_device_fallback: false
+  batch_size: 16
+  feature_provider: gb1_onehot_pairwise
+  ridge_members: 3
+  extra_trees_estimators: 32
+  ridge_alpha: 5.0
+  bootstrap_fraction: 0.85
+  conformal_alpha: 0.10
+  include_gaussian_process: false
+
+# The deterministic adapter contract test uses this local fake backend and never loads a checkpoint.
+external_contract_test:
+  backend_factory: fakes:create_external_backend
+  model_names: [kermut, proteinnpt, prosst, pythia_ppi]
+
+# Set enabled=true only after replacing every placeholder required by the chosen backend.
+real_external_model:
+  enabled: false
+  name: kermut
+  device: cpu
+  allow_device_fallback: false
+  batch_size: 8
+  backend_factory: fitness_agents.models.backends.kermut:create_backend
+  checkpoint: REPLACE_WITH_ABSOLUTE_CHECKPOINT_PATH
+  options:
+    feature_mode: precomputed
+    precomputed_features_path: REPLACE_WITH_ABSOLUTE_FEATURE_NPZ_PATH
+    conditional_probs_path: REPLACE_WITH_ABSOLUTE_CONDITIONAL_PROBS_NPY_PATH
+    coords_path: REPLACE_WITH_ABSOLUTE_COORDS_NPY_PATH
+    wild_type_sequence: VDGV
+    resource_positions: [39, 40, 41, 54]
+    positions_are_one_indexed: true
+    n_steps: 3
+    learning_rate: 0.05
+    progress_bar: false
+
+# Placeholder checkpoint locations for the other supported external model adapters.
+checkpoint_placeholders:
+  proteinnpt: REPLACE_WITH_ABSOLUTE_PROTEINNPT_CHECKPOINT_PATH
+  prosst: REPLACE_WITH_ABSOLUTE_PROSST_CHECKPOINT_PATH
+  pythia_ppi: REPLACE_WITH_ABSOLUTE_PYTHIA_PPI_CHECKPOINT_PATH
+

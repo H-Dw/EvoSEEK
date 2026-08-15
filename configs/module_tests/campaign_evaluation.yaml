@@ -1,0 +1,48 @@
+seed: 20260816
+output_dir: artifacts/module_tests/campaign_evaluation
+rounds: 1
+budget_per_round: 3
+candidate_limit: 28
+ucb_beta: 1.5
+diversity_lambda: 0.15
+modes:
+  - {name: random, acquisition: random, knowledge_enabled: false}
+  - {name: fitness_direct, acquisition: greedy, knowledge_enabled: false}
+  - {name: llm_agent, acquisition: greedy, knowledge_enabled: false}
+  - {name: knowledge_agent, acquisition: greedy, knowledge_enabled: true}
+model:
+  name: onehot_heterogeneous_ensemble
+  device: cpu
+  allow_device_fallback: false
+  batch_size: 16
+  feature_provider: gb1_onehot_pairwise
+  ridge_members: 3
+  extra_trees_estimators: 32
+  ridge_alpha: 5.0
+  bootstrap_fraction: 0.85
+  conformal_alpha: 0.10
+  include_gaussian_process: false
+knowledge:
+  physchem: true
+  conservation: true
+  structure: true
+  kg: true
+  soft_weight: 0.8
+  site_profiles:
+    "39": {wild_type: V, tolerated: [V, F, W, Y, L, I, M], structure_risk: 0.20}
+    "40": {wild_type: D, tolerated: [D, E, N, Q, H, W], structure_risk: 0.35}
+    "41": {wild_type: G, tolerated: [G, A, S, C, T], structure_risk: 0.75}
+    "54": {wild_type: V, tolerated: [V, I, L, M, A, F], structure_risk: 0.30}
+critic:
+  enabled: true
+  mode: rule
+  provider: mock
+  model: null
+  max_revision_attempts: 1
+  max_model_retries: 0
+  on_reject: abort_round
+  on_exhausted: abort_round
+  fallback_policy: rule
+  profile: scientific_v1
+  min_batch_distance: 1
+

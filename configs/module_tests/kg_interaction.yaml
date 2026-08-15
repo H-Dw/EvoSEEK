@@ -1,0 +1,15 @@
+output_dir: artifacts/module_tests/kg_interaction
+run_id: module-test-kg-interaction
+round_id: 1
+max_rows: 4
+interaction:
+  enabled_operators: [hypothesis_context, explain_variant, compare_variants]
+  max_tool_calls: 4
+  use_counterevidence: true
+  stop_when_sufficient: false
+  read_only: false
+sufficiency:
+  min_fact_count: 1
+  min_supporting_paths: 0
+  require_counterevidence: false
+

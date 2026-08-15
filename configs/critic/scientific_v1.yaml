@@ -1,0 +1,16 @@
+enabled: true
+mode: rule
+provider: mock
+model: null
+temperature: 0.0
+max_revision_attempts: 2
+max_model_retries: 2
+on_reject: abort_round
+on_exhausted: abort_round
+fallback_policy: rule
+require_counterevidence_search: false
+rationale_visibility: structured_claims_only
+profile: scientific_v1
+ood_warning_threshold: null
+model_disagreement_threshold: null
+min_batch_distance: 1

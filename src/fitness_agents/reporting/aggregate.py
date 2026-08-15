@@ -14,12 +14,18 @@ def aggregate_runs(summaries: Sequence[dict[str, Any]], output_dir: str | Path) 
     rows = []
     for summary in summaries:
         last_round = summary["round_metrics"][-1]
+        data_source = summary.get("data_source", {})
         rows.append(
             {
                 "run_id": summary["run_id"],
                 "mode": summary["mode"],
                 "seed": summary["seed"],
                 "queries_used": summary["queries_used"],
+                "split_strategy": data_source.get("strategy"),
+                "protocol_version": data_source.get("protocol_version"),
+                "fold_index": data_source.get("fold_index"),
+                "manifest_sha256": data_source.get("manifest_sha256"),
+                "assignment_sha256": data_source.get("assignment_sha256"),
                 "best_seen_fitness": last_round["best_seen_fitness"],
                 "last_batch_mean_fitness": last_round["batch_mean_fitness"],
                 "mean_selected_model_rank_fraction": last_round[
@@ -61,4 +67,3 @@ def write_science_markdown(report: dict[str, Any], path: str | Path) -> Path:
     lines.extend(f"- `{name}`: `{path}`" for name, path in report["run_dirs"].items())
     target.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return target
-

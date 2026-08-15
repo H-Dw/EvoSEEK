@@ -20,6 +20,11 @@ dependencies = [
 
 [project.optional-dependencies]
 llm = ["openai>=1.40,<3"]
+kermut = [
+  "torch>=2.2,<3",
+  "gpytorch>=1.11,<2",
+  "fair-esm>=2.0,<3",
+]
 dev = ["pytest>=8,<9", "pytest-cov>=5,<7", "ruff>=0.6,<1"]
 
 [project.scripts]
@@ -30,6 +35,15 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"fitness_agents.models.backends" = ["KERMUT_LICENSE.txt"]
+"fitness_agents.agents" = [
+  "critic_profiles/scientific_v1/*.md",
+  "critic_profiles/scientific_v1/*.yaml",
+  "critic_profiles/scientific_v1/*.json",
+  "critic_profiles/scientific_v1/*.jsonl",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -43,4 +57,3 @@ markers = [
 [tool.ruff]
 line-length = 100
 target-version = "py310"
-

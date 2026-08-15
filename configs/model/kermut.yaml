@@ -1,0 +1,31 @@
+# Real Kermut backend using the official composite-kernel GP implementation.
+name: kermut
+device: cpu
+allow_device_fallback: false
+batch_size: 8
+backend_factory: fitness_agents.models.backends.kermut:create_backend
+checkpoint: null  # Optional local esm2_t33_650M_UR50D.pt; null uses fair-esm loader.
+options:
+  wild_type_sequence: VDGV  # GB1 four-site WT; replace or clear for another assay.
+  feature_mode: live_esm2  # Or precomputed, with precomputed_features_path below.
+  precomputed_features_path: null
+  esm_model: esm2_t33_650M_UR50D
+  esm_representation_layer: 33
+  cache_dir: artifacts/model_cache/kermut_esm2
+  # ProteinMPNN conditional probabilities (L x 20) and C-alpha coordinates (L x 3).
+  # Site-only arrays are accepted when resource_positions is supplied.
+  conditional_probs_path: null
+  coords_path: null
+  resource_positions: [39, 40, 41, 54]
+  positions_are_one_indexed: true
+  composition: weighted_sum
+  noise_prior_scale: 0.1
+  h_lengthscale: 1.0
+  d_lengthscale: 1.0
+  p_lengthscale: 1.0
+  learning_rate: 0.1
+  n_steps: 150
+  progress_bar: false
+  use_zero_shot_mean: true
+  use_validation_conformal: false
+  conformal_alpha: 0.10

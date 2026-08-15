@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
-from fitness_agents.contracts.interfaces import LLMClient
+from fitness_agents.contracts.interfaces import KnowledgeGraphTool, LLMClient
 from fitness_agents.contracts.schemas import (
     CampaignState,
     Evidence,
@@ -40,8 +40,15 @@ def assert_sanitized(value: Any, path: str = "context") -> None:
 class ScientistAgent:
     """Hypothesis/critic layer that never receives hidden oracle labels."""
 
-    def __init__(self, client: LLMClient) -> None:
+    def __init__(
+        self,
+        client: LLMClient,
+        *,
+        knowledge_graph: KnowledgeGraphTool | None = None,
+    ) -> None:
         self.client = client
+        self.knowledge_graph = knowledge_graph
+        self.last_knowledge_query_id: str | None = None
 
     @staticmethod
     def sanitized_context(
@@ -68,6 +75,20 @@ class ScientistAgent:
             "previous_hypothesis_id": (
                 state.hypotheses[-1].hypothesis_id if state.hypotheses else None
             ),
+            "previous_hypothesis_assessment": (
+                {
+                    "hypothesis_id": state.hypothesis_assessments[-1].hypothesis_id,
+                    "status": state.hypothesis_assessments[-1].status.value,
+                    "decisive_criterion_ids": list(
+                        state.hypothesis_assessments[-1].decisive_criterion_ids
+                    ),
+                    "unresolved_criterion_ids": list(
+                        state.hypothesis_assessments[-1].unresolved_criterion_ids
+                    ),
+                }
+                if state.hypothesis_assessments
+                else None
+            ),
         }
         assert_sanitized(context)
         return context
@@ -80,11 +101,27 @@ class ScientistAgent:
         evidence: Sequence[Evidence],
     ) -> Hypothesis:
         context = self.sanitized_context(state, observed_variants, observations)
+        if self.knowledge_graph is not None:
+            graph_context = self.knowledge_graph.hypothesis_context(round_id=state.round_id)
+            assert_sanitized(graph_context, "context.knowledge_graph")
+            context["knowledge_graph"] = graph_context
+            self.last_knowledge_query_id = str(graph_context["query_id"])
+        else:
+            self.last_knowledge_query_id = None
         return self.client.generate_hypothesis(
             sanitized_context=context,
             evidence=evidence,
             output_schema=HYPOTHESIS_SCHEMA,
         )
+
+    def inspect_variant(self, variant_id: str, *, round_id: int) -> dict[str, Any]:
+        """Expose the same safe KG interface to future critic/designer agent steps."""
+        if self.knowledge_graph is None:
+            raise RuntimeError("Knowledge graph tool is not configured for this agent")
+        context = self.knowledge_graph.explain_variant(variant_id, round_id=round_id)
+        assert_sanitized(context, "context.knowledge_graph_variant")
+        self.last_knowledge_query_id = str(context["query_id"])
+        return context
 
     @staticmethod
     def critique(
@@ -103,4 +140,3 @@ class ScientistAgent:
             f"evidence_channels={evidence_channels}; interventions={intervention_text}. "
             "Prediction is not a measurement and the hypothesis is tested only after oracle reveal."
         )
-

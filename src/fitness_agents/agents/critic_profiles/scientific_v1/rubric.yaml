@@ -1,0 +1,24 @@
+profile_id: scientific_v1
+version: 1.0.0
+language: en
+review_order:
+  - deterministic_conflicts
+  - evidence_audit
+  - sequence_and_epistasis_risk
+  - batch_design
+  - falsification_readiness
+hard_rules:
+  unresolved_hard_conflict: REJECT
+  invented_reference: REJECT
+  missing_executable_falsification: REVISE
+  approve_with_required_changes: INVALID
+soft_risks:
+  - high_ood
+  - model_disagreement
+  - evidence_polarity_conflict
+  - low_batch_diversity
+  - missing_counterevidence_search
+confidence_policy:
+  minimum: 0.0
+  maximum: 1.0
+  may_override_hard_rules: false

@@ -46,8 +46,11 @@ def test_unselected_hidden_label_never_appears_in_trace(config_factory):
     summary = run_campaign(config)
     trace = (config.output_root / summary["run_id"] / "trace.jsonl").read_text()
     assert "98765.4321" not in trace
+    graph_queries = (
+        config.output_root / summary["run_id"] / "knowledge_graph_queries.json"
+    ).read_text()
+    assert "98765.4321" not in graph_queries
     config_record = json.loads(
         (config.output_root / summary["run_id"] / "config.json").read_text()
     )
     assert "oracle_data_path" not in config_record
-

@@ -1,5 +1,16 @@
 from .metrics import loop_round_metrics, prediction_metrics
+from .hypotheses import (
+    DeterministicHypothesisEvaluator,
+    preregister_batch_median_test,
+    verify_falsification_spec,
+)
 from .scientific_thinking import ScientificThinkingEvaluator
 
-__all__ = ["ScientificThinkingEvaluator", "loop_round_metrics", "prediction_metrics"]
-
+__all__ = [
+    "DeterministicHypothesisEvaluator",
+    "ScientificThinkingEvaluator",
+    "loop_round_metrics",
+    "prediction_metrics",
+    "preregister_batch_median_test",
+    "verify_falsification_spec",
+]

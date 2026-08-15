@@ -1,0 +1,12 @@
+# CPU is safe for reproducibility; use cuda:0 for practical full-landscape scoring.
+name: prosst
+device: cpu
+allow_device_fallback: false
+batch_size: 8
+backend_factory: null  # e.g. fitness_agents_prosst.backend:create_backend
+checkpoint: null
+options:
+  mode: zero_shot
+  scoring: masked_marginal
+  wild_type_normalization: true
+  structure_tokenizer_checkpoint: null

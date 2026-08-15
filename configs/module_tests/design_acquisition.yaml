@@ -1,0 +1,12 @@
+seed: 20260816
+output_dir: artifacts/module_tests/design_acquisition
+candidate_limit: 6
+batch_budget: 3
+ucb_beta: 2.0
+knowledge_weight: 0.8
+diversity_lambda: 0.35
+conflict_thresholds:
+  ood_warning: 0.6
+  model_disagreement: 0.25
+  min_batch_distance: 2
+

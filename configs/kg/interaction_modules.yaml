@@ -1,0 +1,38 @@
+# Opt-in profiles for the optional kg_interaction package.
+# These settings do not alter the current orchestrator unless explicitly loaded.
+profiles:
+  one_shot_context:
+    enabled_operators: [hypothesis_context]
+    max_tool_calls: 1
+    use_counterevidence: false
+    stop_when_sufficient: true
+    read_only: true
+
+  bounded_agentic:
+    enabled_operators: [hypothesis_context, explain_variant, compare_variants]
+    max_tool_calls: 3
+    use_counterevidence: true
+    stop_when_sufficient: true
+    read_only: true
+
+  no_counterevidence:
+    enabled_operators: [hypothesis_context, explain_variant, compare_variants]
+    max_tool_calls: 3
+    use_counterevidence: false
+    stop_when_sufficient: true
+    read_only: true
+
+  query_only_no_early_stop:
+    enabled_operators: [hypothesis_context, explain_variant, compare_variants]
+    max_tool_calls: 3
+    use_counterevidence: true
+    stop_when_sufficient: false
+    read_only: true
+
+  proposal_writeback:
+    enabled_operators: [hypothesis_context, explain_variant, compare_variants]
+    max_tool_calls: 3
+    use_counterevidence: true
+    stop_when_sufficient: true
+    read_only: false
+

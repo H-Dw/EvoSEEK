@@ -1,0 +1,20 @@
+# Copy this file to flip2_pdz3.yaml and set source plus the verified component references.
+# The split builder intentionally refuses to infer WT/reference sequences from target data.
+dataset_id: FLIP2_PDZ3
+assay_id: PDZ3_CRIPT_binding
+adapter: paired_sequence
+source: ../../../data/raw/flip2/pdz3/single-to-double.csv
+sequence_column: sequence
+target_column: target
+component_separator: ":"
+default_backbone_id: PDZ3_CRIPT_WT
+dataset_scope: flip2_curated_single_to_double_release
+target_conflict_tolerance: 0.0
+replicate_policy: mean
+source_url: https://flip.protein.properties/
+components:
+  - component_id: PDZ3
+    reference: REPLACE_WITH_VERIFIED_PDZ3_REFERENCE
+  - component_id: CRIPT
+    reference: REPLACE_WITH_VERIFIED_CRIPT_REFERENCE
+
