@@ -96,6 +96,34 @@ class KGInteractionController:
                 raise ValueError(
                     f"Step {step.step_id!r} requests out-of-scope variants: {sorted(outside)}"
                 )
+        if "limit" in step.arguments:
+            limit = int(step.arguments["limit"])
+            if limit < 1 or limit > context.max_rows:
+                raise ValueError(
+                    f"Step {step.step_id!r} limit must be between 1 and {context.max_rows}"
+                )
+        if len(step.arguments.get("variant_ids", ())) > context.max_rows:
+            raise ValueError(
+                f"Step {step.step_id!r} requests more than {context.max_rows} variants"
+            )
+
+    @staticmethod
+    def _validate_pack(pack: EvidencePack, context: KGQueryContext) -> None:
+        for field_name in (
+            "facts",
+            "predictions",
+            "evidence",
+            "supporting_paths",
+            "counterevidence",
+            "directional_signals",
+            "caveats",
+            "provenance",
+        ):
+            if len(getattr(pack, field_name)) > context.max_rows:
+                raise ValueError(
+                    f"Operator {pack.operator!r} returned more than {context.max_rows} "
+                    f"rows in {field_name}"
+                )
 
     def execute(self, plan: KGQueryPlan, context: KGQueryContext) -> InteractionResult:
         packs: list[EvidencePack] = []
@@ -126,6 +154,7 @@ class KGInteractionController:
                     f"Operator {step.operator!r} returned as_of_round={pack.as_of_round}, "
                     f"expected {context.round_id}"
                 )
+            self._validate_pack(pack, context)
             packs.append(pack)
             executed.append(step.step_id)
             if self.config.stop_when_sufficient and self.sufficiency.is_sufficient(tuple(packs)):

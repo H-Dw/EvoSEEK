@@ -20,6 +20,7 @@ from .operators import (
     HypothesisContextOperator,
     QueryOperator,
 )
+from .sdk_tools import KGToolSession
 from .writeback import (
     InMemoryChangeWriter,
     ProposalGateway,
@@ -42,6 +43,7 @@ __all__ = [
     "KGQueryContext",
     "KGQueryPlan",
     "KGQueryStep",
+    "KGToolSession",
     "KGUpdateResult",
     "ProposalGateway",
     "QueryIntent",
