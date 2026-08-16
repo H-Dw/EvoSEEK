@@ -50,6 +50,69 @@ def test_each_baseline_completes_with_global_ranks(
         assert state["hypotheses"][0]["evidence_ids"]
 
 
+@pytest.mark.integration
+def test_agent_selection_precedes_dry_validation_and_writes_full_kg_outputs(config_factory):
+    config = config_factory(
+        mode="knowledge_agent",
+        acquisition="greedy",
+        knowledge_enabled=True,
+        rounds=1,
+        budget_per_round=2,
+        candidate_limit=24,
+        run_label="validation-after-design",
+    )
+    summary = run_campaign(config)
+    run_dir = config.output_root / summary["run_id"]
+    events = [
+        json.loads(line)
+        for line in (run_dir / "trace.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    event_types = [item["event_type"] for item in events]
+    assert event_types.index("batch_initial_selected") < event_types.index(
+        "validation_model_fit_started"
+    )
+    interaction = json.loads((run_dir / "round_01/kg_interaction.json").read_text())
+    assert [item["operator"] for item in interaction["packs"]] == [
+        "hypothesis_context",
+        "explain_variant",
+        "compare_variants",
+    ]
+    matrix = json.loads((run_dir / "round_01/validation_matrix.json").read_text())
+    assert {item["validation_type"] for item in matrix} == {"wet", "dry"}
+    assert min(item["base_weight"] for item in matrix if item["validation_type"] == "wet") > max(
+        item["base_weight"] for item in matrix if item["validation_type"] == "dry"
+    )
+    assert (run_dir / "structured_kg.sqlite").is_file()
+    assert (run_dir / "wild_type.json").is_file()
+    assert (run_dir / "round_01/top_k.csv").is_file()
+    assert (run_dir / "fitness_progress.svg").is_file()
+    assert (run_dir / "reasoning.md").is_file()
+    assert summary["selection_driver"] == "agent_uq"
+    assert summary["fitness_predictors_used_for_generation"] is False
+
+
+@pytest.mark.integration
+def test_disabling_dry_validation_does_not_relabel_agent_utility_as_dry(config_factory):
+    config = config_factory(
+        mode="knowledge_agent",
+        acquisition="greedy",
+        knowledge_enabled=True,
+        rounds=1,
+        budget_per_round=2,
+        candidate_limit=20,
+        run_label="wet-only-validation",
+    )
+    config = replace(config, validation=replace(config.validation, enabled=False))
+
+    summary = run_campaign(config)
+    run_dir = config.output_root / summary["run_id"]
+    matrix = json.loads((run_dir / "round_01/validation_matrix.json").read_text())
+    state = json.loads((run_dir / "state.json").read_text())
+
+    assert {item["validation_type"] for item in matrix} == {"wet"}
+    assert all(not item["validation_model_versions"] for item in state["selections"])
+
+
 def _canonical_from_legacy_fixture(synthetic_benchmark) -> CanonicalDataset:
     public = pd.read_csv(synthetic_benchmark["public"]).drop(columns="split_role")
     oracle = pd.read_csv(synthetic_benchmark["oracle"])

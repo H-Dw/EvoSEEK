@@ -12,13 +12,17 @@ import numpy as np
 from fitness_agents.acquisition import create_policy
 from fitness_agents.agents.critic import CriticAgent, OpenAICriticClient, RuleBasedCriticClient
 from fitness_agents.agents.llm import create_llm_client
+from fitness_agents.agents.rethink import create_rethink_client
 from fitness_agents.agents.scientist import ScientistAgent
 from fitness_agents.config import ExperimentConfig
 from fitness_agents.contracts.schemas import (
     CampaignPhase,
     CampaignState,
+    DesignScore,
     Prediction,
     SelectionRecord,
+    ValidationRecord,
+    Variant,
 )
 from fitness_agents.data import (
     load_campaign_fold_bundle,
@@ -31,9 +35,22 @@ from fitness_agents.evaluation.hypotheses import (
     preregister_batch_median_test,
 )
 from fitness_agents.evaluation.metrics import loop_round_metrics, prediction_metrics
+from fitness_agents.kg_interaction import (
+    CompareVariantsOperator,
+    ExplainVariantOperator,
+    HypothesisContextOperator,
+    InteractionAblationConfig,
+    KGInteractionController,
+    KGQueryContext,
+    KGQueryPlan,
+    KGQueryStep,
+    QueryIntent,
+)
 from fitness_agents.knowledge import KnowledgeEngine
 from fitness_agents.models import create_predictor
-from fitness_agents.mutation import create_candidate_generator
+from fitness_agents.mutation import AgentUncertaintySelector, create_candidate_generator
+from fitness_agents.plugin_registry import PluginRegistry
+from fitness_agents.reporting import write_campaign_outputs
 from fitness_agents.utils import JsonArtifactWriter, bind_progress, reset_progress, seed_everything
 from fitness_agents.validation.batch import ApprovalGateway, BatchHardValidator, build_draft_batch
 
@@ -61,6 +78,17 @@ def _shuffle_prediction_scores(
     means = np.asarray([prediction.fitness_mean for prediction in predictions])
     shuffled = rng.permutation(means)
     return [replace(prediction, fitness_mean=float(shuffled[index])) for index, prediction in enumerate(predictions)]
+
+
+def _validation_record_id(
+    run_id: str,
+    round_id: int,
+    variant_id: str,
+    validation_type: str,
+    source_id: str,
+) -> str:
+    payload = f"{run_id}|{round_id}|{variant_id}|{validation_type}|{source_id}"
+    return f"validation:{hashlib.sha256(payload.encode()).hexdigest()[:20]}"
 
 
 class CampaignRunner:
@@ -161,6 +189,9 @@ class CampaignRunner:
             config.knowledge,
             graph_path=self.writer.run_dir / "knowledge_graph.sqlite",
             assay_id=config.task.assay_id,
+            protein_id=config.task.protein_id,
+            validation_config=config.validation,
+            structured_graph_path=self.writer.run_dir / "structured_kg.sqlite",
         )
         graph_tool = (
             self.knowledge.agent_tool()
@@ -179,6 +210,32 @@ class CampaignRunner:
                 thinking=self.config.llm.thinking,
             ),
             knowledge_graph=graph_tool,
+        )
+        self.kg_interaction = None
+        if graph_tool is not None and config.kg_interaction.enabled:
+            operators = PluginRegistry("query_operator")
+            operators.register("hypothesis_context", HypothesisContextOperator(graph_tool))
+            operators.register("explain_variant", ExplainVariantOperator(graph_tool))
+            operators.register("compare_variants", CompareVariantsOperator(graph_tool))
+            self.kg_interaction = KGInteractionController(
+                operators,
+                config=InteractionAblationConfig(
+                    enabled_operators=frozenset(config.kg_interaction.enabled_operators),
+                    max_tool_calls=config.kg_interaction.max_tool_calls,
+                    use_counterevidence=config.kg_interaction.use_counterevidence,
+                    stop_when_sufficient=config.kg_interaction.stop_when_sufficient,
+                    read_only=True,
+                ),
+            )
+        self.rethink_client = create_rethink_client(
+            self.config.llm.provider,
+            model=self.config.llm.model,
+            base_url=self.config.llm.base_url,
+            api_key=self.config.llm.api_key,
+            temperature=self.config.llm.temperature,
+            max_tokens=self.config.llm.max_tokens,
+            reasoning_effort=self.config.llm.reasoning_effort,
+            thinking=self.config.llm.thinking,
         )
         if critic_agent is None:
             rule_critic = RuleBasedCriticClient()
@@ -212,6 +269,7 @@ class CampaignRunner:
         self.hypothesis_evaluator = DeterministicHypothesisEvaluator()
         self._progress_token = bind_progress(self.writer)
         self.generator = create_candidate_generator(config.mode)
+        self.agent_selector = AgentUncertaintySelector(config.generation)
         knowledge_weight = config.knowledge.soft_weight if config.knowledge_enabled else 0.0
         self.policy = create_policy(
             config.acquisition,
@@ -219,6 +277,78 @@ class CampaignRunner:
             knowledge_weight=knowledge_weight,
         )
         self.state = CampaignState(run_id=self.run_id, mode=config.mode, seed=config.seed)
+        self.validation_records: list[ValidationRecord] = []
+
+    def _selection_driver(self) -> str:
+        configured = self.config.generation.selection_driver
+        if configured != "auto":
+            return configured
+        if self.config.mode == "fitness_direct":
+            return "predictor"
+        if self.config.mode == "random":
+            return "random"
+        return "agent_uq"
+
+    def _create_and_fit_predictor(self, model_config: Any, observed_variants: list[Any], seed: int):
+        predictor = self.predictor_factory(model_config, seed=seed)
+        self._fit_predictor(predictor, observed_variants)
+        return predictor
+
+    def _run_kg_interaction(self, *, round_id: int, observed_variants: list[Any]):
+        if self.kg_interaction is None:
+            return None
+        observation_by_id = {item.variant_id: item for item in self.state.observed}
+        ranked = sorted(
+            observed_variants,
+            key=lambda item: (
+                observation_by_id[item.variant_id].fitness,
+                item.variant_id,
+            ),
+            reverse=True,
+        )
+        representative_ids = [item.variant_id for item in ranked[:2]]
+        steps = [
+            KGQueryStep(
+                "context",
+                "hypothesis_context",
+                QueryIntent.CONTEXT,
+                {"limit": self.config.kg_interaction.max_rows},
+            )
+        ]
+        if representative_ids:
+            steps.append(
+                KGQueryStep(
+                    "explain",
+                    "explain_variant",
+                    QueryIntent.EXPLAIN,
+                    {"variant_id": representative_ids[0]},
+                    ("context",),
+                )
+            )
+        if len(representative_ids) >= 2:
+            steps.append(
+                KGQueryStep(
+                    "compare",
+                    "compare_variants",
+                    QueryIntent.COMPARE,
+                    {"variant_ids": representative_ids},
+                    ("context",),
+                )
+            )
+        return self.kg_interaction.execute(
+            KGQueryPlan(
+                plan_id=f"kgplan:{self.run_id}:r{round_id}",
+                objective="Ground mutation hypotheses in visible evidence and counterevidence.",
+                steps=tuple(steps),
+                max_tool_calls=self.config.kg_interaction.max_tool_calls,
+            ),
+            KGQueryContext(
+                run_id=self.run_id,
+                round_id=round_id,
+                allowed_variant_ids=frozenset(item.variant_id for item in observed_variants),
+                max_rows=self.config.kg_interaction.max_rows,
+            ),
+        )
 
     def _config_record(self) -> dict[str, Any]:
         return {
@@ -266,6 +396,40 @@ class CampaignRunner:
             "score_shuffle": self.config.score_shuffle,
             "evidence_deletion": self.config.evidence_deletion,
             "evidence_prefilter_limit": self.config.evidence_prefilter_limit,
+            "generation": {
+                "selection_driver": self._selection_driver(),
+                "use_fitness_predictors": self.config.generation.use_fitness_predictors,
+                "predictor_models": [item.name for item in self.config.generation.predictor_models],
+                "hypothesis_weight": self.config.generation.hypothesis_weight,
+                "evidence_weight": self.config.generation.evidence_weight,
+                "prior_weight": self.config.generation.prior_weight,
+                "uncertainty_beta": self.config.generation.uncertainty_beta,
+                "predictor_weight": self.config.generation.predictor_weight,
+                "gp_length_scale": self.config.generation.gp_length_scale,
+            },
+            "validation": {
+                "enabled": self.config.validation.enabled,
+                "primary_model": self.config.model.name,
+                "additional_models": [item.name for item in self.config.validation.predictor_models],
+                "wet_weight": self.config.validation.wet_weight,
+                "dry_weight_cap": self.config.validation.dry_weight_cap,
+                "recency_decay": self.config.validation.recency_decay,
+                "rethink_enabled": self.config.validation.rethink_enabled,
+            },
+            "kg_interaction": {
+                "enabled": self.kg_interaction is not None,
+                "enabled_operators": list(self.config.kg_interaction.enabled_operators),
+                "max_tool_calls": self.config.kg_interaction.max_tool_calls,
+                "stop_when_sufficient": self.config.kg_interaction.stop_when_sufficient,
+            },
+            "evaluation": {
+                "metrics": list(self.config.evaluation.metrics),
+                "top_k": self.config.evaluation.top_k,
+            },
+            "output": {
+                "artifacts": list(self.config.output.artifacts),
+                "top_k": self.config.output.top_k,
+            },
             "model": self.config.model.name,
             "model_device": self.config.model.device,
             "model_allow_device_fallback": self.config.model.allow_device_fallback,
@@ -344,6 +508,20 @@ class CampaignRunner:
         self.state.revealed_variant_ids = {item.variant_id for item in self.state.observed}
         self.knowledge.update(observed_variants, self.state.observed)
         remaining = list(self.bundle.oracle_pool)
+        selection_driver = self._selection_driver()
+        wild_type = next(
+            (item for item in observed_variants if item.mutation_count == 0),
+            None,
+        )
+        if wild_type is None:
+            wild_type = Variant(
+                variant_id=f"configured-wt:{self.config.task.protein_id}",
+                variant=self.config.task.wild_type_sites,
+                sequence=self.config.task.wild_type_sites,
+                mutation_notation="WT",
+                mutation_count=0,
+                split_role="configured_reference",
+            )
         round_metrics: list[dict[str, float]] = []
         rounds_aborted = 0
         self.writer.write_json("config.json", self._config_record())
@@ -381,22 +559,27 @@ class CampaignRunner:
                 n_remaining=len(remaining),
                 rounds=self.config.rounds,
             )
-            self._progress(
-                "model_fit_started",
-                f"round {round_id}/{self.config.rounds} fitting {self.config.model.name}",
-                phase=CampaignPhase.MODEL_FIT,
-                n_train=len(observed_variants),
-                model=self.config.model.name,
-                device=self.config.model.device,
-            )
-            predictor = self.predictor_factory(self.config.model, seed=self.config.seed + round_id)
-            self._fit_predictor(predictor, observed_variants)
-            self._progress(
-                "model_fit_completed",
-                f"round {round_id}/{self.config.rounds} model fit complete",
-                n_train=len(observed_variants),
-                model=self.config.model.name,
-            )
+            predictor = None
+            if selection_driver == "predictor":
+                self._progress(
+                    "generation_model_fit_started",
+                    f"round {round_id}/{self.config.rounds} fitting generation predictor {self.config.model.name}",
+                    phase=CampaignPhase.MODEL_FIT,
+                    n_train=len(observed_variants),
+                    model=self.config.model.name,
+                    device=self.config.model.device,
+                )
+                predictor = self._create_and_fit_predictor(
+                    self.config.model,
+                    observed_variants,
+                    self.config.seed + round_id,
+                )
+                self._progress(
+                    "generation_model_fit_completed",
+                    f"round {round_id}/{self.config.rounds} generation predictor fit complete",
+                    n_train=len(observed_variants),
+                    model=self.config.model.name,
+                )
 
             evidence: dict[str, list[Any]] = {}
             if self.config.knowledge_enabled:
@@ -431,6 +614,55 @@ class CampaignRunner:
                     n_candidates=len(evidence_targets),
                 )
 
+            structured_variants = list(
+                {item.variant_id: item for item in (*observed_variants, *remaining)}.values()
+            )
+            structured_result = self.knowledge.sync_structured_kg(
+                run_id=self.run_id,
+                round_id=round_id,
+                variants=structured_variants,
+                observations=self.state.observed,
+                evidence=_flatten_evidence(evidence, limit=max(len(structured_variants) * 4, 120)),
+                hypotheses=self.state.hypotheses,
+            )
+            self.writer.write_json(
+                f"round_{round_id:02d}/structured_kg_pre_design.json",
+                {
+                    "report": structured_result.report,
+                    "entity_count": len(structured_result.snapshot.entities),
+                    "relation_count": len(structured_result.snapshot.relations),
+                },
+            )
+            self.writer.event(
+                "structured_kg_built",
+                {
+                    "round_id": round_id,
+                    "stage": "pre_design",
+                    "entity_count": len(structured_result.snapshot.entities),
+                    "relation_count": len(structured_result.snapshot.relations),
+                },
+            )
+            interaction_result = self._run_kg_interaction(
+                round_id=round_id,
+                observed_variants=observed_variants,
+            )
+            if interaction_result is not None:
+                self.writer.write_json(
+                    f"round_{round_id:02d}/kg_interaction.json",
+                    interaction_result,
+                )
+                self.writer.event(
+                    "kg_interaction_completed",
+                    {
+                        "round_id": round_id,
+                        "operators": [pack.operator for pack in interaction_result.packs],
+                        "query_ids": [pack.query_id for pack in interaction_result.packs],
+                        "executed_steps": interaction_result.executed_steps,
+                        "skipped_steps": interaction_result.skipped_steps,
+                        "stop_reason": interaction_result.stop_reason,
+                    },
+                )
+
             hypothesis = None
             if self.config.mode in {"llm_agent", "knowledge_agent"}:
                 self._progress(
@@ -444,6 +676,7 @@ class CampaignRunner:
                     observed_variants,
                     self.state.observed,
                     _flatten_evidence(evidence),
+                    kg_interaction=interaction_result,
                 )
                 self.state.hypotheses.append(hypothesis)
                 self.knowledge.graph.add_hypothesis(
@@ -458,14 +691,10 @@ class CampaignRunner:
                     f"round {round_id}/{self.config.rounds} hypothesis {hypothesis.hypothesis_id}",
                     hypothesis_id=hypothesis.hypothesis_id,
                 )
-                if self.agent.last_knowledge_query_id is not None:
+                for query_id in self.agent.last_knowledge_query_ids:
                     self.writer.event(
                         "knowledge_graph_queried",
-                        {
-                            "round_id": round_id,
-                            "query_id": self.agent.last_knowledge_query_id,
-                            "operation": "hypothesis_context",
-                        },
+                        {"round_id": round_id, "query_id": query_id},
                     )
 
             eligible = self.generator.generate(
@@ -483,31 +712,223 @@ class CampaignRunner:
                 phase=CampaignPhase.PROPOSED,
                 n_candidates=len(eligible),
             )
-            score_full_remaining = self.config.candidate_limit <= 0
+            score_full_remaining = (
+                selection_driver == "predictor" and self.config.candidate_limit <= 0
+            )
             predict_targets = remaining if score_full_remaining else eligible
-            self._progress(
-                "predict_started",
-                (
-                    f"round {round_id}/{self.config.rounds} predicting {len(predict_targets)} "
-                    f"{'remaining' if score_full_remaining else 'candidate-pool'} variants"
-                ),
-                phase=CampaignPhase.PREDICTING,
-                n_candidates=len(predict_targets),
-                model=self.config.model.name,
+            expected_batch_size = min(self.config.budget_per_round, len(eligible))
+            knowledge_scores = (
+                self.knowledge.scores(evidence) if self.config.knowledge_enabled else {}
             )
-            original_predictions = predictor.predict(predict_targets)
+            design_scores: list[DesignScore] = []
+            generation_prediction_sets: list[list[Prediction]] = []
+
+            if selection_driver == "agent_uq":
+                if self.config.generation.use_fitness_predictors:
+                    for model_index, model_config in enumerate(
+                        self.config.generation.predictor_models
+                    ):
+                        generation_predictor = self._create_and_fit_predictor(
+                            model_config,
+                            observed_variants,
+                            self.config.seed + round_id * 101 + model_index,
+                        )
+                        generation_prediction_sets.append(
+                            generation_predictor.predict(eligible)
+                        )
+                prior_scores = self.knowledge.validation_prior_scores(
+                    eligible,
+                    round_id=round_id,
+                )
+                design_scores = self.agent_selector.score(
+                    eligible,
+                    observed_variants=observed_variants,
+                    hypothesis=hypothesis,
+                    hypotheses=self.state.hypotheses,
+                    evidence=evidence,
+                    prior_scores=prior_scores,
+                    predictor_predictions=generation_prediction_sets,
+                )
+                design_predictions = self.agent_selector.as_predictions(design_scores)
+                if self.config.score_shuffle:
+                    design_predictions = _shuffle_prediction_scores(
+                        design_predictions, self.rng
+                    )
+                all_scores = {
+                    item.variant_id: item.fitness_mean for item in design_predictions
+                }
+                working_by_id = {
+                    item.variant_id: item for item in design_predictions
+                }
+            elif selection_driver == "random":
+                design_scores = [
+                    DesignScore(
+                        item.variant_id,
+                        0.0,
+                        1.0,
+                        0.0,
+                        0.0,
+                        0.0,
+                        0.0,
+                        "random",
+                        "Random baseline selection; no fitness or KG utility used.",
+                    )
+                    for item in eligible
+                ]
+                design_predictions = self.agent_selector.as_predictions(design_scores)
+                all_scores = self.policy.score(design_predictions, {}, self.rng)
+                working_by_id = {
+                    item.variant_id: item for item in design_predictions
+                }
+            else:
+                if predictor is None:
+                    raise AssertionError("Predictor selection driver has no fitted predictor")
+                self._progress(
+                    "generation_predict_started",
+                    f"round {round_id}/{self.config.rounds} predictor scoring {len(predict_targets)} candidates",
+                    phase=CampaignPhase.PREDICTING,
+                    n_candidates=len(predict_targets),
+                    model=self.config.model.name,
+                )
+                generation_predictions = predictor.predict(predict_targets)
+                working_predictions = (
+                    _shuffle_prediction_scores(generation_predictions, self.rng)
+                    if self.config.score_shuffle
+                    else generation_predictions
+                )
+                all_scores = self.policy.score(
+                    working_predictions, knowledge_scores, self.rng
+                )
+                working_by_id = {
+                    item.variant_id: item for item in working_predictions
+                }
+                design_scores = [
+                    DesignScore(
+                        item.variant_id,
+                        all_scores[item.variant_id],
+                        item.fitness_std,
+                        0.0,
+                        knowledge_scores.get(item.variant_id, 0.0),
+                        0.0,
+                        item.fitness_mean,
+                        "predictor",
+                        f"Fitness-direct baseline using {item.model_version} and {self.policy.name} acquisition.",
+                    )
+                    for item in working_predictions
+                ]
+
+            design_score_by_id = {item.variant_id: item for item in design_scores}
+            self.writer.write_json(
+                f"round_{round_id:02d}/design_scores.json", design_scores
+            )
             self._progress(
-                "predict_completed",
-                f"round {round_id}/{self.config.rounds} predictions ready",
+                "design_scored",
+                f"round {round_id}/{self.config.rounds} design utilities ready via {selection_driver}",
+                phase=CampaignPhase.DESIGN_SCORED,
+                n_candidates=len(eligible),
+            )
+            selected_ids = self.policy.select(
+                eligible,
+                [working_by_id[item.variant_id] for item in eligible],
+                all_scores,
+                expected_batch_size,
+                self.config.diversity_lambda,
+            )
+            if len(selected_ids) != min(self.config.budget_per_round, len(eligible)):
+                raise RuntimeError("Acquisition returned an incomplete batch")
+            self.writer.event(
+                "batch_initial_selected",
+                {
+                    "round_id": round_id,
+                    "selection_driver": selection_driver,
+                    "candidate_ids": selected_ids,
+                    "fitness_predictors_used_for_generation": (
+                        self.config.generation.use_fitness_predictors
+                        if selection_driver == "agent_uq"
+                        else selection_driver == "predictor"
+                    ),
+                },
+            )
+
+            validation_prediction_sets: list[list[Prediction]] = []
+            validation_predictors: list[Any] = []
+            validation_configs = (
+                (self.config.model, *self.config.validation.predictor_models)
+                if self.config.validation.enabled
+                else ()
+            )
+            if validation_configs:
+                self._progress(
+                    "model_fit_started",
+                    f"round {round_id}/{self.config.rounds} preparing dry validation models",
+                    phase=CampaignPhase.MODEL_FIT,
+                    n_train=len(observed_variants),
+                    model_count=len(validation_configs),
+                )
+            for model_index, model_config in enumerate(validation_configs):
+                if model_index == 0 and predictor is not None:
+                    validation_predictor = predictor
+                else:
+                    self._progress(
+                        "validation_model_fit_started",
+                        f"round {round_id}/{self.config.rounds} fitting dry validator {model_config.name}",
+                        phase=CampaignPhase.MODEL_FIT,
+                        n_train=len(observed_variants),
+                        model=model_config.name,
+                    )
+                    validation_predictor = self._create_and_fit_predictor(
+                        model_config,
+                        observed_variants,
+                        self.config.seed + round_id * 1009 + model_index,
+                    )
+                    self._progress(
+                        "validation_model_fit_completed",
+                        f"round {round_id}/{self.config.rounds} dry validator fit complete",
+                        model=model_config.name,
+                    )
+                validation_predictors.append(validation_predictor)
+            if validation_predictors:
+                self._progress(
+                    "model_fit_completed",
+                    f"round {round_id}/{self.config.rounds} dry validation models ready",
+                    n_train=len(observed_variants),
+                    model_count=len(validation_predictors),
+                )
+                self._progress(
+                    "predict_started",
+                    f"round {round_id}/{self.config.rounds} validating {len(predict_targets)} candidates",
+                    phase=CampaignPhase.PREDICTING,
+                    n_candidates=len(predict_targets),
+                    model_count=len(validation_predictors),
+                )
+                validation_prediction_sets = [
+                    validation_predictor.predict(predict_targets)
+                    for validation_predictor in validation_predictors
+                ]
+                self._progress(
+                    "predict_completed",
+                    f"round {round_id}/{self.config.rounds} dry validation predictions ready",
+                    n_candidates=len(predict_targets),
+                    model_count=len(validation_predictors),
+                )
+            if validation_prediction_sets:
+                original_predictions = validation_prediction_sets[0]
+            else:
+                original_predictions = [
+                    working_by_id[item.variant_id] for item in predict_targets
+                ]
+            prediction_by_id = {
+                item.variant_id: item for item in original_predictions
+            }
+            self._progress(
+                "dry_validation_completed",
+                f"round {round_id}/{self.config.rounds} dry validation ready",
+                phase=CampaignPhase.DRY_VALIDATED,
                 n_candidates=len(original_predictions),
+                model_versions=",".join(
+                    sorted({item.model_version for item in original_predictions})
+                ),
             )
-            working_predictions = (
-                _shuffle_prediction_scores(original_predictions, self.rng)
-                if self.config.score_shuffle
-                else original_predictions
-            )
-            prediction_by_id = {item.variant_id: item for item in original_predictions}
-            working_by_id = {item.variant_id: item for item in working_predictions}
 
             inference_interventions = tuple(
                 tag
@@ -520,7 +941,7 @@ class CampaignRunner:
             if self.config.knowledge_enabled:
                 self.knowledge.record_inference_context(
                     predict_targets,
-                    [working_by_id[item.variant_id] for item in predict_targets],
+                    original_predictions,
                     {
                         item.variant_id: evidence.get(item.variant_id, [])
                         for item in predict_targets
@@ -529,19 +950,6 @@ class CampaignRunner:
                     intervention_tags=inference_interventions,
                 )
 
-            knowledge_scores = self.knowledge.scores(evidence) if self.config.knowledge_enabled else {}
-            all_scores = self.policy.score(working_predictions, knowledge_scores, self.rng)
-            selected_ids = self.policy.select(
-                eligible,
-                [working_by_id[item.variant_id] for item in eligible],
-                all_scores,
-                min(self.config.budget_per_round, len(eligible)),
-                self.config.diversity_lambda,
-            )
-            if len(selected_ids) != min(self.config.budget_per_round, len(eligible)):
-                raise RuntimeError("Acquisition returned an incomplete batch")
-
-            expected_batch_size = min(self.config.budget_per_round, len(eligible))
             initial_selected_ids = tuple(selected_ids)
             draft_context = {
                 "initial_selected_ids": initial_selected_ids,
@@ -549,11 +957,14 @@ class CampaignRunner:
                 "working_by_id": working_by_id,
                 "all_scores": all_scores,
                 "expected_batch_size": expected_batch_size,
-                "predictor": predictor,
+                "predictor": validation_predictors[0] if validation_predictors else None,
                 "prediction_by_id": prediction_by_id,
                 "round_id": round_id,
                 "evidence": evidence,
                 "hypothesis": hypothesis,
+                "rationale_claims": {
+                    item.variant_id: item.reason for item in design_scores
+                },
             }
 
             def draft_builder(
@@ -581,10 +992,18 @@ class CampaignRunner:
                         self.config.diversity_lambda,
                     )
                 candidate_variants = [public_by_id[item] for item in candidate_ids]
-                refreshed_predictions = _context["predictor"].predict(candidate_variants)
-                _context["prediction_by_id"].update(
-                    {item.variant_id: item for item in refreshed_predictions}
-                )
+                missing_predictions = [
+                    item
+                    for item in candidate_variants
+                    if item.variant_id not in _context["prediction_by_id"]
+                ]
+                if missing_predictions and _context["predictor"] is not None:
+                    refreshed_predictions = _context["predictor"].predict(
+                        missing_predictions
+                    )
+                    _context["prediction_by_id"].update(
+                        {item.variant_id: item for item in refreshed_predictions}
+                    )
                 if self.config.knowledge_enabled:
                     refreshed_evidence = self.knowledge.evidence_for(
                         candidate_variants,
@@ -616,6 +1035,7 @@ class CampaignRunner:
                     ),
                     falsification_spec=falsification_spec,
                     parent_draft_batch_id=parent_draft_batch_id,
+                    rationale_claims=_context["rationale_claims"],
                 )
 
             def record_review_start(draft, report, _round_id: int = round_id) -> None:
@@ -761,6 +1181,7 @@ class CampaignRunner:
                         exclusions: set[str],
                         _fallback_ids: tuple[str, ...] = fallback_ids,
                         _context: dict[str, Any] = fallback_context,
+                        _design_score_by_id: dict[str, DesignScore] = design_score_by_id,
                     ):
                         candidate_ids = tuple(
                             item for item in _fallback_ids if item not in exclusions
@@ -789,6 +1210,11 @@ class CampaignRunner:
                             ),
                             falsification_spec=fallback_spec,
                             parent_draft_batch_id=parent_draft_batch_id,
+                            rationale_claims={
+                                item: _design_score_by_id[item].reason
+                                for item in candidate_ids
+                                if item in _design_score_by_id
+                            },
                         )
 
                     fallback_loop = BoundedReviewLoop(
@@ -892,8 +1318,19 @@ class CampaignRunner:
                         knowledge_score=knowledge_scores.get(variant_id, 0.0),
                         evidence_ids=tuple(item.evidence_id for item in bundle),
                         hypothesis_id=hypothesis.hypothesis_id if hypothesis else None,
-                        reason=review_result.decision.summary,
+                        reason=(
+                            f"{design_score_by_id[variant_id].reason} "
+                            f"Critic: {review_result.decision.summary}"
+                        ),
                         intervention_tags=intervention_tags,
+                        selection_driver=design_score_by_id[variant_id].selection_driver,
+                        design_score=design_score_by_id[variant_id].utility,
+                        design_uncertainty=design_score_by_id[variant_id].uncertainty,
+                        validation_model_versions=tuple(
+                            predictions[0].model_version
+                            for predictions in validation_prediction_sets
+                            if predictions
+                        ),
                     )
                 )
             self.state.selections.extend(records)
@@ -939,10 +1376,163 @@ class CampaignRunner:
             )
             revealed = self.backend.collect(experiment_run_id)
             selected_variants = [public_by_id[variant_id] for variant_id in selected_ids]
+            pre_round_visible_baseline = float(
+                np.median([item.fitness for item in self.state.observed])
+            )
             self.state.observed.extend(revealed)
             observed_variants.extend(selected_variants)
             self.state.revealed_variant_ids.update(selected_ids)
             self.knowledge.update(selected_variants, revealed)
+            revealed_by_id = {item.variant_id: item for item in revealed}
+            selection_by_id = {item.variant_id: item for item in records}
+            dry_by_variant: dict[str, list[Prediction]] = {
+                variant_id: [] for variant_id in selected_ids
+            }
+            for predictions in validation_prediction_sets:
+                mapping = {item.variant_id: item for item in predictions}
+                for variant_id in selected_ids:
+                    if variant_id in mapping:
+                        dry_by_variant[variant_id].append(mapping[variant_id])
+            rethink_context = {
+                "run_id": self.run_id,
+                "round_id": round_id,
+                "visible_baseline": pre_round_visible_baseline,
+                "candidates": [
+                    {
+                        "variant_id": variant_id,
+                        "mutation_notation": public_by_id[variant_id].mutation_notation,
+                        "agent_reason": selection_by_id[variant_id].reason,
+                        "hypothesis": hypothesis.statement if hypothesis else None,
+                        "evidence_ids": list(selection_by_id[variant_id].evidence_ids),
+                        "wet_value": revealed_by_id[variant_id].fitness,
+                        "dry_validations": [
+                            {
+                                "value": prediction.fitness_mean,
+                                "uncertainty": prediction.fitness_std,
+                                "ood_score": prediction.ood_score,
+                                "model_version": prediction.model_version,
+                            }
+                            for prediction in dry_by_variant[variant_id]
+                        ],
+                    }
+                    for variant_id in selected_ids
+                ],
+            }
+            reflections = ()
+            if self.config.validation.rethink_enabled:
+                try:
+                    reflections = self.rethink_client.reflect_round(
+                        context=rethink_context
+                    )
+                    if {item.variant_id for item in reflections} != set(selected_ids):
+                        raise ValueError("ReThink output did not cover every selected variant")
+                except Exception as error:  # noqa: BLE001 - provider boundary must degrade safely
+                    self.writer.event(
+                        "rethink_fallback_used",
+                        {"round_id": round_id, "error": str(error)},
+                    )
+                    reflections = create_rethink_client("mock").reflect_round(
+                        context=rethink_context
+                    )
+            reflection_by_id = {item.variant_id: item for item in reflections}
+            self.state.rethink_reflections.extend(reflections)
+            current_validation_records: list[ValidationRecord] = []
+            for variant_id in selected_ids:
+                variant = public_by_id[variant_id]
+                selection = selection_by_id[variant_id]
+                reflection = reflection_by_id.get(variant_id)
+                wet_observation = revealed_by_id[variant_id]
+                wet_source = f"wet:{wet_observation.source}"
+                current_validation_records.append(
+                    ValidationRecord(
+                        record_id=_validation_record_id(
+                            self.run_id, round_id, variant_id, "wet", wet_source
+                        ),
+                        variant_id=variant_id,
+                        round_id=round_id,
+                        validation_type="wet",
+                        mutation_notation=variant.mutation_notation,
+                        value=wet_observation.fitness,
+                        uncertainty=0.0,
+                        source_id=wet_source,
+                        model_version=None,
+                        base_weight=self.config.validation.wet_weight,
+                        reliability=1.0,
+                        agent_reason=selection.reason,
+                        hypothesis_id=selection.hypothesis_id,
+                        evidence_ids=selection.evidence_ids,
+                        reflection_id=(reflection.reflection_id if reflection else None),
+                        reflection_verdict=(reflection.verdict if reflection else None),
+                        reflection_summary=(reflection.summary if reflection else ""),
+                    )
+                )
+                for prediction in dry_by_variant[variant_id]:
+                    historical_reliability = self.knowledge.graph.dry_model_reliability(
+                        prediction.model_version,
+                        floor=self.config.validation.dry_reliability_floor,
+                    )
+                    reliability = max(
+                        self.config.validation.dry_reliability_floor,
+                        historical_reliability * max(0.0, 1.0 - prediction.ood_score),
+                    )
+                    dry_source = f"dry:{prediction.model_version}"
+                    current_validation_records.append(
+                        ValidationRecord(
+                            record_id=_validation_record_id(
+                                self.run_id,
+                                round_id,
+                                variant_id,
+                                "dry",
+                                dry_source,
+                            ),
+                            variant_id=variant_id,
+                            round_id=round_id,
+                            validation_type="dry",
+                            mutation_notation=variant.mutation_notation,
+                            value=prediction.fitness_mean,
+                            uncertainty=prediction.fitness_std,
+                            source_id=dry_source,
+                            model_version=prediction.model_version,
+                            base_weight=self.config.validation.dry_weight_cap,
+                            reliability=reliability,
+                            agent_reason=selection.reason,
+                            hypothesis_id=selection.hypothesis_id,
+                            evidence_ids=selection.evidence_ids,
+                            reflection_id=(
+                                reflection.reflection_id if reflection else None
+                            ),
+                            reflection_verdict=(
+                                reflection.verdict if reflection else None
+                            ),
+                            reflection_summary=(
+                                reflection.summary if reflection else ""
+                            ),
+                        )
+                    )
+            self.validation_records.extend(current_validation_records)
+            self.knowledge.record_validation(
+                current_validation_records,
+                reflections,
+            )
+            self.writer.write_json(
+                f"round_{round_id:02d}/validation_matrix.json",
+                current_validation_records,
+            )
+            self.writer.write_csv(
+                f"round_{round_id:02d}/validation_matrix.csv",
+                [item.__dict__ for item in current_validation_records],
+            )
+            self.writer.write_json(
+                f"round_{round_id:02d}/rethink.json",
+                reflections,
+            )
+            self._progress(
+                "rethink_completed",
+                f"round {round_id}/{self.config.rounds} ReThink and validation KG update complete",
+                phase=CampaignPhase.RETHOUGHT,
+                reflection_count=len(reflections),
+                validation_record_count=len(current_validation_records),
+            )
             selected_set = set(selected_ids)
             remaining = [item for item in remaining if item.variant_id not in selected_set]
             metrics = loop_round_metrics(
@@ -989,6 +1579,46 @@ class CampaignRunner:
                 )
                 self.writer.event("hypothesis_assessed", assessment.__dict__)
 
+            post_structured_result = self.knowledge.sync_structured_kg(
+                run_id=self.run_id,
+                round_id=round_id,
+                variants=list(
+                    {
+                        item.variant_id: item
+                        for item in (*observed_variants, *remaining, *predict_targets)
+                    }.values()
+                ),
+                observations=self.state.observed,
+                predictions=[
+                    prediction
+                    for predictions in validation_prediction_sets
+                    for prediction in predictions
+                ],
+                evidence=_flatten_evidence(
+                    evidence,
+                    limit=max(len(evidence) * 4, 120),
+                ),
+                hypotheses=self.state.hypotheses,
+            )
+            self.writer.write_json(
+                f"round_{round_id:02d}/structured_kg_post_validation.json",
+                {
+                    "report": post_structured_result.report,
+                    "entity_count": len(post_structured_result.snapshot.entities),
+                    "relation_count": len(post_structured_result.snapshot.relations),
+                    "validation_record_count": len(self.validation_records),
+                },
+            )
+            self.writer.event(
+                "structured_kg_built",
+                {
+                    "round_id": round_id,
+                    "stage": "post_validation",
+                    "entity_count": len(post_structured_result.snapshot.entities),
+                    "relation_count": len(post_structured_result.snapshot.relations),
+                },
+            )
+
         final_metrics = None
         if rounds_aborted == 0:
             self._progress(
@@ -1016,7 +1646,12 @@ class CampaignRunner:
             }:
                 raise RuntimeError("Final-test inputs and oracle labels have different variant IDs")
             self.state.final_test_opened = True
-            final_metrics = prediction_metrics(final_predictions, final_observations)
+            final_metrics = prediction_metrics(
+                final_predictions,
+                final_observations,
+                metrics=self.config.evaluation.metrics,
+                top_k=self.config.evaluation.top_k,
+            )
         else:
             self._progress(
                 None,
@@ -1024,6 +1659,15 @@ class CampaignRunner:
                 persist=False,
             )
 
+        output_paths = write_campaign_outputs(
+            self.writer,
+            output=self.config.output,
+            wild_type=wild_type,
+            state=self.state,
+            variants=public_by_id,
+            round_metrics=round_metrics,
+            validation_records=self.validation_records,
+        )
         summary = {
             "run_id": self.run_id,
             "mode": self.config.mode,
@@ -1035,13 +1679,23 @@ class CampaignRunner:
             "selection_records": len(self.state.selections),
             "critique_decisions": len(self.state.critique_decisions),
             "hypothesis_assessments": len(self.state.hypothesis_assessments),
+            "rethink_reflections": len(self.state.rethink_reflections),
+            "validation_records": len(self.validation_records),
+            "selection_driver": selection_driver,
+            "fitness_predictors_used_for_generation": (
+                self.config.generation.use_fitness_predictors
+                if selection_driver == "agent_uq"
+                else selection_driver == "predictor"
+            ),
             "rounds_aborted": rounds_aborted,
             "finalized": True,
             "data_source": self._data_source_record,
             "run_dir": str(self.writer.run_dir),
+            "output_artifacts": output_paths,
         }
         self.writer.write_json("state.json", self.state.as_dict())
         self.writer.write_json("knowledge_graph_edges.json", self.knowledge.graph.export_edges())
+        self.writer.write_json("validation_records.json", self.validation_records)
         self.writer.write_json(
             "knowledge_graph_queries.json",
             self.knowledge.graph.export_agent_queries(),

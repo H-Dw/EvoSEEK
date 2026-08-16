@@ -161,6 +161,26 @@ class JsonArtifactWriter:
         )
         return target
 
+    def write_text(self, relative_path: str, content: str) -> Path:
+        target = self.run_dir / relative_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+        return target
+
+    def write_csv(self, relative_path: str, rows: Sequence[Mapping[str, Any]]) -> Path:
+        target = self.run_dir / relative_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        serialized = [_jsonable(dict(row)) for row in rows]
+        if not serialized:
+            target.write_text("", encoding="utf-8")
+            return target
+        fieldnames = list(dict.fromkeys(key for row in serialized for key in row))
+        with target.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(serialized)
+        return target
+
     def write_selection(self, round_id: int, records: Sequence[SelectionRecord]) -> Path:
         target = self.run_dir / f"round_{round_id:02d}" / "selection.csv"
         target.parent.mkdir(parents=True, exist_ok=True)

@@ -57,8 +57,24 @@ def build_draft_batch(
     hypothesis_id: str | None,
     falsification_spec: FalsificationSpec | None,
     parent_draft_batch_id: str | None = None,
+    rationale_claims: Mapping[str, str] | None = None,
 ) -> DraftBatch:
     ordered_ids = tuple(candidate_ids)
+    rationale_claims = rationale_claims or {}
+    rationales = tuple(
+        DesignRationale(
+            candidate_id=item,
+            hypothesis_id=hypothesis_id,
+            claim=rationale_claims.get(
+                item, "Candidate selected by the configured acquisition policy."
+            ),
+            evidence_ids=tuple(entry.evidence_id for entry in evidence.get(item, ())),
+            intended_test=(
+                falsification_spec.human_readable_description if falsification_spec else "Optimization control"
+            ),
+        )
+        for item in ordered_ids
+    )
     payload = {
         "round_id": round_id,
         "review_attempt": review_attempt,
@@ -68,20 +84,9 @@ def build_draft_batch(
         "evidence": {item: tuple(evidence.get(item, ())) for item in ordered_ids},
         "hypothesis_id": hypothesis_id,
         "falsification_spec": falsification_spec,
+        "design_rationales": rationales,
     }
     batch_hash = content_hash(payload)
-    rationales = tuple(
-        DesignRationale(
-            candidate_id=item,
-            hypothesis_id=hypothesis_id,
-            claim="Candidate selected by the configured acquisition policy.",
-            evidence_ids=tuple(entry.evidence_id for entry in evidence.get(item, ())),
-            intended_test=(
-                falsification_spec.human_readable_description if falsification_spec else "Optimization control"
-            ),
-        )
-        for item in ordered_ids
-    )
     return DraftBatch(
         draft_batch_id=f"draft:r{round_id}:a{review_attempt}:{batch_hash[:12]}",
         parent_draft_batch_id=parent_draft_batch_id,
@@ -114,6 +119,7 @@ def recompute_draft_hash(
         "evidence": {item: tuple(evidence.get(item, ())) for item in draft.candidate_ids},
         "hypothesis_id": draft.hypothesis_ids[0] if draft.hypothesis_ids else None,
         "falsification_spec": draft.falsification_spec,
+        "design_rationales": draft.design_rationales,
     }
     return content_hash(payload)
 
