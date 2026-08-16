@@ -13,8 +13,12 @@ def aggregate_runs(summaries: Sequence[dict[str, Any]], output_dir: str | Path) 
     target.mkdir(parents=True, exist_ok=True)
     rows = []
     for summary in summaries:
-        last_round = summary["round_metrics"][-1]
+        round_metrics = summary.get("round_metrics") or []
+        if not round_metrics:
+            continue
+        last_round = round_metrics[-1]
         data_source = summary.get("data_source", {})
+        final_metrics = summary.get("final_prediction_metrics") or {}
         rows.append(
             {
                 "run_id": summary["run_id"],
@@ -31,10 +35,7 @@ def aggregate_runs(summaries: Sequence[dict[str, Any]], output_dir: str | Path) 
                 "mean_selected_model_rank_fraction": last_round[
                     "mean_selected_model_rank_fraction"
                 ],
-                **{
-                    f"final_{key}": value
-                    for key, value in summary["final_prediction_metrics"].items()
-                },
+                **{f"final_{key}": value for key, value in final_metrics.items()},
             }
         )
     frame = pd.DataFrame(rows)

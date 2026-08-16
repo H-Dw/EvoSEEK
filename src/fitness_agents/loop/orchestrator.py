@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import hashlib
 from collections.abc import Callable, Sequence
 from dataclasses import replace
@@ -33,7 +34,7 @@ from fitness_agents.evaluation.metrics import loop_round_metrics, prediction_met
 from fitness_agents.knowledge import KnowledgeEngine
 from fitness_agents.models import create_predictor
 from fitness_agents.mutation import create_candidate_generator
-from fitness_agents.utils import JsonArtifactWriter, seed_everything
+from fitness_agents.utils import JsonArtifactWriter, bind_progress, reset_progress, seed_everything
 from fitness_agents.validation.batch import ApprovalGateway, BatchHardValidator, build_draft_batch
 
 from .backends import ApprovalEnforcingBackend, CsvOracleBackend
@@ -167,7 +168,16 @@ class CampaignRunner:
             else None
         )
         self.agent = agent or ScientistAgent(
-            create_llm_client(config.llm_provider),
+            create_llm_client(
+                self.config.llm.provider,
+                model=self.config.llm.model,
+                base_url=self.config.llm.base_url,
+                api_key=self.config.llm.api_key,
+                temperature=self.config.llm.temperature,
+                max_tokens=self.config.llm.max_tokens,
+                reasoning_effort=self.config.llm.reasoning_effort,
+                thinking=self.config.llm.thinking,
+            ),
             knowledge_graph=graph_tool,
         )
         if critic_agent is None:
@@ -177,6 +187,12 @@ class CampaignRunner:
                     model=config.critic.model,
                     profile=config.critic.profile,
                     temperature=config.critic.temperature,
+                    base_url=config.critic.base_url,
+                    provider=config.critic.provider,
+                    max_tokens=config.critic.max_tokens,
+                    reasoning_effort=config.critic.reasoning_effort,
+                    thinking=config.critic.thinking,
+                    api_key=config.critic.api_key,
                 )
                 critic_agent = CriticAgent(
                     critic_client,
@@ -194,6 +210,7 @@ class CampaignRunner:
             gateway=self.approval_gateway,
         )
         self.hypothesis_evaluator = DeterministicHypothesisEvaluator()
+        self._progress_token = bind_progress(self.writer)
         self.generator = create_candidate_generator(config.mode)
         knowledge_weight = config.knowledge.soft_weight if config.knowledge_enabled else 0.0
         self.policy = create_policy(
@@ -218,15 +235,33 @@ class CampaignRunner:
                 "structure": self.config.knowledge.structure,
                 "kg": self.config.knowledge.kg,
             },
-            "llm_provider": self.config.llm_provider,
+            "llm_provider": self.config.llm.provider,
+            "llm": {
+                "provider": self.config.llm.provider,
+                "model": self.config.llm.model,
+                "base_url": self.config.llm.base_url,
+                "temperature": self.config.llm.temperature,
+                "max_tokens": self.config.llm.max_tokens,
+                "reasoning_effort": self.config.llm.reasoning_effort,
+                "thinking": self.config.llm.thinking,
+                "api_key_ref": self.config.llm.api_key
+                if isinstance(self.config.llm.api_key, str)
+                and self.config.llm.api_key.startswith("env:")
+                else ("configured" if self.config.llm.api_key else None),
+            },
             "critic": {
                 "enabled": self.config.critic.enabled,
                 "mode": self.config.critic.mode,
                 "provider": self.config.critic.provider,
                 "model": self.config.critic.model,
                 "profile": self.config.critic.profile,
+                "base_url": self.config.critic.base_url,
                 "max_revision_attempts": self.config.critic.max_revision_attempts,
                 "fallback_policy": self.config.critic.fallback_policy,
+                "api_key_ref": self.config.critic.api_key
+                if isinstance(self.config.critic.api_key, str)
+                and self.config.critic.api_key.startswith("env:")
+                else ("configured" if self.config.critic.api_key else None),
             },
             "score_shuffle": self.config.score_shuffle,
             "evidence_deletion": self.config.evidence_deletion,
@@ -244,6 +279,27 @@ class CampaignRunner:
                 "transform": self.config.task.fitness_transform,
             },
         }
+
+    def _progress(
+        self,
+        event_type: str | None,
+        message: str,
+        *,
+        phase: CampaignPhase | None = None,
+        persist: bool | None = None,
+        **payload: Any,
+    ) -> None:
+        if phase is not None:
+            self.state.phase = phase
+        persist = persist if persist is not None else event_type is not None
+        self.writer.report(
+            event_type,
+            message=message,
+            persist=persist,
+            round_id=self.state.round_id,
+            phase=self.state.phase.value,
+            **payload,
+        )
 
     def _final_test_variants(self) -> list[Any]:
         if self._split_root is not None:
@@ -266,6 +322,16 @@ class CampaignRunner:
         )
 
     def run(self) -> dict[str, Any]:
+        try:
+            return self._run_campaign()
+        except Exception:
+            with contextlib.suppress(Exception):
+                self._progress("campaign_failed", "campaign failed")
+            raise
+        finally:
+            reset_progress(self._progress_token)
+
+    def _run_campaign(self) -> dict[str, Any]:
         public_by_id = {
             variant.variant_id: variant
             for variant in (
@@ -292,72 +358,87 @@ class CampaignRunner:
                 "data_source": self._data_source_record,
             },
         )
+        self._progress(
+            None,
+            (
+                f"campaign started mode={self.config.mode} "
+                f"rounds={self.config.rounds} budget={self.config.budget_per_round}"
+            ),
+            persist=False,
+            n_remaining=len(remaining),
+            initial_count=len(observed_variants),
+        )
 
         for round_id in range(1, self.config.rounds + 1):
             self.state.round_id = round_id
+            self._progress(
+                "round_started",
+                (
+                    f"round {round_id}/{self.config.rounds} "
+                    f"({len(observed_variants)} observed, {len(remaining)} remaining)"
+                ),
+                n_observed=len(observed_variants),
+                n_remaining=len(remaining),
+                rounds=self.config.rounds,
+            )
+            self._progress(
+                "model_fit_started",
+                f"round {round_id}/{self.config.rounds} fitting {self.config.model.name}",
+                phase=CampaignPhase.MODEL_FIT,
+                n_train=len(observed_variants),
+                model=self.config.model.name,
+                device=self.config.model.device,
+            )
             predictor = self.predictor_factory(self.config.model, seed=self.config.seed + round_id)
             self._fit_predictor(predictor, observed_variants)
-            self.state.phase = CampaignPhase.MODEL_FIT
-            original_predictions = predictor.predict(remaining)
-            working_predictions = (
-                _shuffle_prediction_scores(original_predictions, self.rng)
-                if self.config.score_shuffle
-                else original_predictions
+            self._progress(
+                "model_fit_completed",
+                f"round {round_id}/{self.config.rounds} model fit complete",
+                n_train=len(observed_variants),
+                model=self.config.model.name,
             )
-            prediction_by_id = {item.variant_id: item for item in original_predictions}
-            working_by_id = {item.variant_id: item for item in working_predictions}
 
-            evidence_targets = remaining
-            if (
-                self.config.knowledge_enabled
-                and self.config.evidence_prefilter_limit > 0
-                and len(remaining) > self.config.evidence_prefilter_limit
-            ):
-                evidence_targets = sorted(
-                    remaining,
-                    key=lambda item: (
-                        working_by_id[item.variant_id].fitness_mean
-                        + self.config.ucb_beta * working_by_id[item.variant_id].fitness_std,
-                        item.variant_id,
+            evidence: dict[str, list[Any]] = {}
+            if self.config.knowledge_enabled:
+                seen_ids: set[str] = set()
+                evidence_targets: list[Any] = []
+                for item in (*observed_variants, *remaining):
+                    if item.variant_id in seen_ids:
+                        continue
+                    seen_ids.add(item.variant_id)
+                    evidence_targets.append(item)
+                self._progress(
+                    "evidence_started",
+                    (
+                        f"round {round_id}/{self.config.rounds} scoring evidence for "
+                        f"{len(evidence_targets)} variants"
                     ),
-                    reverse=True,
-                )[: self.config.evidence_prefilter_limit]
-                self.writer.event(
-                    "evidence_prefilter_applied",
-                    {
-                        "round_id": round_id,
-                        "input_candidates": len(remaining),
-                        "evidence_candidates": len(evidence_targets),
-                        "criterion": "predictor UCB without oracle labels",
-                    },
+                    n_candidates=len(evidence_targets),
                 )
-            evidence = (
-                self.knowledge.evidence_for(
+                evidence = self.knowledge.evidence_for(
                     evidence_targets,
                     round_id=round_id,
                     delete_evidence=self.config.evidence_deletion,
                 )
-                if self.config.knowledge_enabled
-                else {}
-            )
-            inference_interventions = tuple(
-                tag
-                for enabled, tag in (
-                    (self.config.score_shuffle, "score_shuffle"),
-                    (self.config.evidence_deletion, "evidence_deletion"),
+                if evidence:
+                    self.knowledge.graph.add_variants(evidence_targets)
+                    self.knowledge.graph.add_evidence(
+                        [item for bundle in evidence.values() for item in bundle]
+                    )
+                self._progress(
+                    "evidence_completed",
+                    f"round {round_id}/{self.config.rounds} evidence ready",
+                    n_candidates=len(evidence_targets),
                 )
-                if enabled
-            )
-            if self.config.knowledge_enabled:
-                self.knowledge.record_inference_context(
-                    evidence_targets,
-                    [working_by_id[item.variant_id] for item in evidence_targets],
-                    evidence,
-                    round_id=round_id,
-                    intervention_tags=inference_interventions,
-                )
+
             hypothesis = None
             if self.config.mode in {"llm_agent", "knowledge_agent"}:
+                self._progress(
+                    "hypothesis_generation_started",
+                    f"round {round_id}/{self.config.rounds} requesting scientist hypothesis",
+                    phase=CampaignPhase.LLM_HYPOTHESIS,
+                    model=self.config.llm.model or self.config.llm.provider,
+                )
                 hypothesis = self.agent.propose_hypothesis(
                     self.state,
                     observed_variants,
@@ -372,6 +453,11 @@ class CampaignRunner:
                     hypothesis.evidence_ids,
                 )
                 self.writer.event("hypothesis_proposed", hypothesis.__dict__)
+                self._progress(
+                    "hypothesis_generation_completed",
+                    f"round {round_id}/{self.config.rounds} hypothesis {hypothesis.hypothesis_id}",
+                    hypothesis_id=hypothesis.hypothesis_id,
+                )
                 if self.agent.last_knowledge_query_id is not None:
                     self.writer.event(
                         "knowledge_graph_queried",
@@ -389,7 +475,60 @@ class CampaignRunner:
                 evidence,
                 self.config.candidate_limit,
             )
-            self.state.phase = CampaignPhase.PROPOSED
+            if not eligible:
+                raise RuntimeError("Candidate generator returned an empty pool")
+            self._progress(
+                "batch_proposed",
+                f"round {round_id}/{self.config.rounds} proposed {len(eligible)} eligible candidates",
+                phase=CampaignPhase.PROPOSED,
+                n_candidates=len(eligible),
+            )
+            score_full_remaining = self.config.candidate_limit <= 0
+            predict_targets = remaining if score_full_remaining else eligible
+            self._progress(
+                "predict_started",
+                (
+                    f"round {round_id}/{self.config.rounds} predicting {len(predict_targets)} "
+                    f"{'remaining' if score_full_remaining else 'candidate-pool'} variants"
+                ),
+                phase=CampaignPhase.PREDICTING,
+                n_candidates=len(predict_targets),
+                model=self.config.model.name,
+            )
+            original_predictions = predictor.predict(predict_targets)
+            self._progress(
+                "predict_completed",
+                f"round {round_id}/{self.config.rounds} predictions ready",
+                n_candidates=len(original_predictions),
+            )
+            working_predictions = (
+                _shuffle_prediction_scores(original_predictions, self.rng)
+                if self.config.score_shuffle
+                else original_predictions
+            )
+            prediction_by_id = {item.variant_id: item for item in original_predictions}
+            working_by_id = {item.variant_id: item for item in working_predictions}
+
+            inference_interventions = tuple(
+                tag
+                for enabled, tag in (
+                    (self.config.score_shuffle, "score_shuffle"),
+                    (self.config.evidence_deletion, "evidence_deletion"),
+                )
+                if enabled
+            )
+            if self.config.knowledge_enabled:
+                self.knowledge.record_inference_context(
+                    predict_targets,
+                    [working_by_id[item.variant_id] for item in predict_targets],
+                    {
+                        item.variant_id: evidence.get(item.variant_id, [])
+                        for item in predict_targets
+                    },
+                    round_id=round_id,
+                    intervention_tags=inference_interventions,
+                )
+
             knowledge_scores = self.knowledge.scores(evidence) if self.config.knowledge_enabled else {}
             all_scores = self.policy.score(working_predictions, knowledge_scores, self.rng)
             selected_ids = self.policy.select(
@@ -479,12 +618,22 @@ class CampaignRunner:
                     parent_draft_batch_id=parent_draft_batch_id,
                 )
 
-            def record_review_attempt(
-                draft, report, decision, _round_id: int = round_id
-            ) -> None:
-                self.state.phase = CampaignPhase.CRITIQUE_REQUESTED
-                self.state.critique_decisions.append(decision)
+            def record_review_start(draft, report, _round_id: int = round_id) -> None:
                 folder = f"round_{_round_id:02d}"
+                self._progress(
+                    "review_attempt_started",
+                    (
+                        f"round {_round_id} review attempt {draft.review_attempt} "
+                        f"(hard_conflicts={len(report.hard_conflicts)})"
+                    ),
+                    phase=CampaignPhase.HARD_VALIDATED,
+                    attempt=draft.review_attempt,
+                    draft_batch_id=draft.draft_batch_id,
+                    batch_hash=draft.batch_hash,
+                    hard_conflicts=len(report.hard_conflicts),
+                    conflict_count=len(report.conflicts),
+                    max_attempts=self.config.critic.max_revision_attempts,
+                )
                 self.writer.event(
                     "batch_drafted",
                     {
@@ -522,6 +671,19 @@ class CampaignRunner:
                 self.writer.write_json(
                     f"{folder}/hard_validation_attempt_{draft.review_attempt}.json", report
                 )
+                self._progress(
+                    "critique_started",
+                    f"round {_round_id} critic review attempt {draft.review_attempt}",
+                    phase=CampaignPhase.CRITIQUE_REQUESTED,
+                    attempt=draft.review_attempt,
+                    critic_provider=self.critic_agent.client.provider_name,
+                )
+
+            def record_review_attempt(
+                draft, report, decision, _round_id: int = round_id
+            ) -> None:
+                self.state.critique_decisions.append(decision)
+                folder = f"round_{_round_id:02d}"
                 self.writer.write_json(
                     f"{folder}/critique_attempt_{draft.review_attempt}.json", decision
                 )
@@ -538,8 +700,23 @@ class CampaignRunner:
                         "critic_profile": self.config.critic.profile,
                     },
                 )
+                self._progress(
+                    None,
+                    (
+                        f"round {_round_id} critique attempt {draft.review_attempt} "
+                        f"{decision.verdict.value}"
+                    ),
+                    persist=False,
+                    attempt=draft.review_attempt,
+                )
                 if decision.verdict.value == "REVISE":
-                    self.state.phase = CampaignPhase.REVISION_REQUESTED
+                    self._progress(
+                        None,
+                        f"round {_round_id} critic requested revision",
+                        phase=CampaignPhase.REVISION_REQUESTED,
+                        persist=False,
+                        attempt=draft.review_attempt,
+                    )
                     self.writer.event("batch_revision_requested", decision.__dict__)
 
             try:
@@ -553,6 +730,7 @@ class CampaignRunner:
                     allowed_ids={item.variant_id for item in remaining},
                     expected_batch_size=expected_batch_size,
                     on_attempt=record_review_attempt,
+                    on_attempt_start=record_review_start,
                 )
             except ReviewRejected as error:
                 terminal_policy = (
@@ -630,6 +808,7 @@ class CampaignRunner:
                             allowed_ids={item.variant_id for item in remaining},
                             expected_batch_size=expected_batch_size,
                             on_attempt=record_review_attempt,
+                            on_attempt_start=record_review_start,
                         )
                         self.writer.event(
                             "critic_fallback_used",
@@ -645,7 +824,12 @@ class CampaignRunner:
                         terminal_policy = "abort_round"
                 if terminal_policy == "abort_round":
                     rounds_aborted += 1
-                    self.state.phase = CampaignPhase.ROUND_ABORTED
+                    self._progress(
+                        None,
+                        f"round {round_id} aborted",
+                        phase=CampaignPhase.ROUND_ABORTED,
+                        persist=False,
+                    )
                     self.writer.event(
                         "round_aborted",
                         {
@@ -661,7 +845,12 @@ class CampaignRunner:
             approved_batch = review_result.approved_batch
             selected_ids = list(approved_batch.candidate_ids)
             self.state.approved_batch_ids.append(approved_batch.draft_batch_id)
-            self.state.phase = CampaignPhase.APPROVED
+            self._progress(
+                None,
+                f"round {round_id} batch approved ({len(selected_ids)} variants)",
+                phase=CampaignPhase.APPROVED,
+                persist=False,
+            )
             self.writer.write_json(
                 f"round_{round_id:02d}/approved_batch.json", approved_batch
             )
@@ -708,7 +897,12 @@ class CampaignRunner:
                     )
                 )
             self.state.selections.extend(records)
-            self.state.phase = CampaignPhase.SELECTED
+            self._progress(
+                None,
+                f"round {round_id} selected {len(records)} variants",
+                phase=CampaignPhase.SELECTED,
+                persist=False,
+            )
             self.writer.write_selection(round_id, records)
             self.writer.event(
                 "batch_selected",
@@ -716,8 +910,10 @@ class CampaignRunner:
                     "round_id": round_id,
                     "records": records,
                     "global_rank_definition": (
-                        "model_rank_all ranks original predictor mean over every unobserved oracle-pool "
-                        "candidate before agent filtering; acquisition_rank_all ranks the active policy"
+                        "model_rank_all ranks predictor mean over scored candidates "
+                        "(the candidate pool when candidate_limit > 0, otherwise the full "
+                        "unobserved oracle pool); acquisition_rank_all ranks the active policy "
+                        "over that same scored set"
                     ),
                 },
             )
@@ -735,7 +931,12 @@ class CampaignRunner:
             if final_report.hard_conflicts or final_report.input_hash != approved_batch.batch_hash:
                 raise PermissionError("Final validation no longer matches the approved batch")
             experiment_run_id = self.backend.submit(approved_batch)
-            self.state.phase = CampaignPhase.SUBMITTED
+            self._progress(
+                None,
+                f"round {round_id} submitted to oracle",
+                phase=CampaignPhase.SUBMITTED,
+                persist=False,
+            )
             revealed = self.backend.collect(experiment_run_id)
             selected_variants = [public_by_id[variant_id] for variant_id in selected_ids]
             self.state.observed.extend(revealed)
@@ -744,7 +945,6 @@ class CampaignRunner:
             self.knowledge.update(selected_variants, revealed)
             selected_set = set(selected_ids)
             remaining = [item for item in remaining if item.variant_id not in selected_set]
-            self.state.phase = CampaignPhase.MEASURED
             metrics = loop_round_metrics(
                 self.state.observed,
                 revealed,
@@ -753,6 +953,15 @@ class CampaignRunner:
             )
             metrics["round_id"] = float(round_id)
             round_metrics.append(metrics)
+            self._progress(
+                "round_completed",
+                (
+                    f"round {round_id}/{self.config.rounds} complete "
+                    f"batch_best={metrics['batch_best_fitness']:.3f}"
+                ),
+                phase=CampaignPhase.MEASURED,
+                batch_best_fitness=float(metrics["batch_best_fitness"]),
+            )
             self.writer.write_json(f"round_{round_id:02d}/metrics.json", metrics)
             self.writer.event(
                 "batch_measured",
@@ -769,26 +978,52 @@ class CampaignRunner:
                     round_id=round_id,
                 )
                 self.state.hypothesis_assessments.append(assessment)
-                self.state.phase = CampaignPhase.HYPOTHESIS_EVALUATED
+                self._progress(
+                    None,
+                    f"round {round_id} hypothesis {assessment.status.value}",
+                    phase=CampaignPhase.HYPOTHESIS_EVALUATED,
+                    persist=False,
+                )
                 self.writer.write_json(
                     f"round_{round_id:02d}/hypothesis_assessment.json", assessment
                 )
                 self.writer.event("hypothesis_assessed", assessment.__dict__)
 
-        final_predictor = self.predictor_factory(
-            self.config.model, seed=self.config.seed + self.config.rounds + 1
-        )
-        self._fit_predictor(final_predictor, observed_variants)
-        final_test_variants = self._final_test_variants()
-        final_predictions = final_predictor.predict(final_test_variants)
-        final_observations = self.backend.open_final_test()
-        if {item.variant_id for item in final_test_variants} != {
-            item.variant_id for item in final_observations
-        }:
-            raise RuntimeError("Final-test inputs and oracle labels have different variant IDs")
-        self.state.final_test_opened = True
-        self.state.phase = CampaignPhase.FINALIZED
-        final_metrics = prediction_metrics(final_predictions, final_observations)
+        final_metrics = None
+        if rounds_aborted == 0:
+            self._progress(
+                "final_fit_started",
+                "fitting final predictor on all revealed observations",
+                phase=CampaignPhase.MODEL_FIT,
+                n_train=len(observed_variants),
+                model=self.config.model.name,
+            )
+            final_predictor = self.predictor_factory(
+                self.config.model, seed=self.config.seed + self.config.rounds + 1
+            )
+            self._fit_predictor(final_predictor, observed_variants)
+            final_test_variants = self._final_test_variants()
+            self._progress(
+                "final_predict_started",
+                f"predicting {len(final_test_variants)} held-out final-test variants",
+                phase=CampaignPhase.PREDICTING,
+                n_candidates=len(final_test_variants),
+            )
+            final_predictions = final_predictor.predict(final_test_variants)
+            final_observations = self.backend.open_final_test()
+            if {item.variant_id for item in final_test_variants} != {
+                item.variant_id for item in final_observations
+            }:
+                raise RuntimeError("Final-test inputs and oracle labels have different variant IDs")
+            self.state.final_test_opened = True
+            final_metrics = prediction_metrics(final_predictions, final_observations)
+        else:
+            self._progress(
+                None,
+                "skipping final-test after round abort",
+                persist=False,
+            )
+
         summary = {
             "run_id": self.run_id,
             "mode": self.config.mode,
@@ -812,6 +1047,12 @@ class CampaignRunner:
             self.knowledge.graph.export_agent_queries(),
         )
         self.writer.write_json("summary.json", summary)
+        self._progress(
+            None,
+            "campaign finalized",
+            phase=CampaignPhase.FINALIZED,
+            persist=False,
+        )
         self.writer.event("campaign_finalized", summary)
         self.knowledge.close()
         return summary

@@ -1,7 +1,8 @@
 import numpy as np
 
 from fitness_agents.acquisition import GreedyPolicy, UCBPolicy
-from fitness_agents.contracts.schemas import Prediction, Variant
+from fitness_agents.contracts.schemas import CampaignState, Prediction, Variant
+from fitness_agents.mutation.generators import EnumeratingCandidateGenerator
 
 
 def _prediction(identifier: str, mean: float, std: float) -> Prediction:
@@ -27,4 +28,12 @@ def test_batch_diversity_can_avoid_near_duplicate():
     policy = GreedyPolicy()
     scores = policy.score(predictions, {}, np.random.default_rng(1))
     assert policy.select(variants, predictions, scores, 2, diversity_lambda=0.2) == ["a", "c"]
+
+
+def test_enumerating_generator_respects_positive_candidate_limit():
+    variants = [_variant("a", "AAAA"), _variant("b", "AAAV"), _variant("c", "VVVV")]
+    generator = EnumeratingCandidateGenerator()
+    state = CampaignState(run_id="t", mode="fitness_direct", seed=1)
+    assert generator.generate(variants, state, None, {}, 0) == variants
+    assert generator.generate(variants, state, None, {}, 2) == variants[:2]
 

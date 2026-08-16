@@ -115,6 +115,8 @@ def _run_one_job(
                 }
                 if missing := required.difference(summary):
                     raise ValueError(f"Campaign summary is missing keys: {sorted(missing)}")
+                if int(summary.get("rounds_aborted") or 0) > 0:
+                    raise ValueError("Campaign aborted a round before completion")
                 if not summary["round_metrics"]:
                     raise ValueError("Campaign summary has no round metrics")
                 if int(summary["data_source"]["fold_index"]) != job.fold_index:
@@ -265,7 +267,11 @@ def main() -> None:
     (output_dir / "fold_results.json").write_text(
         json.dumps(result_payload, indent=2, ensure_ascii=False), encoding="utf-8"
     )
-    successful = [result.summary for result in results if result.summary is not None]
+    successful = [
+        result.summary
+        for result in results
+        if result.status == "completed" and result.summary is not None
+    ]
     aggregate_paths = aggregate_runs(successful, output_dir / "aggregate") if successful else {}
     report = {
         "completed": sum(result.status == "completed" for result in results),

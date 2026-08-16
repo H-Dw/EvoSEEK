@@ -118,3 +118,73 @@ def test_fold_job_failure_is_recorded_without_losing_other_folds(tmp_path, monke
     assert [result.status for result in results] == ["completed", "failed", "completed"]
     assert results[1].returncode == 9
     assert "simulated failure" in Path(results[1].stderr_log).read_text(encoding="utf-8")
+
+
+def test_aborted_fold_is_failed_even_when_stdout_is_a_summary(tmp_path, monkeypatch):
+    scheduler = _load_scheduler_module()
+
+    def fake_run(command, **_kwargs):
+        fold = int(command[command.index("--fold-index") + 1])
+        summary = {
+            "run_id": f"run-fold-{fold}",
+            "mode": "knowledge_agent",
+            "seed": 42,
+            "round_metrics": [],
+            "final_prediction_metrics": None,
+            "queries_used": 0,
+            "rounds_aborted": 1,
+            "data_source": {"fold_index": fold},
+        }
+        return subprocess.CompletedProcess(command, 0, json.dumps(summary), "")
+
+    monkeypatch.setattr(scheduler.subprocess, "run", fake_run)
+    jobs = scheduler._build_jobs(
+        config_path=Path("config.yaml"),
+        folds=[0],
+        seed=42,
+        python_executable=sys.executable,
+    )
+    results = scheduler.run_fold_jobs(
+        jobs,
+        max_parallel=1,
+        project_dir=tmp_path,
+        output_dir=tmp_path / "logs",
+    )
+    assert results[0].status == "failed"
+    assert "aborted" in (results[0].error or "")
+
+
+def test_aggregate_runs_skips_summaries_without_round_metrics(tmp_path):
+    from fitness_agents.reporting import aggregate_runs
+
+    paths = aggregate_runs(
+        [
+            {
+                "run_id": "aborted",
+                "mode": "knowledge_agent",
+                "seed": 1,
+                "queries_used": 0,
+                "round_metrics": [],
+                "final_prediction_metrics": None,
+                "data_source": {"fold_index": 0},
+            },
+            {
+                "run_id": "ok",
+                "mode": "knowledge_agent",
+                "seed": 1,
+                "queries_used": 4,
+                "round_metrics": [
+                    {
+                        "best_seen_fitness": 1.2,
+                        "batch_mean_fitness": 0.8,
+                        "mean_selected_model_rank_fraction": 0.2,
+                    }
+                ],
+                "final_prediction_metrics": {"spearman": 0.4},
+                "data_source": {"fold_index": 1},
+            },
+        ],
+        tmp_path / "aggregate",
+    )
+    rows = json.loads(paths["json"].read_text(encoding="utf-8"))
+    assert [row["run_id"] for row in rows] == ["ok"]

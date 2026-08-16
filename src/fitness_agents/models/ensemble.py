@@ -12,6 +12,7 @@ from sklearn.linear_model import Ridge
 from fitness_agents.contracts.interfaces import FeatureProvider
 from fitness_agents.contracts.schemas import FitnessObservation, Prediction, Variant
 from fitness_agents.features.gb1 import hamming_distance
+from fitness_agents.utils.progress import TimedHeartbeat, emit_batch_progress
 
 
 @dataclass
@@ -104,7 +105,8 @@ class OneHotHeterogeneousEnsemble:
                 random_state=self.seed,
                 n_restarts_optimizer=0,
             )
-            gp.fit(x_train, y_train)
+            with TimedHeartbeat("ensemble Gaussian process fit"):
+                gp.fit(x_train, y_train)
         self._models = _FittedModels(ridge=ridge_models, extra_trees=forest, gaussian_process=gp)
         self._train_codes = [variant.variant for variant in variants]
 
@@ -150,7 +152,8 @@ class OneHotHeterogeneousEnsemble:
             sum(a != b for a, b in zip(code, "VDGV", strict=True)) for code in self._train_codes
         )
         batch_size = 8192
-        for start in range(0, len(variants), batch_size):
+        n_batches = (len(variants) + batch_size - 1) // batch_size
+        for batch_index, start in enumerate(range(0, len(variants), batch_size), start=1):
             batch = variants[start : start + batch_size]
             member_matrix, components = self._member_predictions(batch)
             means = member_matrix.mean(axis=1)
@@ -177,5 +180,13 @@ class OneHotHeterogeneousEnsemble:
                         },
                         model_version=self.model_version,
                     )
+                )
+            if n_batches > 1:
+                emit_batch_progress(
+                    "ensemble.predict",
+                    completed=batch_index,
+                    total=n_batches,
+                    items_done=len(predictions),
+                    items_total=len(variants),
                 )
         return predictions

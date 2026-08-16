@@ -7,8 +7,10 @@ from typing import Any
 
 import numpy as np
 
+from fitness_agents.config import project_root
 from fitness_agents.contracts.schemas import FitnessObservation, Variant
 from fitness_agents.models.external import ExternalModelContext
+from fitness_agents.utils.progress import TimedHeartbeat, emit_batch_progress, heartbeat
 
 from .kermut_features import KermutFeatureError, create_kermut_feature_source
 
@@ -122,10 +124,17 @@ class KermutBackend:
         return wild_type
 
     @staticmethod
-    def _load_array(path_value: Any, name: str) -> np.ndarray:
+    def _resolve_path(path_value: Any, name: str) -> Path:
         if not path_value:
             raise KermutFeatureError(f"Kermut requires options.{name}_path")
-        path = Path(str(path_value))
+        path = Path(str(path_value)).expanduser()
+        if not path.is_absolute():
+            path = project_root() / path
+        return path
+
+    @staticmethod
+    def _load_array(path_value: Any, name: str) -> np.ndarray:
+        path = KermutBackend._resolve_path(path_value, name)
         if not path.is_file():
             raise FileNotFoundError(f"Kermut {name} file does not exist: {path}")
         value = np.load(path, allow_pickle=False)
@@ -258,7 +267,13 @@ class KermutBackend:
         self.torch.manual_seed(self.context.seed)
         if self.device.type == "cuda":
             self.torch.cuda.manual_seed_all(self.context.seed)
-        x_tokens, x_embeddings, x_zero, _ = self._inputs_for(train_variants)
+        heartbeat(
+            f"Kermut encoding {len(train_variants)} training variants on {self.device.type}",
+            n_train=len(train_variants),
+            device=str(self.device),
+        )
+        with TimedHeartbeat("Kermut ESM encode"):
+            x_tokens, x_embeddings, x_zero, _ = self._inputs_for(train_variants)
         y_tensor = self.torch.tensor(
             y_standardized, dtype=self.torch.float32, device=self.device
         )
@@ -284,14 +299,20 @@ class KermutBackend:
         n_steps = int(self.options.get("n_steps", 150))
         if n_steps < 1:
             raise ValueError("Kermut options.n_steps must be at least 1")
-        gp, likelihood = self.runtime["optimize_gp"](
-            gp,
-            likelihood,
-            (x_tokens, x_embeddings, x_zero),
-            y_tensor,
-            learning_rate=float(self.options.get("learning_rate", 0.1)),
+        heartbeat(
+            f"Kermut optimizing GP for {n_steps} steps",
+            n_train=len(train_variants),
             n_steps=n_steps,
         )
+        with TimedHeartbeat("Kermut GP optimize"):
+            gp, likelihood = self.runtime["optimize_gp"](
+                gp,
+                likelihood,
+                (x_tokens, x_embeddings, x_zero),
+                y_tensor,
+                learning_rate=float(self.options.get("learning_rate", 0.1)),
+                n_steps=n_steps,
+            )
         self.gp = gp
         self.likelihood = likelihood
         self._train_codes = [variant.variant for variant in train_variants]
@@ -351,7 +372,8 @@ class KermutBackend:
             return []
         results: dict[str, dict[str, Any]] = {}
         mutants = [variant for variant in variants if variant.mutation_count > 0]
-        for start in range(0, len(mutants), self.context.batch_size):
+        n_batches = (len(mutants) + self.context.batch_size - 1) // self.context.batch_size if mutants else 0
+        for batch_index, start in enumerate(range(0, len(mutants), self.context.batch_size), start=1):
             batch = mutants[start : start + self.context.batch_size]
             means, stds, standardized_means, zero_shot = self._predict_numeric(batch)
             for index, variant in enumerate(batch):
@@ -369,6 +391,14 @@ class KermutBackend:
                     },
                     "model_version": self.model_version,
                 }
+            if n_batches > 1:
+                emit_batch_progress(
+                    "kermut.predict",
+                    completed=batch_index,
+                    total=n_batches,
+                    items_done=len(results),
+                    items_total=len(mutants),
+                )
 
         for variant in variants:
             if variant.mutation_count != 0:

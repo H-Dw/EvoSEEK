@@ -45,6 +45,9 @@ def test_each_baseline_completes_with_global_ranks(
     assert len(records) == 3
     assert all(record["model_rank_all"] >= 1 for record in records)
     assert all(record["total_candidates"] == 88 for record in records)
+    if mode == "knowledge_agent":
+        assert state["hypotheses"]
+        assert state["hypotheses"][0]["evidence_ids"]
 
 
 def _canonical_from_legacy_fixture(synthetic_benchmark) -> CanonicalDataset:

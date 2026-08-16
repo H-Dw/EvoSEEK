@@ -1,17 +1,129 @@
 from __future__ import annotations
 
 import hashlib
+import urllib.error
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
+from fitness_agents.config import project_root
 from fitness_agents.contracts.schemas import Variant
+from fitness_agents.utils.progress import emit_batch_progress
+
+# Official fair-esm hub cache location for ESM-2 650M. Experiment configs should
+# point ModelConfig.checkpoint here instead of relying on the hub download API.
+DEFAULT_ESM2_CHECKPOINT = "~/.cache/torch/hub/checkpoints/esm2_t33_650M_UR50D.pt"
 
 
 class KermutFeatureError(RuntimeError):
     """Raised when Kermut sequence features cannot be produced safely."""
+
+
+def resolve_esm_checkpoint_path(model_path: str | Path) -> Path:
+    path = Path(str(model_path)).expanduser()
+    if not path.is_absolute():
+        path = project_root() / path
+    if not path.is_file():
+        raise FileNotFoundError(f"ESM-2 checkpoint does not exist: {path}")
+    return path
+
+
+_FAIR_ESM_CPU_PATCH_ATTR = "_fitness_agents_cpu_loader_patched"
+DEFAULT_CHECKPOINT_MAP_LOCATION = "cpu"
+
+
+def torch_load_trusted_esm(
+    torch_module: Any,
+    path: Path,
+    *,
+    map_location: str | None = None,
+) -> Any:
+    """Load an official fair-esm ``.pt`` file onto CPU.
+
+    Facebook ESM checkpoints pickle ``argparse.Namespace``. PyTorch 2.6+ defaults
+    ``torch.load(..., weights_only=True)``, which rejects that type and is what
+    ``esm.pretrained.load_model_and_alphabet_local`` hits. These files are local
+    checkpoints from a trusted source, so this helper always uses
+    ``weights_only=False`` and ``map_location='cpu'``. Callers then ``.to(device)``.
+    """
+    import argparse
+
+    target = DEFAULT_CHECKPOINT_MAP_LOCATION if map_location is None else map_location
+    serialization = getattr(torch_module, "serialization", None)
+    add_safe_globals = getattr(serialization, "add_safe_globals", None)
+    if callable(add_safe_globals):
+        add_safe_globals([argparse.Namespace])
+
+    try:
+        return torch_module.load(str(path), map_location=target, weights_only=False)
+    except TypeError:
+        return torch_module.load(str(path), map_location=target)
+
+
+def _needs_esm_regression_weights(pretrained: Any, model_name: str) -> bool:
+    checker = getattr(pretrained, "_has_regression_weights", None)
+    if callable(checker):
+        return bool(checker(model_name))
+    return "esm1v" not in model_name and "esm_if" not in model_name
+
+
+def load_fair_esm_local(pretrained: Any, torch_module: Any, path: Path):
+    """Load a local ESM-2 checkpoint without fair-esm's PyTorch 2.6-incompatible helper."""
+    model_data = torch_load_trusted_esm(torch_module, path)
+    model_name = path.stem
+    regression_data = None
+    if _needs_esm_regression_weights(pretrained, model_name):
+        regression_path = path.with_name(f"{path.stem}-contact-regression.pt")
+        if not regression_path.is_file():
+            hub_fallback = Path(torch_module.hub.get_dir()) / "checkpoints" / regression_path.name
+            if hub_fallback.is_file():
+                regression_path = hub_fallback
+        if not regression_path.is_file():
+            raise FileNotFoundError(
+                "ESM contact-regression weights were not found next to the checkpoint "
+                f"(expected {path.stem}-contact-regression.pt beside {path})"
+            )
+        regression_data = torch_load_trusted_esm(torch_module, regression_path)
+    return pretrained.load_model_and_alphabet_core(model_name, model_data, regression_data)
+
+
+def patch_fair_esm_cpu_loaders(pretrained: Any, torch_module: Any) -> None:
+    """Make fair-esm local and hub loaders unpickle official checkpoints on CPU.
+
+    Hub downloads still work on PyTorch 2.6+ because ``load_state_dict_from_url``
+    defaults to ``weights_only=False``. The local helper does not, so campaigns
+    that point ``checkpoint`` at a cached ``.pt`` file crash unless patched.
+    """
+    if getattr(pretrained, _FAIR_ESM_CPU_PATCH_ATTR, False):
+        return
+
+    def load_model_and_alphabet_local(model_location):
+        return load_fair_esm_local(
+            pretrained, torch_module, resolve_esm_checkpoint_path(model_location)
+        )
+
+    def load_hub_workaround(url):
+        kwargs = {"progress": False, "map_location": DEFAULT_CHECKPOINT_MAP_LOCATION}
+        try:
+            try:
+                return torch_module.hub.load_state_dict_from_url(
+                    url, weights_only=False, **kwargs
+                )
+            except TypeError:
+                return torch_module.hub.load_state_dict_from_url(url, **kwargs)
+        except RuntimeError:
+            cached = Path(torch_module.hub.get_dir()) / "checkpoints" / Path(url).name
+            return torch_load_trusted_esm(torch_module, cached)
+        except urllib.error.HTTPError as error:
+            raise KermutFeatureError(
+                f"Could not load {url}, check if you specified a correct model name?"
+            ) from error
+
+    pretrained.load_model_and_alphabet_local = load_model_and_alphabet_local
+    pretrained.load_hub_workaround = load_hub_workaround
+    setattr(pretrained, _FAIR_ESM_CPU_PATCH_ATTR, True)
 
 
 class PrecomputedKermutFeatures:
@@ -23,7 +135,9 @@ class PrecomputedKermutFeatures:
     """
 
     def __init__(self, path: str | Path) -> None:
-        self.path = Path(path)
+        self.path = Path(path).expanduser()
+        if not self.path.is_absolute():
+            self.path = project_root() / self.path
         if not self.path.is_file():
             raise FileNotFoundError(f"Kermut feature store does not exist: {self.path}")
         with np.load(self.path, allow_pickle=False) as payload:
@@ -55,6 +169,13 @@ class PrecomputedKermutFeatures:
             raise KermutFeatureError("Kermut feature store contains non-finite values")
         self._index = {key: index for index, key in enumerate(self.keys)}
 
+    def lookup(self, variant: Variant) -> tuple[np.ndarray, float] | None:
+        key = variant.variant_id if self.key_kind == "variant_id" else variant.sequence
+        index = self._index.get(key)
+        if index is None:
+            return None
+        return self.embeddings[index], float(self.zero_shot[index])
+
     def encode(
         self, variants: Sequence[Variant], wild_type_sequence: str
     ) -> tuple[np.ndarray, np.ndarray]:
@@ -74,7 +195,11 @@ class PrecomputedKermutFeatures:
 
 
 class LiveESM2KermutFeatures:
-    """Generate the exact ESM-2 inputs used by Kermut, with an on-disk sequence cache."""
+    """ESM-2 inputs for Kermut: offline store lookup, npy cache, then live encode.
+
+    ``precomputed_features_path`` is an optional NPZ library (variant_id or sequence keys).
+    Hits never load fair-esm. Misses use ``cache_dir`` then a lazy CPU-loaded ESM-2 model.
+    """
 
     def __init__(
         self,
@@ -84,25 +209,50 @@ class LiveESM2KermutFeatures:
         checkpoint: str | None,
         options: dict[str, Any],
     ) -> None:
+        self.device_name = device
+        self.batch_size = batch_size
+        self.checkpoint = checkpoint
+        self.options = dict(options)
+        self.model_name = str(options.get("esm_model", "esm2_t33_650M_UR50D"))
+        self.representation_layer = int(options.get("esm_representation_layer", 33))
+        store_path = options.get("precomputed_features_path")
+        self._store = PrecomputedKermutFeatures(str(store_path)) if store_path else None
+        cache_value = options.get("cache_dir")
+        cache_path = Path(str(cache_value)).expanduser() if cache_value else None
+        if cache_path is not None and not cache_path.is_absolute():
+            cache_path = project_root() / cache_path
+        self.cache_dir = cache_path
+        if self.cache_dir is not None:
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.torch = None
+        self.device = None
+        self.model = None
+        self.alphabet = None
+        self.batch_converter = None
+        self._embedding_memory: dict[str, np.ndarray] = {}
+        self._zero_shot_memory: dict[str, float] = {}
+        self._position_memory: dict[tuple[str, int], np.ndarray] = {}
+
+    def _ensure_runtime(self) -> None:
+        if self.model is not None:
+            return
         try:
             import torch
             from esm import pretrained
         except ImportError as error:
             raise KermutFeatureError(
                 "Live Kermut features require torch and fair-esm. Install the project with "
-                "the 'kermut' optional dependency or use feature_mode: precomputed."
+                "the 'kermut' optional dependency, or provide options.precomputed_features_path "
+                "covering every requested sequence."
             ) from error
 
         self.torch = torch
-        self.device = torch.device(device)
-        self.batch_size = batch_size
-        self.model_name = str(options.get("esm_model", "esm2_t33_650M_UR50D"))
-        model_path = checkpoint or options.get("esm_model_path")
+        self.device = torch.device(self.device_name)
+        patch_fair_esm_cpu_loaders(pretrained, torch)
+        model_path = self.checkpoint or self.options.get("esm_model_path")
         if model_path:
-            path = Path(str(model_path))
-            if not path.is_file():
-                raise FileNotFoundError(f"ESM-2 checkpoint does not exist: {path}")
-            self.model, self.alphabet = pretrained.load_model_and_alphabet_local(path)
+            path = resolve_esm_checkpoint_path(str(model_path))
+            self.model, self.alphabet = load_fair_esm_local(pretrained, torch, path)
         else:
             try:
                 loader = getattr(pretrained, self.model_name)
@@ -113,13 +263,6 @@ class LiveESM2KermutFeatures:
             self.model, self.alphabet = loader()
         self.model.eval().to(self.device)
         self.batch_converter = self.alphabet.get_batch_converter()
-        self.representation_layer = int(options.get("esm_representation_layer", 33))
-        cache_value = options.get("cache_dir")
-        self.cache_dir = Path(str(cache_value)) if cache_value else None
-        if self.cache_dir is not None:
-            self.cache_dir.mkdir(parents=True, exist_ok=True)
-        self._embedding_memory: dict[str, np.ndarray] = {}
-        self._position_memory: dict[tuple[str, int], np.ndarray] = {}
 
     @staticmethod
     def _sequence_hash(sequence: str) -> str:
@@ -150,7 +293,25 @@ class LiveESM2KermutFeatures:
         if path is not None:
             np.save(path, result, allow_pickle=False)
 
+    def _load_zero_shot_cache(self, sequence: str) -> float | None:
+        if sequence in self._zero_shot_memory:
+            return self._zero_shot_memory[sequence]
+        path = self._cache_path("zero_shot", sequence)
+        if path is not None and path.is_file():
+            value = float(np.load(path, allow_pickle=False).astype(np.float32).reshape(-1)[0])
+            self._zero_shot_memory[sequence] = value
+            return value
+        return None
+
+    def _save_zero_shot_cache(self, sequence: str, value: float) -> None:
+        result = float(value)
+        self._zero_shot_memory[sequence] = result
+        path = self._cache_path("zero_shot", sequence)
+        if path is not None:
+            np.save(path, np.asarray(result, dtype=np.float32), allow_pickle=False)
+
     def _embed_missing(self, sequences: Sequence[str]) -> None:
+        self._ensure_runtime()
         if any(len(sequence) > 1022 for sequence in sequences):
             raise KermutFeatureError(
                 "ESM-2 Kermut embeddings require sequences of at most 1022 residues; "
@@ -171,6 +332,17 @@ class LiveESM2KermutFeatures:
             for index, sequence in enumerate(strings):
                 pooled = representations[index, 1 : len(sequence) + 1].mean(dim=0).numpy()
                 self._save_embedding_cache(sequence, pooled)
+            completed = min(start + self.batch_size, len(sequences))
+            total_batches = (len(sequences) + self.batch_size - 1) // self.batch_size
+            batch_index = start // self.batch_size + 1
+            if total_batches > 1:
+                emit_batch_progress(
+                    "kermut.esm_embed",
+                    completed=batch_index,
+                    total=total_batches,
+                    items_done=completed,
+                    items_total=len(sequences),
+                )
 
     def _embedding_matrix(self, sequences: Sequence[str]) -> np.ndarray:
         unique_missing = []
@@ -186,6 +358,7 @@ class LiveESM2KermutFeatures:
         )
 
     def _masked_position_log_probs(self, wild_type: str, position: int) -> np.ndarray:
+        self._ensure_runtime()
         key = (wild_type, position)
         if key in self._position_memory:
             return self._position_memory[key]
@@ -230,10 +403,48 @@ class LiveESM2KermutFeatures:
     def encode(
         self, variants: Sequence[Variant], wild_type_sequence: str
     ) -> tuple[np.ndarray, np.ndarray]:
-        sequences = [variant.sequence for variant in variants]
-        return self._embedding_matrix(sequences), self._zero_shot_scores(
-            sequences, wild_type_sequence
-        )
+        n_variants = len(variants)
+        embeddings: list[np.ndarray | None] = [None] * n_variants
+        zero_shot = np.full(n_variants, np.nan, dtype=np.float32)
+        missing_embed: list[str] = []
+        missing_zero: list[int] = []
+        seen_missing: set[str] = set()
+
+        for index, variant in enumerate(variants):
+            if self._store is not None:
+                hit = self._store.lookup(variant)
+                if hit is not None:
+                    embeddings[index] = np.asarray(hit[0], dtype=np.float32)
+                    zero_shot[index] = hit[1]
+                    self._embedding_memory[variant.sequence] = embeddings[index]
+                    self._zero_shot_memory[variant.sequence] = hit[1]
+                    continue
+            cached_embedding = self._load_embedding_cache(variant.sequence)
+            if cached_embedding is not None:
+                embeddings[index] = cached_embedding
+            elif variant.sequence not in seen_missing:
+                missing_embed.append(variant.sequence)
+                seen_missing.add(variant.sequence)
+            cached_zero = self._load_zero_shot_cache(variant.sequence)
+            if cached_zero is not None:
+                zero_shot[index] = cached_zero
+            else:
+                missing_zero.append(index)
+
+        if missing_embed:
+            self._embed_missing(missing_embed)
+            for index, variant in enumerate(variants):
+                if embeddings[index] is None:
+                    embeddings[index] = self._load_embedding_cache(variant.sequence)
+        if any(item is None for item in embeddings):
+            raise KermutFeatureError("Kermut ESM-2 embeddings could not be materialized")
+        if missing_zero:
+            live_sequences = [variants[index].sequence for index in missing_zero]
+            live_scores = self._zero_shot_scores(live_sequences, wild_type_sequence)
+            for offset, index in enumerate(missing_zero):
+                zero_shot[index] = live_scores[offset]
+                self._save_zero_shot_cache(variants[index].sequence, float(live_scores[offset]))
+        return np.stack(embeddings).astype(np.float32), zero_shot
 
 
 def create_kermut_feature_source(

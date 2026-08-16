@@ -27,7 +27,10 @@ class EnumeratingCandidateGenerator:
         evidence: dict[str, list[Evidence]],
         limit: int,
     ) -> list[Variant]:
-        return list(candidates)
+        ranked = list(candidates)
+        if limit <= 0:
+            return ranked
+        return ranked[: max(limit, 1)]
 
 
 class HypothesisCandidateGenerator:

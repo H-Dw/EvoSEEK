@@ -50,7 +50,7 @@ device: cpu                 # 默认，不导入 torch，也不占用 GPU
 allow_device_fallback: false
 batch_size: 32
 backend_factory: fitness_agents.models.backends.kermut:create_backend
-checkpoint: null            # Optional local ESM-2 checkpoint
+checkpoint: ~/.cache/torch/hub/checkpoints/esm2_t33_650M_UR50D.pt
 options:
   wild_type_sequence: VDGV
   feature_mode: live_esm2

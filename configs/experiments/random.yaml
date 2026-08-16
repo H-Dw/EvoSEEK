@@ -7,7 +7,7 @@ acquisition: random
 ucb_beta: 1.5
 diversity_lambda: 0.10
 task_config: configs/task/gb1_binding.yaml
-model_config: configs/model/baseline.yaml
+model_config: configs/model/kermut.yaml
 knowledge_config: configs/knowledge/gb1.yaml
 output_root: artifacts/runs
 llm_provider: mock

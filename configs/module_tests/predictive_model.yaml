@@ -22,21 +22,23 @@ external_contract_test:
   backend_factory: fakes:create_external_backend
   model_names: [kermut, proteinnpt, prosst, pythia_ppi]
 
-# Set enabled=true only after replacing every placeholder required by the chosen backend.
+# Tiny-sample real Kermut run: live ESM-2 650M + GB1 site structure resources.
 real_external_model:
-  enabled: false
+  enabled: true
   name: kermut
   device: cpu
   allow_device_fallback: false
-  batch_size: 8
+  batch_size: 4
   backend_factory: fitness_agents.models.backends.kermut:create_backend
-  checkpoint: REPLACE_WITH_ABSOLUTE_CHECKPOINT_PATH
+  checkpoint: ~/.cache/torch/hub/checkpoints/esm2_t33_650M_UR50D.pt
   options:
-    feature_mode: precomputed
-    precomputed_features_path: REPLACE_WITH_ABSOLUTE_FEATURE_NPZ_PATH
-    conditional_probs_path: REPLACE_WITH_ABSOLUTE_CONDITIONAL_PROBS_NPY_PATH
-    coords_path: REPLACE_WITH_ABSOLUTE_COORDS_NPY_PATH
+    feature_mode: live_esm2
     wild_type_sequence: VDGV
+    esm_model: esm2_t33_650M_UR50D
+    esm_representation_layer: 33
+    cache_dir: artifacts/model_cache/kermut_esm2
+    conditional_probs_path: models/kermut/gb1_sites_conditional_probs.npy
+    coords_path: models/kermut/gb1_sites_coords.npy
     resource_positions: [39, 40, 41, 54]
     positions_are_one_indexed: true
     n_steps: 3
