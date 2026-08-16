@@ -1,10 +1,17 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+DEFAULT_CANDIDATE_LIMIT = 64
+
+
+def _dataclass_from_mapping(cls, raw: dict[str, Any]):
+    allowed = {item.name for item in fields(cls)}
+    return cls(**{key: value for key, value in raw.items() if key in allowed})
 
 
 def project_root(start: Path | None = None) -> Path:
@@ -106,6 +113,11 @@ class CriticConfig:
     ood_warning_threshold: float | None = None
     model_disagreement_threshold: float | None = None
     min_batch_distance: int = 1
+    base_url: str | None = None
+    api_key: str | None = None
+    max_tokens: int | None = None
+    reasoning_effort: str | None = None
+    thinking: str | None = None
 
     def __post_init__(self) -> None:
         if self.mode not in {"rule", "remote"}:
@@ -118,6 +130,18 @@ class CriticConfig:
             raise ValueError("critic.on_reject must be abort_round or safe_fallback")
         if self.on_exhausted not in {"abort_round", "safe_fallback"}:
             raise ValueError("critic.on_exhausted must be abort_round or safe_fallback")
+
+
+@dataclass
+class LLMConfig:
+    provider: str = "mock"
+    model: str | None = None
+    base_url: str | None = None
+    api_key: str | None = None
+    temperature: float = 0.0
+    max_tokens: int | None = None
+    reasoning_effort: str | None = None
+    thinking: str | None = None
 
 
 @dataclass
@@ -135,6 +159,7 @@ class ExperimentConfig:
     knowledge: KnowledgeConfig
     output_root: Path
     critic: CriticConfig = field(default_factory=CriticConfig)
+    llm: LLMConfig = field(default_factory=LLMConfig)
     llm_provider: str = "mock"
     knowledge_enabled: bool = False
     score_shuffle: bool = False
@@ -161,7 +186,7 @@ def load_experiment_config(
         for key in ("physchem", "conservation", "structure", "kg"):
             if key in ablation:
                 knowledge_raw[key] = bool(ablation[key])
-        for key in ("mode", "acquisition"):
+        for key in ("mode", "acquisition", "llm_provider"):
             if key in ablation:
                 raw[key] = ablation[key]
 
@@ -175,19 +200,27 @@ def load_experiment_config(
     task = TaskConfig(**task_values)
     profiles = {int(key): value for key, value in knowledge_raw.pop("site_profiles", {}).items()}
     knowledge = KnowledgeConfig(site_profiles=profiles, **knowledge_raw)
-    model = ModelConfig(**model_raw)
+    model = _dataclass_from_mapping(ModelConfig, model_raw)
     critic_raw = (
         read_yaml(raw["critic_config"], root)
         if raw.get("critic_config")
         else (raw.get("critic", {}) or {})
     )
-    critic = CriticConfig(**critic_raw)
+    critic = _dataclass_from_mapping(CriticConfig, critic_raw)
+    llm_raw: dict[str, Any] = {}
+    if raw.get("llm_config"):
+        llm_raw.update(read_yaml(raw["llm_config"], root))
+    if isinstance(raw.get("llm"), dict):
+        llm_raw.update(raw["llm"])
+    if raw.get("llm_provider"):
+        llm_raw["provider"] = raw["llm_provider"]
+    llm = _dataclass_from_mapping(LLMConfig, llm_raw)
     return ExperimentConfig(
         mode=raw["mode"],
         seed=int(raw["seed"]),
         rounds=int(raw["rounds"]),
         budget_per_round=int(raw["budget_per_round"]),
-        candidate_limit=int(raw.get("candidate_limit", 0)),
+        candidate_limit=int(raw.get("candidate_limit", DEFAULT_CANDIDATE_LIMIT)),
         acquisition=raw["acquisition"],
         ucb_beta=float(raw.get("ucb_beta", 1.5)),
         diversity_lambda=float(raw.get("diversity_lambda", 0.0)),
@@ -195,8 +228,9 @@ def load_experiment_config(
         model=model,
         knowledge=knowledge,
         critic=critic,
+        llm=llm,
         output_root=root / raw.get("output_root", "artifacts/runs"),
-        llm_provider=raw.get("llm_provider", "mock"),
+        llm_provider=llm.provider,
         knowledge_enabled=bool(raw.get("knowledge_enabled", False)),
         score_shuffle=bool(raw.get("score_shuffle", False)),
         evidence_deletion=bool(raw.get("evidence_deletion", False)),

@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import json
-import os
 from collections import defaultdict
 from collections.abc import Sequence
 from typing import Any
 
+from fitness_agents.agents.remote_llm import (
+    complete_json,
+    create_openai_client,
+    resolve_base_url,
+    resolve_model,
+)
 from fitness_agents.contracts.schemas import Evidence, Hypothesis
 
 HYPOTHESIS_SCHEMA: dict[str, Any] = {
@@ -110,21 +115,39 @@ class MockScientistLLMClient:
         )
 
 
+def _preferred_residues(raw: Any) -> dict[int, tuple[str, ...]]:
+    if not isinstance(raw, dict):
+        raise ValueError("preferred_residues must be a JSON object keyed by site number")
+    parsed: dict[int, tuple[str, ...]] = {}
+    for position, residues in raw.items():
+        values = residues if isinstance(residues, (list, tuple)) else [residues]
+        parsed[int(position)] = tuple(str(item) for item in values)
+    return parsed
+
+
 class OpenAICompatibleLLMClient:
-    """Optional structured-output adapter. API keys are read only from the environment."""
+    """OpenAI-compatible Chat Completions adapter. API keys are read only from the environment."""
 
     provider_name = "openai_compatible"
 
-    def __init__(self, *, model: str | None = None, base_url: str | None = None) -> None:
-        try:
-            from openai import OpenAI
-        except ImportError as error:
-            raise RuntimeError("Install requirements/llm.txt to use a remote LLM") from error
-        api_key = os.environ.get("FITNESS_AGENTS_LLM_API_KEY") or os.environ.get("OPENAI_API_KEY")
-        if not api_key:
-            raise RuntimeError("Set FITNESS_AGENTS_LLM_API_KEY or OPENAI_API_KEY")
-        self.model = model or os.environ.get("FITNESS_AGENTS_LLM_MODEL", "gpt-5-mini")
-        self.client = OpenAI(api_key=api_key, base_url=base_url or os.environ.get("OPENAI_BASE_URL"))
+    def __init__(
+        self,
+        *,
+        model: str | None = None,
+        base_url: str | None = None,
+        provider: str | None = None,
+        temperature: float = 0.0,
+        max_tokens: int | None = None,
+        reasoning_effort: str | None = None,
+        thinking: str | None = None,
+        api_key: str | None = None,
+    ) -> None:
+        self.model = resolve_model(model, provider=provider)
+        self.temperature = temperature
+        self.max_tokens = max_tokens
+        self.reasoning_effort = reasoning_effort
+        self.thinking = thinking
+        self.client = create_openai_client(api_key=api_key, base_url=base_url, provider=provider)
 
     def generate_hypothesis(
         self,
@@ -134,15 +157,19 @@ class OpenAICompatibleLLMClient:
         output_schema: dict[str, Any],
     ) -> Hypothesis:
         evidence_payload = [entry.__dict__ for entry in evidence[:80]]
-        response = self.client.responses.create(
+        payload = complete_json(
+            client=self.client,
             model=self.model,
-            input=[
+            messages=[
                 {
                     "role": "system",
                     "content": (
                         "You are a protein-engineering hypothesis agent. Use only supplied visible "
-                        "measurements and cited evidence. Do not invent fitness values. Return a "
-                        "falsifiable hypothesis as JSON."
+                        "measurements and cited evidence. Do not invent fitness values. Reply with "
+                        "a single JSON object that matches this schema: "
+                        + json.dumps(output_schema, ensure_ascii=False)
+                        + " preferred_residues keys must be the integer site numbers 39, 40, 41, "
+                        "and 54. Do not include markdown."
                     ),
                 },
                 {
@@ -153,33 +180,30 @@ class OpenAICompatibleLLMClient:
                     ),
                 },
             ],
-            text={
-                "format": {
-                    "type": "json_schema",
-                    "name": "protein_hypothesis",
-                    "strict": True,
-                    "schema": output_schema,
-                }
-            },
+            schema=output_schema,
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
+            reasoning_effort=self.reasoning_effort,
+            thinking=self.thinking,
         )
-        payload = json.loads(response.output_text)
         return Hypothesis(
             hypothesis_id=str(payload["hypothesis_id"]),
             statement=str(payload["statement"]),
-            preferred_residues={
-                int(position): tuple(residues)
-                for position, residues in payload["preferred_residues"].items()
-            },
-            evidence_ids=tuple(payload["evidence_ids"]),
+            preferred_residues=_preferred_residues(payload["preferred_residues"]),
+            evidence_ids=tuple(str(item) for item in payload["evidence_ids"]),
             expected_outcome=str(payload["expected_outcome"]),
             falsification_criterion=str(payload["falsification_criterion"]),
             parent_hypothesis_id=payload.get("parent_hypothesis_id"),
         )
 
 
-def create_llm_client(provider: str):
+def create_llm_client(provider: str, **kwargs: Any):
     if provider == "mock":
         return MockScientistLLMClient()
-    if provider in {"openai", "openai_compatible"}:
-        return OpenAICompatibleLLMClient()
+    if provider in {"openai", "openai_compatible", "deepseek"}:
+        if provider == "deepseek":
+            kwargs.setdefault("provider", "deepseek")
+            kwargs.setdefault("base_url", resolve_base_url(kwargs.get("base_url"), provider="deepseek"))
+            kwargs.setdefault("model", resolve_model(kwargs.get("model"), provider="deepseek"))
+        return OpenAICompatibleLLMClient(**kwargs)
     raise ValueError(f"Unknown LLM provider {provider!r}")

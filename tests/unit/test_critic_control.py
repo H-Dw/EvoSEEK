@@ -157,6 +157,52 @@ def test_bounded_revision_changes_batch_and_creates_approval(experiment_config):
         backend.submit(replace(result.approved_batch, candidate_ids=("a",)))
 
 
+def test_review_loop_notifies_start_before_critic(experiment_config):
+    variants = {"a": _variant("VDGA", "a")}
+    predictions = {"a": _prediction("a", 1.0)}
+    order: list[str] = []
+
+    class _OrderingCritic:
+        provider_name = "ordering"
+
+        def review(self, *, context, output_schema):
+            order.append("review")
+            return RuleBasedCriticClient().review(context=context, output_schema=output_schema)
+
+    def builder(attempt, parent_id, exclusions):
+        del attempt, parent_id, exclusions
+        return build_draft_batch(
+            round_id=1,
+            review_attempt=0,
+            candidate_ids=("a",),
+            variants=variants,
+            predictions=predictions,
+            evidence={},
+            hypothesis_id=None,
+            falsification_spec=None,
+            parent_draft_batch_id=None,
+        )
+
+    loop = BoundedReviewLoop(
+        validator=BatchHardValidator(experiment_config.task, experiment_config.critic),
+        critic=CriticAgent(_OrderingCritic(), max_retries=0),
+        max_revision_attempts=0,
+    )
+    loop.run(
+        draft_builder=builder,
+        variants=variants,
+        predictions=predictions,
+        evidence={},
+        revealed_ids=set(),
+        pending_ids=set(),
+        allowed_ids=set(variants),
+        expected_batch_size=1,
+        on_attempt_start=lambda draft, report: order.append("start"),
+        on_attempt=lambda draft, report, decision: order.append("attempt"),
+    )
+    assert order == ["start", "review", "attempt"]
+
+
 def test_approval_backend_rejects_modified_receipt():
     class RawBackend:
         def __init__(self):

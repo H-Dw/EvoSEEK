@@ -3,4 +3,5 @@ conservation: true
 structure: true
 kg: true
 mode: fitness_direct
+llm_provider: mock
 

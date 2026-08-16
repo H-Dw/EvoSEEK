@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict
@@ -9,6 +8,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from fitness_agents.agents.remote_llm import complete_json, create_openai_client, resolve_model
 from fitness_agents.contracts.schemas import (
     BatchRisk,
     CandidateIssue,
@@ -27,6 +27,7 @@ from fitness_agents.contracts.schemas import (
     UnsupportedClaim,
     Variant,
 )
+from fitness_agents.utils.progress import report_event
 from fitness_agents.validation.batch import CritiqueDecisionValidator
 
 
@@ -252,34 +253,50 @@ class RuleBasedCriticClient:
 class OpenAICriticClient:
     provider_name = "openai_critic"
 
-    def __init__(self, *, model: str | None, profile: str, temperature: float = 0.0) -> None:
-        try:
-            from openai import OpenAI
-        except ImportError as error:
-            raise RuntimeError("Install requirements/llm.txt to use a remote Critic") from error
-        api_key = os.environ.get("FITNESS_AGENTS_LLM_API_KEY") or os.environ.get("OPENAI_API_KEY")
-        if not api_key:
-            raise RuntimeError("Set FITNESS_AGENTS_LLM_API_KEY or OPENAI_API_KEY")
-        self.model = model or os.environ.get("FITNESS_AGENTS_CRITIC_MODEL", "gpt-5-mini")
+    def __init__(
+        self,
+        *,
+        model: str | None,
+        profile: str,
+        temperature: float = 0.0,
+        base_url: str | None = None,
+        provider: str | None = None,
+        max_tokens: int | None = None,
+        reasoning_effort: str | None = None,
+        thinking: str | None = None,
+        api_key: str | None = None,
+    ) -> None:
+        self.model = resolve_model(model, provider=provider)
         self.temperature = temperature
+        self.max_tokens = max_tokens
+        self.reasoning_effort = reasoning_effort
+        self.thinking = thinking
         self.profile = load_critic_profile(profile)
-        self.client = OpenAI(api_key=api_key, base_url=os.environ.get("OPENAI_BASE_URL"))
+        self.client = create_openai_client(api_key=api_key, base_url=base_url, provider=provider)
 
     def review(self, *, context: dict[str, Any], output_schema: dict[str, Any]) -> CritiqueDecision:
-        response = self.client.responses.create(
+        payload = complete_json(
+            client=self.client,
             model=self.model,
-            input=[
-                {"role": "system", "content": self.profile},
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        self.profile
+                        + "\n\nReply with a single JSON object that matches this schema: "
+                        + json.dumps(output_schema, ensure_ascii=False)
+                        + " Do not include markdown."
+                    ),
+                },
                 {"role": "user", "content": json.dumps(_jsonable(context), ensure_ascii=False)},
             ],
-            text={
-                "format": {
-                    "type": "json_schema", "name": "critique_decision",
-                    "strict": True, "schema": output_schema,
-                }
-            },
+            schema=output_schema,
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
+            reasoning_effort=self.reasoning_effort,
+            thinking=self.thinking,
         )
-        return _decision_from_payload(json.loads(response.output_text))
+        return _decision_from_payload(payload)
 
 
 def _decision_from_payload(payload: dict[str, Any]) -> CritiqueDecision:
@@ -354,7 +371,7 @@ class CriticAgent:
             for entry in evidence.get(candidate_id, ())
         }
         last_error: Exception | None = None
-        for _ in range(self.max_retries + 1):
+        for attempt in range(self.max_retries + 1):
             try:
                 decision = self.client.review(context=context, output_schema=CRITIQUE_DECISION_SCHEMA)
                 self.validator.validate(
@@ -364,7 +381,21 @@ class CriticAgent:
                 return decision
             except Exception as error:  # noqa: BLE001 - remote/schema failures must fail closed
                 last_error = error
+                report_event(
+                    "critic_retry",
+                    message=f"critic attempt {attempt + 1} failed ({type(error).__name__})",
+                    persist=True,
+                    attempt=attempt,
+                    error_type=type(error).__name__,
+                    critic_provider=getattr(self.client, "provider_name", None),
+                )
         if self.fallback is not None:
+            report_event(
+                "critic_model_fallback",
+                message="remote critic failed; using rule fallback",
+                persist=True,
+                error_type=type(last_error).__name__ if last_error is not None else None,
+            )
             decision = self.fallback.review(context=context, output_schema=CRITIQUE_DECISION_SCHEMA)
             self.validator.validate(
                 decision, draft=draft, report=conflict_report,

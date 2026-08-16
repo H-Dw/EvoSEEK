@@ -15,6 +15,7 @@ from common import (
 
 from fitness_agents.agents.critic import CriticAgent, OpenAICriticClient, RuleBasedCriticClient
 from fitness_agents.agents.llm import MockScientistLLMClient, OpenAICompatibleLLMClient
+from fitness_agents.agents.remote_llm import load_project_env, resolve_secret
 from fitness_agents.agents.scientist import ScientistAgent, assert_sanitized
 from fitness_agents.config import CriticConfig, KnowledgeConfig, ModelConfig, TaskConfig
 from fitness_agents.contracts.schemas import CampaignState, ReviewVerdict
@@ -27,20 +28,59 @@ from fitness_agents.knowledge import KnowledgeEngine
 from fitness_agents.loop.backends import ApprovalEnforcingBackend, CsvOracleBackend
 from fitness_agents.loop.review import BoundedReviewLoop
 from fitness_agents.models import create_predictor
+from fitness_agents.utils.progress import configure_progress_logging
 from fitness_agents.validation.batch import BatchHardValidator, build_draft_batch
 
 
 def _configure_remote(values: dict[str, object]) -> None:
-    required = ("api_key", "scientist_model", "critic_model")
-    for key in required:
-        ensure(not placeholder(values.get(key)), f"Replace remote_llm.{key} before remote testing")
-    base_url = values.get("base_url")
-    ensure(not placeholder(base_url), "Replace or remove remote_llm.base_url before remote testing")
-    os.environ["FITNESS_AGENTS_LLM_API_KEY"] = str(values["api_key"])
-    if base_url:
-        os.environ["OPENAI_BASE_URL"] = str(base_url)
-    else:
-        os.environ.pop("OPENAI_BASE_URL", None)
+    load_project_env()
+    api_key = resolve_secret(
+        values.get("api_key"),
+        "FITNESS_AGENTS_LLM_API_KEY",
+        "DEEPSEEK_API_KEY",
+        "OPENAI_API_KEY",
+    )
+    scientist_model = resolve_secret(
+        values.get("scientist_model"), "FITNESS_AGENTS_LLM_MODEL"
+    ) or values.get("scientist_model")
+    critic_model = resolve_secret(
+        values.get("critic_model"), "FITNESS_AGENTS_CRITIC_MODEL", "FITNESS_AGENTS_LLM_MODEL"
+    ) or values.get("critic_model")
+    base_url = resolve_secret(
+        values.get("base_url"),
+        "FITNESS_AGENTS_LLM_BASE_URL",
+        "OPENAI_BASE_URL",
+        "DEEPSEEK_BASE_URL",
+    )
+    ensure(bool(api_key), "Replace remote_llm.api_key or set DEEPSEEK_API_KEY before remote testing")
+    ensure(
+        bool(scientist_model) and not placeholder(scientist_model),
+        "Replace remote_llm.scientist_model before remote testing",
+    )
+    ensure(
+        bool(critic_model) and not placeholder(critic_model),
+        "Replace remote_llm.critic_model before remote testing",
+    )
+    ensure(
+        bool(base_url) and not placeholder(base_url),
+        "Replace remote_llm.base_url or set FITNESS_AGENTS_LLM_BASE_URL before remote testing",
+    )
+    os.environ["FITNESS_AGENTS_LLM_API_KEY"] = str(api_key)
+    os.environ["DEEPSEEK_API_KEY"] = str(api_key)
+    os.environ["OPENAI_BASE_URL"] = str(base_url)
+    os.environ["FITNESS_AGENTS_LLM_BASE_URL"] = str(base_url)
+    os.environ["FITNESS_AGENTS_LLM_MODEL"] = str(scientist_model)
+    os.environ["FITNESS_AGENTS_CRITIC_MODEL"] = str(critic_model)
+    if values.get("reasoning_effort"):
+        os.environ["FITNESS_AGENTS_LLM_REASONING_EFFORT"] = str(values["reasoning_effort"])
+    if values.get("thinking"):
+        os.environ["FITNESS_AGENTS_LLM_THINKING"] = str(values["thinking"])
+    if values.get("max_tokens"):
+        os.environ["FITNESS_AGENTS_LLM_MAX_TOKENS"] = str(values["max_tokens"])
+    values["api_key"] = str(api_key)
+    values["scientist_model"] = str(scientist_model)
+    values["critic_model"] = str(critic_model)
+    values["base_url"] = str(base_url)
 
 
 def main() -> None:
@@ -180,9 +220,16 @@ def main() -> None:
     remote_enabled = bool(args.enable_remote or remote_values.get("enabled", False))
     remote_result: dict[str, object] = {"enabled": False, "status": "skipped"}
     if remote_enabled:
+        configure_progress_logging()
         _configure_remote(remote_values)
         remote_scientist = ScientistAgent(
-            OpenAICompatibleLLMClient(model=str(remote_values["scientist_model"])),
+            OpenAICompatibleLLMClient(
+                model=str(remote_values["scientist_model"]),
+                base_url=str(remote_values["base_url"]),
+                provider="deepseek",
+                reasoning_effort=str(remote_values.get("reasoning_effort") or "high"),
+                thinking=str(remote_values.get("thinking") or "enabled"),
+            ),
             knowledge_graph=knowledge.agent_tool(max_rows=6),
         )
         remote_hypothesis = remote_scientist.propose_hypothesis(
@@ -196,6 +243,10 @@ def main() -> None:
                 model=str(remote_values["critic_model"]),
                 profile=critic_config.profile,
                 temperature=critic_config.temperature,
+                base_url=str(remote_values["base_url"]),
+                provider="deepseek",
+                reasoning_effort=str(remote_values.get("reasoning_effort") or "high"),
+                thinking=str(remote_values.get("thinking") or "enabled"),
             ),
             max_retries=critic_config.max_model_retries,
             fallback=RuleBasedCriticClient(),
@@ -210,7 +261,11 @@ def main() -> None:
         remote_result = {
             "enabled": True,
             "status": "passed",
+            "provider": "deepseek",
+            "scientist_model": str(remote_values["scientist_model"]),
+            "critic_model": str(remote_values["critic_model"]),
             "hypothesis_id": remote_hypothesis.hypothesis_id,
+            "hypothesis_has_falsification": bool(remote_hypothesis.falsification_criterion),
             "critic_verdict": remote_decision.verdict,
         }
 

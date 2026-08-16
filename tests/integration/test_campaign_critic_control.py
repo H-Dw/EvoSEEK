@@ -86,3 +86,30 @@ def test_configured_safe_fallback_is_revalidated_before_submission(config_factor
     assert summary["queries_used"] == 2
     assert summary["rounds_aborted"] == 0
     assert any(item["event_type"] == "critic_fallback_used" for item in trace)
+
+
+@pytest.mark.integration
+def test_round_abort_skips_final_test(config_factory):
+    config = config_factory(rounds=1, budget_per_round=2, run_label="critic-abort")
+    runner = CampaignRunner(
+        config,
+        critic_agent=CriticAgent(_RejectingClient(), max_retries=0),
+    )
+    summary = runner.run()
+    run_dir = config.output_root / summary["run_id"]
+    trace = [
+        json.loads(line)
+        for line in (run_dir / "trace.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    event_types = [item["event_type"] for item in trace if item.get("event_type")]
+
+    assert summary["rounds_aborted"] == 1
+    assert summary["queries_used"] == 0
+    assert summary["final_prediction_metrics"] is None
+    assert summary["finalized"] is True
+    assert runner.state.final_test_opened is False
+    assert runner.backend.raw_backend.final_opened is False
+    assert "round_aborted" in event_types
+    assert "final_fit_started" not in event_types
+    assert "final_predict_started" not in event_types
+    assert (run_dir / "summary.json").is_file()

@@ -20,14 +20,15 @@ critic:
   model_disagreement_threshold: 0.5
   min_batch_distance: 1
 
-# Offline mode is the default. To exercise the real API, replace the placeholders and pass
-# --enable-remote to the module test script. The script copies the key into the process
-# environment only; it never writes the real value to result artifacts.
+# Offline mode is the default. To exercise the real API, pass --enable-remote.
+# The API key is read from env:DEEPSEEK_API_KEY / .env and is never written to artifacts.
 remote_llm:
   enabled: false
   provider: openai_compatible
-  api_key: REPLACE_WITH_REAL_LLM_API_KEY
-  base_url: REPLACE_WITH_OPENAI_COMPATIBLE_BASE_URL_OR_DELETE
-  scientist_model: REPLACE_WITH_SCIENTIST_MODEL_NAME
-  critic_model: REPLACE_WITH_CRITIC_MODEL_NAME
-
+  api_key: env:DEEPSEEK_API_KEY
+  base_url: https://api.deepseek.com
+  scientist_model: deepseek-v4-flash
+  critic_model: deepseek-v4-flash
+  reasoning_effort: high
+  thinking: enabled
+  max_tokens: 16384

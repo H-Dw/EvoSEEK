@@ -1,16 +1,18 @@
 mode: knowledge_agent
 seed: 11
-rounds: 5
+rounds: 3
 budget_per_round: 32
-candidate_limit: 5000
+# Score/ESM-2 only this many remaining variants per round. 0 = full remaining oracle pool.
+candidate_limit: 64
 acquisition: greedy
 ucb_beta: 1.5
 diversity_lambda: 0.10
 task_config: configs/task/gb1_binding_al96.yaml
-model_config: configs/model/baseline.yaml
+model_config: configs/model/kermut.yaml
 knowledge_config: configs/knowledge/gb1.yaml
 output_root: artifacts/runs
-llm_provider: mock
+llm_config: configs/llm/deepseek.yaml
+critic_config: configs/critic/deepseek_remote.yaml
 knowledge_enabled: true
 score_shuffle: false
 evidence_deletion: false
