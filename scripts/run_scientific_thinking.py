@@ -10,6 +10,7 @@ from fitness_agents.config import load_experiment_config, project_root
 from fitness_agents.evaluation import ScientificThinkingEvaluator
 from fitness_agents.loop import run_campaign
 from fitness_agents.reporting import write_science_markdown
+from fitness_agents.utils.progress import add_logging_arguments, configure_from_args
 
 
 def main() -> None:
@@ -21,7 +22,9 @@ def main() -> None:
     parser.add_argument("--rounds", type=int, default=3)
     parser.add_argument("--budget", type=int, default=16)
     parser.add_argument("--task-config", default=None)
+    add_logging_arguments(parser)
     args = parser.parse_args()
+    configure_from_args(args)
     overrides = {
         "seed": args.seed,
         "rounds": args.rounds,

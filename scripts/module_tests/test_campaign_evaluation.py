@@ -22,10 +22,12 @@ from fitness_agents.config import (
 from fitness_agents.evaluation import ScientificThinkingEvaluator
 from fitness_agents.loop import run_campaign
 from fitness_agents.reporting import aggregate_runs, write_science_markdown
+from fitness_agents.utils.progress import configure_progress_logging
 
 
 def main() -> None:
     args = parse_args("configs/module_tests/campaign_evaluation.yaml")
+    configure_progress_logging()
     config = load_config(args.config)
     output = resolve_output(config, args.output_dir)
     paths = write_legacy_benchmark(output / "input", seed=int(config["seed"]))

@@ -75,6 +75,7 @@ class BoundedReviewLoop:
         allowed_ids: set[str],
         expected_batch_size: int,
         on_attempt: Callable[[DraftBatch, ConflictReport, CritiqueDecision], Any] | None = None,
+        on_attempt_start: Callable[[DraftBatch, ConflictReport], Any] | None = None,
     ) -> ReviewLoopResult:
         attempts: list[CritiqueDecision] = []
         exclusions: set[str] = set()
@@ -91,6 +92,8 @@ class BoundedReviewLoop:
                 allowed_ids=allowed_ids,
                 expected_batch_size=expected_batch_size,
             )
+            if on_attempt_start is not None:
+                on_attempt_start(draft, report)
             decision = self.critic.review(
                 draft=draft,
                 variants=variants,

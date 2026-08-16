@@ -8,6 +8,8 @@ from typing import Any
 class CampaignPhase(str, Enum):
     INITIALIZED = "initialized"
     MODEL_FIT = "model_fit"
+    PREDICTING = "predicting"
+    LLM_HYPOTHESIS = "llm_hypothesis"
     PROPOSED = "proposed"
     HARD_VALIDATED = "hard_validated"
     CRITIQUE_REQUESTED = "critique_requested"

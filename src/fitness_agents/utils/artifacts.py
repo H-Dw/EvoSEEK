@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import csv
 import json
-from collections.abc import Sequence
+import logging
+import time
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -12,6 +14,8 @@ from typing import Any
 import numpy as np
 
 from fitness_agents.contracts.schemas import SelectionRecord
+
+LOGGER = logging.getLogger("fitness_agents.progress")
 
 
 def _jsonable(value: Any) -> Any:
@@ -30,13 +34,114 @@ def _jsonable(value: Any) -> Any:
     return value
 
 
+def _is_status_scalar(value: Any) -> bool:
+    return value is None or isinstance(value, (str, bool, int, float, np.generic))
+
+
+def _format_progress_line(message: str, payload: Mapping[str, Any]) -> str:
+    extras: list[str] = []
+    for key in (
+        "round_id",
+        "phase",
+        "attempt",
+        "completed",
+        "total",
+        "n_train",
+        "n_candidates",
+        "n_remaining",
+        "model",
+        "latency_s",
+        "device",
+    ):
+        if key in payload and payload[key] is not None:
+            extras.append(f"{key}={payload[key]}")
+    if extras:
+        return f"{message} ({', '.join(extras)})"
+    return message
+
+
 class JsonArtifactWriter:
-    """Append-only event trace plus human-readable per-round artifacts."""
+    """Append-only event trace plus human-readable per-round artifacts.
+
+    ``status.json`` is overwritten so operators can watch the current phase without
+    parsing the full trace. Stderr progress uses logger ``fitness_agents.progress``.
+    """
 
     def __init__(self, output_root: Path, run_id: str) -> None:
+        self.run_id = run_id
         self.run_dir = output_root / run_id
         self.run_dir.mkdir(parents=True, exist_ok=False)
         self.trace_path = self.run_dir / "trace.jsonl"
+        self.status_path = self.run_dir / "status.json"
+        self._started = time.monotonic()
+        self._status: dict[str, Any] = {
+            "run_id": run_id,
+            "phase": "initialized",
+            "round_id": 0,
+            "message": "run directory created",
+        }
+        self.write_status(message="run directory created", phase="initialized", round_id=0)
+
+    def write_status(
+        self,
+        *,
+        message: str,
+        event_type: str | None = None,
+        **payload: Any,
+    ) -> Path:
+        phase = payload.get("phase", self._status.get("phase"))
+        round_id = payload.get("round_id", self._status.get("round_id", 0))
+        detail = {
+            str(key): _jsonable(value)
+            for key, value in payload.items()
+            if key not in {"phase", "round_id", "message"} and _is_status_scalar(value)
+        }
+        record = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "run_id": self.run_id,
+            "phase": phase,
+            "round_id": round_id,
+            "message": message,
+            "elapsed_s": round(time.monotonic() - self._started, 3),
+            "event_type": event_type,
+        }
+        if detail:
+            record["detail"] = detail
+        self._status = record
+        encoded = json.dumps(_jsonable(record), ensure_ascii=False, indent=2, sort_keys=True)
+        temporary = self.status_path.with_suffix(".json.tmp")
+        temporary.write_text(encoded + "\n", encoding="utf-8")
+        temporary.replace(self.status_path)
+        return self.status_path
+
+    def heartbeat(self, message: str, *, log: bool = True, **payload: Any) -> None:
+        merged = {**self._status, **payload}
+        self.write_status(
+            message=message,
+            event_type=merged.get("event_type"),
+            phase=merged.get("phase"),
+            round_id=merged.get("round_id", 0),
+            **{
+                key: value
+                for key, value in payload.items()
+                if key not in {"phase", "round_id", "message", "event_type"}
+            },
+        )
+        if log:
+            LOGGER.info(_format_progress_line(message, {**self._status, **payload}))
+
+    def report(
+        self,
+        event_type: str | None,
+        *,
+        message: str,
+        persist: bool = True,
+        **payload: Any,
+    ) -> None:
+        self.write_status(message=message, event_type=event_type, **payload)
+        LOGGER.info(_format_progress_line(message, payload))
+        if persist and event_type:
+            self.event(event_type, {"message": message, **payload})
 
     def event(self, event_type: str, payload: dict[str, Any]) -> None:
         record = {

@@ -223,7 +223,7 @@ python scripts/module_tests/test_campaign_evaluation.py --config configs/module_
 5. 对 knowledge ablation、score shuffle、evidence deletion 分别运行反事实干预；
 6. 计算科学思维行为指标并生成 Markdown 报告。
 
-输出：每次 campaign 的 `config.json`、`trace.jsonl`、`state.json`、round artifact、SQLite KG、summary；另有 `aggregate/run_comparison.csv|json`、`scientific_thinking.md` 和模块 `result.json`。
+输出：每次 campaign 的 `config.json`、`trace.jsonl`、`status.json`（当前 phase 覆盖写入）、round artifact、SQLite KG、summary；另有 `aggregate/run_comparison.csv|json`、`scientific_thinking.md` 和模块 `result.json`。闭环脚本会把进度打到 stderr；stdout 仍是最终 JSON。
 
 ## 4. LLM API 与模型 checkpoint 占位配置
 

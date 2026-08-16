@@ -165,3 +165,14 @@ class ArtifactWriter(Protocol):
     def write_json(self, relative_path: str, payload: Any) -> Path: ...
 
     def write_selection(self, round_id: int, records: Sequence[SelectionRecord]) -> Path: ...
+
+    def heartbeat(self, message: str, *, log: bool = True, **payload: Any) -> None: ...
+
+    def report(
+        self,
+        event_type: str | None,
+        *,
+        message: str,
+        persist: bool = True,
+        **payload: Any,
+    ) -> None: ...

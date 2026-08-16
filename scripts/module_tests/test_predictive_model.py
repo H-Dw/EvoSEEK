@@ -18,6 +18,7 @@ from fitness_agents.data import load_dataset_bundle
 from fitness_agents.evaluation.metrics import prediction_metrics
 from fitness_agents.features import create_feature_provider
 from fitness_agents.models import available_predictors, create_predictor
+from fitness_agents.utils.progress import configure_progress_logging
 
 
 def _run_predictor(config: ModelConfig, bundle, seed: int):
@@ -111,6 +112,7 @@ def main() -> None:
     real_raw = deepcopy(config["real_external_model"])
     enabled = bool(real_raw.pop("enabled", False))
     if enabled:
+        configure_progress_logging()
         ensure(
             not _has_nested_placeholder(real_raw),
             "Replace all real_external_model placeholders before enabling it",

@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from fitness_agents.config import load_experiment_config, project_root
 from fitness_agents.loop import run_campaign
 from fitness_agents.reporting import aggregate_runs
+from fitness_agents.utils.progress import add_logging_arguments, configure_from_args
 
 CONFIGS = {
     "random": "configs/experiments/random.yaml",
@@ -26,7 +27,9 @@ def main() -> None:
     parser.add_argument("--modes", default=",".join(CONFIGS))
     parser.add_argument("--task-config", default=None)
     parser.add_argument("--model-config", default=None)
+    add_logging_arguments(parser)
     args = parser.parse_args()
+    configure_from_args(args)
     seeds = [int(value) for value in args.seeds.split(",") if value]
     modes = [value for value in args.modes.split(",") if value]
     unknown = set(modes).difference(CONFIGS)
