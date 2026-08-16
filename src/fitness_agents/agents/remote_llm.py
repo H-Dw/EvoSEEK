@@ -10,6 +10,7 @@ import json
 import os
 import re
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -170,6 +171,25 @@ def _usage_payload(response: Any) -> dict[str, Any]:
     return {key: value for key, value in payload.items() if value is not None}
 
 
+def _safe_validation_detail(error: Exception) -> str:
+    errors = getattr(error, "errors", None)
+    if callable(errors):
+        try:
+            entries = errors(include_input=False, include_url=False)
+            summary = [
+                {
+                    "location": ".".join(str(part) for part in item.get("loc", ())),
+                    "type": item.get("type"),
+                    "message": item.get("msg"),
+                }
+                for item in entries[:12]
+            ]
+            return json.dumps(summary, ensure_ascii=False)
+        except (TypeError, ValueError):
+            pass
+    return type(error).__name__
+
+
 def complete_json(
     *,
     client: Any,
@@ -181,10 +201,13 @@ def complete_json(
     reasoning_effort: str | None = None,
     thinking: str | None = None,
     retries: int = 2,
+    validator: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Request JSON via Chat Completions, with DeepSeek thinking-mode extras when configured."""
+    """Request and validate JSON, retrying syntax and domain-contract failures together."""
 
-    del schema  # Included in the prompt by callers; DeepSeek only supports json_object.
+    # Callers include the schema in their prompt. DeepSeek's compatibility path supports
+    # json_object rather than OpenAI's json_schema response format, so validation is local.
+    del schema
     load_project_env()
     token_budget = max_tokens or int(os.environ.get("FITNESS_AGENTS_LLM_MAX_TOKENS", "16384"))
     effort = reasoning_effort or os.environ.get("FITNESS_AGENTS_LLM_REASONING_EFFORT")
@@ -199,10 +222,11 @@ def complete_json(
 
     last_error: Exception | None = None
     current_thinking = thinking_mode
+    current_messages = list(messages)
     for attempt in range(retries + 1):
         kwargs: dict[str, Any] = {
             "model": model,
-            "messages": messages,
+            "messages": current_messages,
             "stream": False,
             "temperature": temperature,
             "max_tokens": token_budget,
@@ -232,6 +256,8 @@ def complete_json(
             if not content:
                 raise ValueError("Remote LLM returned empty message content")
             payload = extract_json_object(content)
+            if validator is not None:
+                payload = validator(payload)
             report_event(
                 "llm_request_completed",
                 message=f"LLM request {model} completed",
@@ -256,6 +282,19 @@ def complete_json(
             )
             if deepseek and current_thinking == "enabled":
                 current_thinking = "disabled"
+            if attempt < retries:
+                detail = _safe_validation_detail(error)
+                current_messages = [
+                    *messages,
+                    {
+                        "role": "user",
+                        "content": (
+                            "The previous JSON failed the required output contract: "
+                            f"{detail}. Return a complete corrected JSON object with every "
+                            "required key and no Markdown."
+                        ),
+                    },
+                ]
             continue
     report_event(
         "llm_request_failed",

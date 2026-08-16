@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 from typing import Any
 
@@ -12,71 +11,18 @@ from fitness_agents.agents.remote_llm import (
 )
 from fitness_agents.contracts.schemas import ReThinkReflection
 
-RETHINK_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["reflections"],
-    "properties": {
-        "reflections": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": [
-                    "variant_id",
-                    "verdict",
-                    "summary",
-                    "positive_findings",
-                    "negative_findings",
-                    "revised_reason",
-                    "next_round_advice",
-                ],
-                "properties": {
-                    "variant_id": {"type": "string"},
-                    "verdict": {
-                        "type": "string",
-                        "enum": ["support", "conflict", "mixed", "inconclusive"],
-                    },
-                    "summary": {"type": "string"},
-                    "positive_findings": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                    },
-                    "negative_findings": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                    },
-                    "revised_reason": {"type": "string"},
-                    "next_round_advice": {"type": "string"},
-                },
-            },
-        }
-    },
-}
+from .output_contracts import ReThinkOutput, validate_rethink_payload
 
-
-def _reflection_id(run_id: str, round_id: int, variant_id: str) -> str:
-    digest = hashlib.sha256(f"{run_id}|{round_id}|{variant_id}".encode()).hexdigest()[:16]
-    return f"rethink:{digest}"
+RETHINK_SCHEMA: dict[str, Any] = ReThinkOutput.model_json_schema()
 
 
 def _parse_reflections(
     payload: dict[str, Any], *, run_id: str, round_id: int, provider: str
 ) -> tuple[ReThinkReflection, ...]:
-    return tuple(
-        ReThinkReflection(
-            reflection_id=_reflection_id(run_id, round_id, str(item["variant_id"])),
-            variant_id=str(item["variant_id"]),
-            round_id=round_id,
-            verdict=str(item["verdict"]),
-            summary=str(item["summary"]),
-            positive_findings=tuple(str(value) for value in item["positive_findings"]),
-            negative_findings=tuple(str(value) for value in item["negative_findings"]),
-            revised_reason=str(item["revised_reason"]),
-            next_round_advice=str(item["next_round_advice"]),
-            provider=provider,
-        )
-        for item in payload.get("reflections", ())
+    return ReThinkOutput.model_validate(payload).to_reflections(
+        run_id=run_id,
+        round_id=round_id,
+        provider=provider,
     )
 
 
@@ -184,6 +130,7 @@ class OpenAICompatibleReThinkClient:
             max_tokens=self.max_tokens,
             reasoning_effort=self.reasoning_effort,
             thinking=self.thinking,
+            validator=validate_rethink_payload,
         )
         return _parse_reflections(
             payload,

@@ -63,6 +63,7 @@ class ScientistAgent:
             "run_id": state.run_id,
             "mode": state.mode,
             "round_id": state.round_id,
+            "expected_hypothesis_id": f"hyp:{state.run_id}:r{state.round_id}",
             "task": "maximize GB1 IgG-binding fitness over sites 39,40,41,54",
             "visible_observations": [
                 {

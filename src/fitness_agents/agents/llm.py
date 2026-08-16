@@ -13,26 +13,9 @@ from fitness_agents.agents.remote_llm import (
 )
 from fitness_agents.contracts.schemas import Evidence, Hypothesis
 
-HYPOTHESIS_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "required": [
-        "hypothesis_id",
-        "statement",
-        "preferred_residues",
-        "evidence_ids",
-        "expected_outcome",
-        "falsification_criterion",
-    ],
-    "properties": {
-        "hypothesis_id": {"type": "string"},
-        "statement": {"type": "string"},
-        "preferred_residues": {"type": "object"},
-        "evidence_ids": {"type": "array", "items": {"type": "string"}},
-        "expected_outcome": {"type": "string"},
-        "falsification_criterion": {"type": "string"},
-        "parent_hypothesis_id": {"type": ["string", "null"]},
-    },
-}
+from .output_contracts import HypothesisOutput, validate_hypothesis_payload
+
+HYPOTHESIS_SCHEMA: dict[str, Any] = HypothesisOutput.model_json_schema()
 
 
 class MockScientistLLMClient:
@@ -128,16 +111,6 @@ class MockScientistLLMClient:
         )
 
 
-def _preferred_residues(raw: Any) -> dict[int, tuple[str, ...]]:
-    if not isinstance(raw, dict):
-        raise TypeError("preferred_residues must be a JSON object keyed by site number")
-    parsed: dict[int, tuple[str, ...]] = {}
-    for position, residues in raw.items():
-        values = residues if isinstance(residues, (list, tuple)) else [residues]
-        parsed[int(position)] = tuple(str(item) for item in values)
-    return parsed
-
-
 class OpenAICompatibleLLMClient:
     """OpenAI-compatible Chat Completions adapter. API keys are read only from the environment."""
 
@@ -170,6 +143,9 @@ class OpenAICompatibleLLMClient:
         output_schema: dict[str, Any],
     ) -> Hypothesis:
         evidence_payload = [entry.__dict__ for entry in evidence[:80]]
+        expected_id = str(sanitized_context["expected_hypothesis_id"])
+        expected_parent_id = sanitized_context.get("previous_hypothesis_id")
+        allowed_evidence_ids = frozenset(entry.evidence_id for entry in evidence[:80])
         payload = complete_json(
             client=self.client,
             model=self.model,
@@ -198,15 +174,17 @@ class OpenAICompatibleLLMClient:
             max_tokens=self.max_tokens,
             reasoning_effort=self.reasoning_effort,
             thinking=self.thinking,
+            validator=lambda value: validate_hypothesis_payload(
+                value,
+                expected_hypothesis_id=expected_id,
+                expected_parent_hypothesis_id=expected_parent_id,
+                allowed_evidence_ids=allowed_evidence_ids,
+            ),
         )
-        return Hypothesis(
-            hypothesis_id=str(payload["hypothesis_id"]),
-            statement=str(payload["statement"]),
-            preferred_residues=_preferred_residues(payload["preferred_residues"]),
-            evidence_ids=tuple(str(item) for item in payload["evidence_ids"]),
-            expected_outcome=str(payload["expected_outcome"]),
-            falsification_criterion=str(payload["falsification_criterion"]),
-            parent_hypothesis_id=payload.get("parent_hypothesis_id"),
+        return HypothesisOutput.model_validate(payload).to_hypothesis(
+            expected_hypothesis_id=expected_id,
+            expected_parent_hypothesis_id=expected_parent_id,
+            allowed_evidence_ids=allowed_evidence_ids,
         )
 
 
