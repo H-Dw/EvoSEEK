@@ -38,6 +38,37 @@ def aggregate_runs(summaries: Sequence[dict[str, Any]], output_dir: str | Path) 
                 **{f"final_{key}": value for key, value in final_metrics.items()},
             }
         )
+    baseline_by_key: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for row in rows:
+        if row["mode"] != "fitness_direct":
+            continue
+        key = (
+            row["seed"],
+            row["queries_used"],
+            row["split_strategy"],
+            row["fold_index"],
+            row["assignment_sha256"],
+        )
+        baseline_by_key[key] = row
+    for row in rows:
+        key = (
+            row["seed"],
+            row["queries_used"],
+            row["split_strategy"],
+            row["fold_index"],
+            row["assignment_sha256"],
+        )
+        baseline = baseline_by_key.get(key)
+        row["same_fold_baseline_available"] = baseline is not None
+        row["same_fold_baseline_run_id"] = baseline["run_id"] if baseline else None
+        row["delta_best_seen_vs_fitness_direct"] = (
+            row["best_seen_fitness"] - baseline["best_seen_fitness"] if baseline else None
+        )
+        row["delta_last_batch_mean_vs_fitness_direct"] = (
+            row["last_batch_mean_fitness"] - baseline["last_batch_mean_fitness"]
+            if baseline
+            else None
+        )
     frame = pd.DataFrame(rows)
     csv_path = target / "run_comparison.csv"
     json_path = target / "run_comparison.json"

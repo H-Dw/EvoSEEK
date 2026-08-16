@@ -130,7 +130,7 @@ def extract_json_object(text: str) -> dict[str, Any]:
         raise ValueError("Remote LLM response did not contain a JSON object")
     parsed = json.loads(payload[start : end + 1])
     if not isinstance(parsed, dict):
-        raise ValueError("Remote LLM JSON payload is not an object")
+        raise TypeError("Remote LLM JSON payload is not an object")
     return parsed
 
 

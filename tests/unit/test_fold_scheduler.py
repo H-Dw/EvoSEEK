@@ -188,3 +188,44 @@ def test_aggregate_runs_skips_summaries_without_round_metrics(tmp_path):
     )
     rows = json.loads(paths["json"].read_text(encoding="utf-8"))
     assert [row["run_id"] for row in rows] == ["ok"]
+
+
+def test_aggregate_runs_computes_only_same_fold_fitness_direct_delta(tmp_path):
+    from fitness_agents.reporting import aggregate_runs
+
+    def summary(run_id, mode, fold, best):
+        return {
+            "run_id": run_id,
+            "mode": mode,
+            "seed": 7,
+            "queries_used": 4,
+            "round_metrics": [
+                {
+                    "best_seen_fitness": best,
+                    "batch_mean_fitness": best - 0.2,
+                    "mean_selected_model_rank_fraction": 0.2,
+                }
+            ],
+            "final_prediction_metrics": {},
+            "data_source": {
+                "strategy": "al96_closed_loop",
+                "fold_index": fold,
+                "assignment_sha256": f"fold-{fold}",
+            },
+        }
+
+    paths = aggregate_runs(
+        [
+            summary("direct-f0", "fitness_direct", 0, 1.0),
+            summary("agent-f0", "knowledge_agent", 0, 1.4),
+            summary("agent-f1", "knowledge_agent", 1, 2.0),
+        ],
+        tmp_path / "same-fold",
+    )
+    rows = {
+        item["run_id"]: item
+        for item in json.loads(paths["json"].read_text(encoding="utf-8"))
+    }
+    assert rows["agent-f0"]["same_fold_baseline_run_id"] == "direct-f0"
+    assert rows["agent-f0"]["delta_best_seen_vs_fitness_direct"] == pytest.approx(0.4)
+    assert rows["agent-f1"]["same_fold_baseline_available"] is False
