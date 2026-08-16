@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from collections.abc import Callable, Iterable
 from typing import Protocol
 
@@ -11,6 +10,7 @@ from fitness_agents.contracts.schemas import (
     Prediction,
     Variant,
 )
+from fitness_agents.mutation.notation import InvalidMutationNotation, parse_mutation_notation
 
 from .schema import (
     BuildContext,
@@ -93,7 +93,6 @@ class CampaignObservationAdapter:
     """Convert current project variants and measurements into the common KG schema."""
 
     name = "campaign_observations"
-    _mutation_pattern = re.compile(r"([A-Z])([0-9]+)([A-Z*])")
 
     def extract(self, context: BuildContext) -> KnowledgeBatch:
         variants = tuple(context.resources.get("variants", ()))
@@ -206,9 +205,14 @@ class CampaignObservationAdapter:
                     ),
                 )
             )
-            for match in self._mutation_pattern.finditer(variant.mutation_notation):
-                reference, position_text, alternate = match.groups()
-                position = int(position_text)
+            try:
+                mutation_edits = parse_mutation_notation(variant.mutation_notation)
+            except InvalidMutationNotation:
+                mutation_edits = ()
+            for edit in mutation_edits:
+                reference = edit.wt
+                position = edit.position
+                alternate = edit.mutant
                 position_id = f"residue:{context.protein_id}:{position}"
                 mutation_id = f"mutation:{context.protein_id}:{reference}{position}{alternate}"
                 entities[position_id] = EntityRecord(

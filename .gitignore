@@ -11,6 +11,8 @@ artifacts/*
 artifacts/runs/*
 !artifacts/runs/.gitkeep
 data/raw/*
+data/processed/*
+data/demo/*
 !data/raw/.gitkeep
 data/interim/*
 !data/interim/.gitkeep
@@ -21,3 +23,5 @@ models/*
 .codex_tmp/
 .learnings/
 .docx
+.log
+.out

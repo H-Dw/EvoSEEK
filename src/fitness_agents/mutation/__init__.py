@@ -11,6 +11,14 @@ from .conflicts import (
     SequenceConflictDetector,
     detect_pairwise_epistasis,
 )
+from .notation import (
+    InvalidMutationNotation,
+    MutationEdit,
+    edits_from_site_code,
+    edits_from_tokens,
+    format_canonical,
+    parse_mutation_notation,
+)
 
 __all__ = [
     "EnumeratingCandidateGenerator",
@@ -22,4 +30,10 @@ __all__ = [
     "ResidueConflictDetector",
     "SequenceConflictDetector",
     "detect_pairwise_epistasis",
+    "InvalidMutationNotation",
+    "MutationEdit",
+    "edits_from_site_code",
+    "edits_from_tokens",
+    "format_canonical",
+    "parse_mutation_notation",
 ]

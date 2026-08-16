@@ -10,6 +10,7 @@ import numpy as np
 
 from fitness_agents.config import KnowledgeConfig
 from fitness_agents.contracts.schemas import Evidence, FitnessObservation, Prediction, Variant
+from fitness_agents.utils.progress import heartbeat
 
 from .graph import ObservationKnowledgeGraph
 from .tool import AgentKnowledgeGraphTool
@@ -20,8 +21,8 @@ class _CallableEvidenceProvider:
     channel: str
     function: object
 
-    def evaluate(self, variant: Variant, *, round_id: int) -> Evidence:
-        return self.function(variant, round_id)
+    def evaluate(self, variant: Variant, *, round_id: int, **kwargs) -> Evidence:
+        return self.function(variant, round_id, **kwargs)
 
 
 # Kyte-Doolittle hydropathy, approximate side-chain volume, charge, polarity group.
@@ -37,6 +38,24 @@ AA_PROPERTIES: dict[str, tuple[float, float, float, float]] = {
     "T": (-0.7, 116.1, 0.0, 1.0), "V": (4.2, 140.0, 0.0, 0.0),
     "W": (-0.9, 227.8, 0.0, 0.2), "Y": (-1.3, 193.6, 0.0, 0.7),
 }
+
+
+def _evaluate_provider(
+    provider: object,
+    variant: Variant,
+    *,
+    round_id: int,
+    residue_statistics: dict[tuple[int, str], tuple[float, int]],
+) -> Evidence:
+    evaluate = provider.evaluate
+    try:
+        return evaluate(
+            variant,
+            round_id=round_id,
+            residue_statistics=residue_statistics,
+        )
+    except TypeError:
+        return evaluate(variant, round_id=round_id)
 
 
 def _evidence_id(channel: str, variant_id: str, round_id: int, statement: str) -> str:
@@ -89,7 +108,7 @@ class KnowledgeEngine:
             self._observations[observation.variant_id] = observation
         self.graph.add_observations(variants, observations)
 
-    def _physchem(self, variant: Variant, round_id: int) -> Evidence:
+    def _physchem(self, variant: Variant, round_id: int, **_kwargs) -> Evidence:
         distances = []
         for wt, mutant in zip("VDGV", variant.variant, strict=True):
             if wt == mutant:
@@ -112,7 +131,7 @@ class KnowledgeEngine:
             round_id=round_id,
         )
 
-    def _conservation(self, variant: Variant, round_id: int) -> Evidence:
+    def _conservation(self, variant: Variant, round_id: int, **_kwargs) -> Evidence:
         values = []
         for index, (wt, mutant) in enumerate(zip("VDGV", variant.variant, strict=True)):
             if wt == mutant:
@@ -134,7 +153,7 @@ class KnowledgeEngine:
             round_id=round_id,
         )
 
-    def _structure(self, variant: Variant, round_id: int) -> Evidence:
+    def _structure(self, variant: Variant, round_id: int, **_kwargs) -> Evidence:
         penalties = []
         for index, (wt, mutant) in enumerate(zip("VDGV", variant.variant, strict=True)):
             if wt == mutant:
@@ -154,8 +173,16 @@ class KnowledgeEngine:
             round_id=round_id,
         )
 
-    def _kg(self, variant: Variant, round_id: int) -> Evidence:
-        statistics = self.graph.residue_statistics()
+    def _kg(
+        self,
+        variant: Variant,
+        round_id: int,
+        residue_statistics: dict[tuple[int, str], tuple[float, int]] | None = None,
+        **_kwargs,
+    ) -> Evidence:
+        statistics = (
+            residue_statistics if residue_statistics is not None else self.graph.residue_statistics()
+        )
         global_values = [observation.fitness for observation in self._observations.values()]
         global_mean = float(np.mean(global_values)) if global_values else 0.0
         effects = []
@@ -192,9 +219,26 @@ class KnowledgeEngine:
         output: dict[str, list[Evidence]] = defaultdict(list)
         if delete_evidence:
             return dict(output)
-        for variant in variants:
+        residue_statistics = (
+            self.graph.residue_statistics() if "kg" in self.providers else {}
+        )
+        total = len(variants)
+        for index, variant in enumerate(variants, start=1):
             for provider in self.providers.values():
-                output[variant.variant_id].append(provider.evaluate(variant, round_id=round_id))
+                output[variant.variant_id].append(
+                    _evaluate_provider(
+                        provider,
+                        variant,
+                        round_id=round_id,
+                        residue_statistics=residue_statistics,
+                    )
+                )
+            if total >= 256 and (index == total or index % 256 == 0):
+                heartbeat(
+                    f"knowledge.evidence {index}/{total}",
+                    completed=index,
+                    total=total,
+                )
         return dict(output)
 
     def record_inference_context(

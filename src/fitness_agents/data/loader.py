@@ -8,6 +8,12 @@ from pathlib import Path
 import pandas as pd
 
 from fitness_agents.contracts.schemas import FitnessObservation, Variant
+from fitness_agents.mutation.notation import (
+    InvalidMutationNotation,
+    edits_from_tokens,
+    format_canonical,
+    parse_mutation_notation,
+)
 
 PUBLIC_REQUIRED = {
     "variant_id",
@@ -63,19 +69,33 @@ def _row_to_variant(row: object) -> Variant:
     )
 
 
+def _cell(row: object, name: str) -> str | None:
+    if not hasattr(row, name):
+        return None
+    value = getattr(row, name)
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text or text.lower() in {"nan", "none", "nat"}:
+        return None
+    return text
+
+
 def _mutation_notation_from_row(row: object) -> str:
-    if hasattr(row, "mutation_notation"):
-        return str(row.mutation_notation)
-    if not hasattr(row, "mutation_tokens"):
-        return str(row.variant)
-    tokens = json.loads(str(row.mutation_tokens))
-    if not tokens:
+    tokens_text = _cell(row, "mutation_tokens")
+    if tokens_text is not None:
+        parsed = json.loads(tokens_text)
+        return format_canonical(edits_from_tokens(parsed))
+    notation = _cell(row, "mutation_notation")
+    if notation is not None:
+        return format_canonical(parse_mutation_notation(notation))
+    variant = _cell(row, "variant")
+    if variant is None:
         return "WT"
-    notation: list[str] = []
-    for value in tokens:
-        _backbone, component, position, wild_type, mutant = json.loads(value)
-        notation.append(f"{component}:{wild_type}{position}{mutant}")
-    return ";".join(notation)
+    try:
+        return format_canonical(parse_mutation_notation(variant))
+    except InvalidMutationNotation:
+        return variant
 
 
 def variants_from_fold_frame(frame: pd.DataFrame, split_role: str) -> list[Variant]:

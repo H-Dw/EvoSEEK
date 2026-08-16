@@ -239,7 +239,9 @@ python scripts/models/download_models.py --profile structure
 
 ## 4. 运行 demo
 
-默认运行 Knowledge-enhanced LLM Agent，离线使用确定性的 `MockScientistLLMClient`：
+默认运行 Knowledge-enhanced LLM Agent。实验配置已接到 DeepSeek-v4-flash
+（`configs/llm/deepseek.yaml`，密钥只从 `.env` 的 `DEEPSEEK_API_KEY` 读取）和
+KERMUT（`configs/model/kermut.yaml`）：
 
 ```bash
 python scripts/run_demo.py
@@ -264,7 +266,10 @@ python scripts/run_demo.py --config configs/experiments/fitness_direct.yaml --se
 - 候选在 Agent 过滤后集合中的排名 `eligible_rank`；
 - mean、uncertainty、knowledge score、证据 ID、假设 ID、干预标签和选择理由。
 
-`trace.jsonl` 是追加式事件日志；`state.json`、`summary.json`、SQLite KG、图谱边导出和
+`trace.jsonl` 是追加式事件日志；`status.json` 覆盖写入当前 phase / 轮次 / 耗时，便于 `watch`
+或 `tail` 查看卡在哪一步。长步骤（模型 fit/predict、Scientist/Critic LLM）还会把进度打到
+**stderr**（`[fitness-agents] ...`），stdout 仍只输出最终 JSON。可用 `--quiet` 或
+`FITNESS_AGENTS_LOG_LEVEL=WARNING` 关闭进度行。`state.json`、`summary.json`、SQLite KG、图谱边导出和
 `knowledge_graph_queries.json` 支持重放与审计。KG 将实验 observation、模型 prediction、
 理化/保守性/结构 evidence 与 hypothesis 分开存储，避免把计算输出误写成实验事实。
 
@@ -292,7 +297,8 @@ python scripts/run_baselines.py --seeds 11,22,33,44,55
 python scripts/run_baselines.py --seeds 101 --rounds 1 --budget 4
 ```
 
-完整 149,361-variant landscape 可使用分批预测和 5,000 条无标签 UCB evidence prefilter：
+完整 149,361-variant landscape 可使用分批预测和 5,000 条无标签 UCB evidence prefilter。
+四种 baseline 实验 YAML 已指向 KERMUT；LLM/Knowledge 模式同时使用 DeepSeek：
 
 ```bash
 python scripts/run_demo.py --config configs/experiments/knowledge_agent_full.yaml
@@ -418,7 +424,7 @@ device: cpu
 allow_device_fallback: false
 batch_size: 8
 backend_factory: fitness_agents.models.backends.kermut:create_backend
-checkpoint: null  # null 时由 fair-esm 获取 esm2_t33_650M_UR50D
+checkpoint: ~/.cache/torch/hub/checkpoints/esm2_t33_650M_UR50D.pt
 
 options:
   wild_type_sequence: VDGV
@@ -499,19 +505,25 @@ Mutation Designer 或 Scientific Critic 可复用 `explain_variant` 获取单个
 
 ## 10. LLM API
 
-离线 demo 不需要 API key。使用 OpenAI-compatible structured output 时：
+Scientist / Critic 的实验配置在 `configs/llm/deepseek.yaml` 与
+`configs/critic/deepseek_remote.yaml`。密钥**不要**写进 YAML，只放在 gitignored 的 `.env`：
 
 ```bash
-bash scripts/setup_linux.sh llm
-export FITNESS_AGENTS_LLM_API_KEY='...'
-export FITNESS_AGENTS_LLM_MODEL='gpt-5-mini'
-sed 's/llm_provider: mock/llm_provider: openai/' \
-  configs/experiments/knowledge_agent.yaml > /tmp/knowledge_agent_openai.yaml
-python scripts/run_demo.py --config /tmp/knowledge_agent_openai.yaml
+# .env
+DEEPSEEK_API_KEY='...'
 ```
 
-API context 仅包含已揭示 observation、当前轮次、上轮假设和带来源 evidence。API key 不写入配置、
-prompt 或 trace。LLM 不负责生成数值 fitness，也不能执行任意 shell。
+`llm_agent` 与 `knowledge_agent*` 实验会读取 `api_key: env:DEEPSEEK_API_KEY`。
+`random` 与 `fitness_direct` 仍使用 mock LLM，但共享同一 KERMUT 预测器。
+
+离线复现可把实验 YAML 改回：
+
+```yaml
+llm_provider: mock
+model_config: configs/model/baseline.yaml
+```
+
+并删掉 `llm_config` / `critic_config`。API context 仅包含已揭示 observation、当前轮次、上轮假设和带来源 evidence。API key 不写入 prompt 或 trace。LLM 不负责生成数值 fitness，也不能执行任意 shell。
 
 ### 10.1 Scientific Critic 控制流
 

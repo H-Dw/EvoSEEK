@@ -63,8 +63,37 @@ def test_agent_graph_tool_fuses_typed_evidence_and_enforces_round_visibility(
     assert {item["source_type"] for item in context["current_candidate_predictions"]} == {
         "model_prediction"
     }
+    assert context["top_knowledge_evidence"]
+    assert {item["source_type"] for item in context["top_knowledge_evidence"]} == {
+        "computed_evidence"
+    }
     assert "98765.4321" not in json.dumps(context)
     assert engine.graph.export_agent_queries()[0]["query_id"] == context["query_id"]
     predicates = {edge["predicate"] for edge in engine.graph.export_edges()}
     assert {"OBSERVED_IN_CONTEXT", "PREDICTED_AS", "SUPPORTED_BY_EVIDENCE"} <= predicates
+    engine.close()
+
+
+def test_hypothesis_context_includes_persisted_evidence_before_predictions(
+    experiment_config, tmp_path
+):
+    bundle = load_dataset_bundle(
+        experiment_config.task.public_data_path, experiment_config.task.oracle_data_path
+    )
+    engine = KnowledgeEngine(
+        experiment_config.knowledge,
+        graph_path=tmp_path / "pre-hypothesis-kg.sqlite",
+        assay_id="test",
+    )
+    engine.update(bundle.initial_variants, bundle.initial_observations)
+    observed = bundle.initial_variants[:3]
+    evidence = engine.evidence_for(observed, round_id=1)
+    engine.graph.add_variants(observed)
+    engine.graph.add_evidence([item for items in evidence.values() for item in items])
+    context = engine.agent_tool(max_rows=4).hypothesis_context(round_id=1)
+    assert context["current_candidate_predictions"] == []
+    assert context["top_knowledge_evidence"]
+    assert all(
+        item["source_type"] == "computed_evidence" for item in context["top_knowledge_evidence"]
+    )
     engine.close()

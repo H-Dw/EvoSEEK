@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
@@ -14,6 +13,11 @@ from fitness_agents.contracts.schemas import (
     MutationConflict,
     Prediction,
     Variant,
+)
+from fitness_agents.mutation.notation import (
+    InvalidMutationNotation,
+    edits_from_site_code,
+    parse_mutation_notation,
 )
 
 AMINO_ACIDS = frozenset("ACDEFGHIKLMNPQRSTVWY")
@@ -61,44 +65,37 @@ class ResidueConflictDetector:
                     codes.append(
                         ("MUTATION_DEPTH_MISMATCH", "Declared mutation_count differs from the sequence")
                     )
-                expected_tokens = {
-                    f"{source}{position}{target}"
-                    for source, position, target in zip(
-                        wild_type_sites, mutable_positions, variant.variant, strict=True
-                    )
-                    if source != target
-                }
-                actual_tokens = (
-                    variant.mutation_notation.split(";")
-                    if variant.mutation_notation and variant.mutation_notation != "WT"
-                    else []
+                expected = edits_from_site_code(
+                    variant.variant,
+                    wild_type=wild_type_sites,
+                    positions=mutable_positions,
                 )
+                try:
+                    actual = parse_mutation_notation(variant.mutation_notation)
+                except InvalidMutationNotation:
+                    codes.append(("INVALID_MUTATION_NOTATION", "Mutation notation is malformed"))
+                    actual = None
                 seen_positions: dict[int, str] = {}
                 source_by_position = dict(zip(mutable_positions, wild_type_sites, strict=True))
                 target_by_position = dict(zip(mutable_positions, variant.variant, strict=True))
-                for token in actual_tokens:
-                    match = re.fullmatch(r"([A-Z])(\d+)([A-Z])", token)
-                    if match is None:
-                        codes.append(("INVALID_MUTATION_NOTATION", "Mutation notation is malformed"))
-                        continue
-                    source, raw_position, target = match.groups()
-                    position = int(raw_position)
-                    if position not in source_by_position:
-                        codes.append(("FORBIDDEN_POSITION", "Mutation targets a non-mutable position"))
-                        continue
-                    if position in seen_positions:
+                if actual is not None:
+                    for edit in actual:
+                        if edit.position not in source_by_position:
+                            codes.append(("FORBIDDEN_POSITION", "Mutation targets a non-mutable position"))
+                            continue
+                        if edit.position in seen_positions:
+                            codes.append(
+                                ("MULTIPLE_EDITS_SAME_POSITION", "Multiple edits target the same residue")
+                            )
+                        seen_positions[edit.position] = edit.mutant
+                        if edit.wt != source_by_position[edit.position]:
+                            codes.append(("FROM_RESIDUE_MISMATCH", "Mutation source residue differs from WT"))
+                        if edit.mutant != target_by_position[edit.position]:
+                            codes.append(("TO_RESIDUE_MISMATCH", "Mutation target differs from the sequence"))
+                    if {item.identity for item in actual} != {item.identity for item in expected}:
                         codes.append(
-                            ("MULTIPLE_EDITS_SAME_POSITION", "Multiple edits target the same residue")
+                            ("MUTATION_NOTATION_MISMATCH", "Mutation notation does not match the sequence")
                         )
-                    seen_positions[position] = target
-                    if source != source_by_position[position]:
-                        codes.append(("FROM_RESIDUE_MISMATCH", "Mutation source residue differs from WT"))
-                    if target != target_by_position[position]:
-                        codes.append(("TO_RESIDUE_MISMATCH", "Mutation target differs from the sequence"))
-                if set(actual_tokens) != expected_tokens:
-                    codes.append(
-                        ("MUTATION_NOTATION_MISMATCH", "Mutation notation does not match the sequence")
-                    )
             for code, message in codes:
                 conflicts.append(
                     MutationConflict(

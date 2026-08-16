@@ -421,11 +421,37 @@ class ObservationKnowledgeGraph:
             }
             for row in hypothesis_rows
         ]
+        evidence_preview_rows = self.connection.execute(
+            """
+            SELECT evidence_id, variant_id, channel, statement, score, source_id,
+                   confidence, evidence_type
+            FROM evidence
+            WHERE round_id = ?
+            ORDER BY confidence * ABS(score) DESC, evidence_id
+            LIMIT ?
+            """,
+            (round_id, limit),
+        ).fetchall()
+        top_knowledge_evidence = [
+            {
+                "evidence_id": row[0],
+                "variant_id": row[1],
+                "channel": row[2],
+                "statement": row[3],
+                "score": float(row[4]),
+                "source_id": row[5],
+                "confidence": float(row[6]),
+                "evidence_type": row[7],
+                "source_type": "computed_evidence",
+            }
+            for row in evidence_preview_rows
+        ]
         return {
             "visible_observation_count": observation_count,
             "visible_global_mean_fitness": global_mean,
             "beneficial_site_residues": beneficial_sites,
             "top_visible_observations": top_observed,
+            "top_knowledge_evidence": top_knowledge_evidence,
             "current_candidate_predictions": candidates,
             "prior_hypotheses": prior_hypotheses,
         }

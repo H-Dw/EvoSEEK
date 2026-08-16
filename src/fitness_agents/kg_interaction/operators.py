@@ -54,6 +54,8 @@ class HypothesisContextOperator:
             facts.append({"fact_type": "residue_aggregate", **item})
         for item in _dict_tuple(result.get("top_visible_observations")):
             facts.append({"fact_type": "measurement", **item})
+        for item in _dict_tuple(result.get("top_knowledge_evidence")):
+            facts.append({"fact_type": "computed_evidence", **item})
         predictions = _dict_tuple(result.get("current_candidate_predictions"))
         evidence = tuple(
             dict(item)

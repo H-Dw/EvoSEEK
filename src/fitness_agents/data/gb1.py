@@ -9,6 +9,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from fitness_agents.mutation.notation import edits_from_site_code, format_canonical
+
 AMINO_ACIDS = tuple("ACDEFGHIKLMNPQRSTVWY")
 AA_SET = set(AMINO_ACIDS)
 GB1_WT_SITES = "VDGV"
@@ -21,14 +23,9 @@ def canonical_mutation_notation(
     wild_type: str = GB1_WT_SITES,
     positions: Iterable[int] = GB1_POSITIONS,
 ) -> str:
-    if len(variant) != len(wild_type):
-        raise ValueError(f"Expected {len(wild_type)} residues, received {variant!r}")
-    mutations = [
-        f"{wt}{position}{mut}"
-        for wt, position, mut in zip(wild_type, positions, variant, strict=True)
-        if wt != mut
-    ]
-    return ";".join(mutations) if mutations else "WT"
+    return format_canonical(
+        edits_from_site_code(variant, wild_type=wild_type, positions=positions)
+    )
 
 
 def variant_id(variant: str, assay_id: str = "GB1_IgG_binding_Wu2016") -> str:
