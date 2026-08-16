@@ -18,6 +18,7 @@ from .schemas import (
     Hypothesis,
     HypothesisAssessment,
     Prediction,
+    ReThinkReflection,
     SelectionRecord,
     Variant,
 )
@@ -77,6 +78,12 @@ class KnowledgeGraphTool(Protocol):
     ) -> dict[str, Any]: ...
 
     def explain_variant(self, variant_id: str, *, round_id: int) -> dict[str, Any]: ...
+
+
+class ReThinkClient(Protocol):
+    provider_name: str
+
+    def reflect_round(self, *, context: dict[str, Any]) -> tuple[ReThinkReflection, ...]: ...
 
 
 class AcquisitionPolicy(Protocol):

@@ -1,5 +1,5 @@
-# Opt-in profiles for the optional kg_interaction package.
-# These settings do not alter the current orchestrator unless explicitly loaded.
+# Profiles for the kg_interaction package. The knowledge-agent runtime uses bounded_agentic
+# semantics by default and still supports operator-level ablations.
 profiles:
   one_shot_context:
     enabled_operators: [hypothesis_context]
@@ -35,4 +35,3 @@ profiles:
     use_counterevidence: true
     stop_when_sufficient: true
     read_only: false
-

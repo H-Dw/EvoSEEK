@@ -11,6 +11,8 @@ class CampaignPhase(str, Enum):
     PREDICTING = "predicting"
     LLM_HYPOTHESIS = "llm_hypothesis"
     PROPOSED = "proposed"
+    DESIGN_SCORED = "design_scored"
+    DRY_VALIDATED = "dry_validated"
     HARD_VALIDATED = "hard_validated"
     CRITIQUE_REQUESTED = "critique_requested"
     REVISION_REQUESTED = "revision_requested"
@@ -19,6 +21,7 @@ class CampaignPhase(str, Enum):
     SUBMITTED = "submitted"
     MEASURED = "measured"
     HYPOTHESIS_EVALUATED = "hypothesis_evaluated"
+    RETHOUGHT = "rethought"
     ROUND_ABORTED = "round_aborted"
     FINALIZED = "finalized"
 
@@ -144,6 +147,60 @@ class DesignRationale:
     claim: str
     evidence_ids: tuple[str, ...] = ()
     intended_test: str = ""
+
+
+@dataclass(frozen=True)
+class DesignScore:
+    variant_id: str
+    utility: float
+    uncertainty: float
+    hypothesis_score: float
+    evidence_score: float
+    prior_score: float
+    predictor_score: float
+    selection_driver: str
+    reason: str
+
+
+@dataclass(frozen=True)
+class ReThinkReflection:
+    reflection_id: str
+    variant_id: str
+    round_id: int
+    verdict: str
+    summary: str
+    positive_findings: tuple[str, ...]
+    negative_findings: tuple[str, ...]
+    revised_reason: str
+    next_round_advice: str
+    provider: str
+
+
+@dataclass(frozen=True)
+class ValidationRecord:
+    record_id: str
+    variant_id: str
+    round_id: int
+    validation_type: str
+    mutation_notation: str
+    value: float
+    uncertainty: float
+    source_id: str
+    model_version: str | None
+    base_weight: float
+    reliability: float
+    agent_reason: str
+    hypothesis_id: str | None
+    evidence_ids: tuple[str, ...]
+    reflection_id: str | None
+    reflection_verdict: str | None
+    reflection_summary: str
+
+    def __post_init__(self) -> None:
+        if self.validation_type not in {"wet", "dry"}:
+            raise ValueError("validation_type must be wet or dry")
+        if self.base_weight < 0 or not 0 <= self.reliability <= 1:
+            raise ValueError("validation weights are invalid")
 
 
 @dataclass(frozen=True)
@@ -351,6 +408,10 @@ class SelectionRecord:
     hypothesis_id: str | None
     reason: str
     intervention_tags: tuple[str, ...] = ()
+    selection_driver: str = "predictor"
+    design_score: float = 0.0
+    design_uncertainty: float = 0.0
+    validation_model_versions: tuple[str, ...] = ()
 
 
 @dataclass
@@ -365,6 +426,7 @@ class CampaignState:
     selections: list[SelectionRecord] = field(default_factory=list)
     critique_decisions: list[CritiqueDecision] = field(default_factory=list)
     hypothesis_assessments: list[HypothesisAssessment] = field(default_factory=list)
+    rethink_reflections: list[ReThinkReflection] = field(default_factory=list)
     approved_batch_ids: list[str] = field(default_factory=list)
     revealed_variant_ids: set[str] = field(default_factory=set)
     final_test_opened: bool = False

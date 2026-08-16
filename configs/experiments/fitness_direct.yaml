@@ -14,4 +14,21 @@ llm_provider: mock
 knowledge_enabled: false
 score_shuffle: false
 evidence_deletion: false
+generation:
+  selection_driver: predictor
+  use_fitness_predictors: true
+validation:
+  enabled: true
+  predictor_models: []
+  wet_weight: 1.0
+  dry_weight_cap: 0.20
+  recency_decay: 0.85
+  rethink_enabled: true
+evaluation:
+  metrics: [spearman, pearson, mse, rmse, ndcg, top_k_hit, top_k_recall,
+    regret_at_k, interval_90_coverage, gaussian_nll]
+  top_k: 10
+output:
+  artifacts: [json, csv, markdown, svg, reasoning]
+  top_k: 16
 

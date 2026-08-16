@@ -1,4 +1,4 @@
-# Opt-in profiles for the optional kg_knowledge construction pipeline.
+# Profiles for the kg_knowledge construction pipeline now used by the campaign runtime.
 # Entity/relation filters can be added per experiment for finer-grained ablations.
 profiles:
   observations_only:
@@ -7,7 +7,7 @@ profiles:
     enabled_modalities: [tabular, sequence, time_series]
 
   core_with_models:
-    enabled_adapters: [campaign_observations, inference_records]
+    enabled_adapters: [campaign_observations, inference_records, validation_records]
     enabled_layers: [identity, experimental, sequence, model, agent, provenance]
     enabled_modalities: [tabular, sequence, text, time_series]
 
@@ -36,4 +36,3 @@ profiles:
       evolutionary, functional, model, agent, provenance]
     enabled_modalities: [tabular, sequence, structure_3d, atomic, msa, embedding,
       time_series, ontology]
-

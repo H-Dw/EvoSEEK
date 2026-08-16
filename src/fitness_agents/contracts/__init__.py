@@ -1,13 +1,13 @@
 from .interfaces import (
     AcquisitionPolicy,
+    ApprovedExperimentBackend,
     CandidateGenerator,
+    CriticClient,
     EvidenceProvider,
     ExperimentBackend,
     FeatureProvider,
     FitnessPredictor,
     LLMClient,
-    CriticClient,
-    ApprovedExperimentBackend,
 )
 from .schemas import (
     ApprovedBatch,

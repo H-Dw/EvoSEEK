@@ -96,6 +96,121 @@ class KnowledgeConfig:
 
 
 @dataclass
+class GenerationConfig:
+    """Mutation-selection controls for Agent modes.
+
+    Fitness predictors remain an explicit optional input, but are disabled by default so the
+    knowledge/LLM path can be evaluated independently.
+    """
+
+    selection_driver: str = "auto"
+    use_fitness_predictors: bool = False
+    predictor_models: tuple[ModelConfig, ...] = ()
+    hypothesis_weight: float = 1.0
+    evidence_weight: float = 0.65
+    prior_weight: float = 0.80
+    uncertainty_beta: float = 0.75
+    predictor_weight: float = 0.0
+    gp_length_scale: float = 1.0
+    gp_noise: float = 1e-6
+
+    def __post_init__(self) -> None:
+        if self.selection_driver not in {"auto", "agent_uq", "predictor", "random"}:
+            raise ValueError("generation.selection_driver is invalid")
+        if self.gp_length_scale <= 0 or self.gp_noise <= 0:
+            raise ValueError("generation GP length scale and noise must be positive")
+        if self.predictor_weight < 0:
+            raise ValueError("generation.predictor_weight must be non-negative")
+
+
+@dataclass
+class ValidationConfig:
+    enabled: bool = True
+    predictor_models: tuple[ModelConfig, ...] = ()
+    wet_weight: float = 1.0
+    dry_weight_cap: float = 0.20
+    recency_decay: float = 0.85
+    rethink_enabled: bool = True
+    dry_reliability_floor: float = 0.05
+
+    def __post_init__(self) -> None:
+        if self.wet_weight <= 0:
+            raise ValueError("validation.wet_weight must be positive")
+        if not 0 <= self.dry_weight_cap < self.wet_weight:
+            raise ValueError("validation.dry_weight_cap must be lower than wet_weight")
+        if not 0 < self.recency_decay <= 1:
+            raise ValueError("validation.recency_decay must be in (0, 1]")
+        if not 0 <= self.dry_reliability_floor <= 1:
+            raise ValueError("validation.dry_reliability_floor must be in [0, 1]")
+
+
+@dataclass
+class EvaluationConfig:
+    metrics: tuple[str, ...] = (
+        "spearman",
+        "pearson",
+        "mse",
+        "rmse",
+        "ndcg",
+        "top_k_hit",
+        "top_k_recall",
+        "regret_at_k",
+        "interval_90_coverage",
+        "gaussian_nll",
+    )
+    top_k: int = 10
+
+    def __post_init__(self) -> None:
+        if self.top_k < 1:
+            raise ValueError("evaluation.top_k must be positive")
+        allowed = {
+            "spearman", "pearson", "mse", "rmse", "ndcg", "top_k_hit",
+            "top_k_recall", "regret_at_k", "interval_90_coverage", "gaussian_nll",
+        }
+        unknown = set(self.metrics).difference(allowed)
+        if unknown:
+            raise ValueError(f"evaluation.metrics contains unsupported values: {sorted(unknown)}")
+
+
+@dataclass
+class OutputConfig:
+    artifacts: tuple[str, ...] = (
+        "json",
+        "csv",
+        "markdown",
+        "svg",
+        "reasoning",
+    )
+    top_k: int = 10
+
+    def __post_init__(self) -> None:
+        allowed = {"json", "csv", "markdown", "svg", "reasoning"}
+        unknown = set(self.artifacts).difference(allowed)
+        if unknown:
+            raise ValueError(f"output.artifacts contains unsupported values: {sorted(unknown)}")
+        if self.top_k < 1:
+            raise ValueError("output.top_k must be positive")
+
+
+@dataclass
+class KGInteractionRuntimeConfig:
+    enabled: bool = True
+    enabled_operators: tuple[str, ...] = (
+        "hypothesis_context",
+        "explain_variant",
+        "compare_variants",
+    )
+    max_tool_calls: int = 3
+    max_rows: int = 12
+    use_counterevidence: bool = True
+    stop_when_sufficient: bool = False
+
+    def __post_init__(self) -> None:
+        if self.max_tool_calls < 1 or self.max_rows < 1:
+            raise ValueError("kg_interaction limits must be positive")
+
+
+@dataclass
 class CriticConfig:
     enabled: bool = True
     mode: str = "rule"
@@ -160,6 +275,13 @@ class ExperimentConfig:
     output_root: Path
     critic: CriticConfig = field(default_factory=CriticConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
+    generation: GenerationConfig = field(default_factory=GenerationConfig)
+    validation: ValidationConfig = field(default_factory=ValidationConfig)
+    evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
+    output: OutputConfig = field(default_factory=OutputConfig)
+    kg_interaction: KGInteractionRuntimeConfig = field(
+        default_factory=KGInteractionRuntimeConfig
+    )
     llm_provider: str = "mock"
     knowledge_enabled: bool = False
     score_shuffle: bool = False
@@ -201,6 +323,41 @@ def load_experiment_config(
     profiles = {int(key): value for key, value in knowledge_raw.pop("site_profiles", {}).items()}
     knowledge = KnowledgeConfig(site_profiles=profiles, **knowledge_raw)
     model = _dataclass_from_mapping(ModelConfig, model_raw)
+
+    def load_model_entries(value: Any) -> tuple[ModelConfig, ...]:
+        entries = value or ()
+        output: list[ModelConfig] = []
+        for entry in entries:
+            raw_model = read_yaml(entry, root) if isinstance(entry, (str, Path)) else dict(entry)
+            output.append(_dataclass_from_mapping(ModelConfig, raw_model))
+        return tuple(output)
+
+    generation_raw = dict(raw.get("generation", {}) or {})
+    generation_raw["predictor_models"] = load_model_entries(
+        generation_raw.get("predictor_models")
+    )
+    generation = _dataclass_from_mapping(GenerationConfig, generation_raw)
+    validation_raw = dict(raw.get("validation", {}) or {})
+    validation_raw["predictor_models"] = load_model_entries(
+        validation_raw.get("predictor_models")
+    )
+    validation = _dataclass_from_mapping(ValidationConfig, validation_raw)
+    evaluation_raw = dict(raw.get("evaluation", {}) or {})
+    if "metrics" in evaluation_raw:
+        evaluation_raw["metrics"] = tuple(str(item) for item in evaluation_raw["metrics"])
+    evaluation = _dataclass_from_mapping(EvaluationConfig, evaluation_raw)
+    output_raw = dict(raw.get("output", {}) or {})
+    if "artifacts" in output_raw:
+        output_raw["artifacts"] = tuple(str(item) for item in output_raw["artifacts"])
+    output = _dataclass_from_mapping(OutputConfig, output_raw)
+    interaction_raw = dict(raw.get("kg_interaction", {}) or {})
+    if "enabled_operators" in interaction_raw:
+        interaction_raw["enabled_operators"] = tuple(
+            str(item) for item in interaction_raw["enabled_operators"]
+        )
+    kg_interaction = _dataclass_from_mapping(
+        KGInteractionRuntimeConfig, interaction_raw
+    )
     critic_raw = (
         read_yaml(raw["critic_config"], root)
         if raw.get("critic_config")
@@ -229,6 +386,11 @@ def load_experiment_config(
         knowledge=knowledge,
         critic=critic,
         llm=llm,
+        generation=generation,
+        validation=validation,
+        evaluation=evaluation,
+        output=output,
+        kg_interaction=kg_interaction,
         output_root=root / raw.get("output_root", "artifacts/runs"),
         llm_provider=llm.provider,
         knowledge_enabled=bool(raw.get("knowledge_enabled", False)),
