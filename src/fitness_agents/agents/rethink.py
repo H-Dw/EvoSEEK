@@ -141,6 +141,7 @@ class OpenAICompatibleReThinkClient:
 
 
 def create_rethink_client(provider: str, **kwargs: Any):
+    runtime = str(kwargs.pop("runtime", "chat_completions"))
     if provider == "mock":
         return MockReThinkClient()
     if provider in {"openai", "openai_compatible", "deepseek"}:
@@ -150,5 +151,14 @@ def create_rethink_client(provider: str, **kwargs: Any):
                 "base_url", resolve_base_url(kwargs.get("base_url"), provider="deepseek")
             )
             kwargs.setdefault("model", resolve_model(kwargs.get("model"), provider="deepseek"))
+        if runtime == "agents_sdk":
+            from .sdk_agents import AgentsSDKReThinkClient
+
+            return AgentsSDKReThinkClient(**kwargs)
+        if runtime != "chat_completions":
+            raise ValueError(f"Unknown LLM runtime {runtime!r}")
+        kwargs.pop("sdk_tracing_enabled", None)
+        kwargs.pop("sdk_max_turns", None)
+        kwargs.pop("sdk_model_retries", None)
         return OpenAICompatibleReThinkClient(**kwargs)
     raise ValueError(f"Unknown ReThink provider {provider!r}")

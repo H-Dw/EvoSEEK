@@ -1,7 +1,7 @@
-# DeepSeek V4 via Chat Completions. The key stays in `.env` / the process environment.
-# Never put a literal sk-... value in this file or in experiment YAML.
+# Opt-in OpenAI Agents SDK pilot over DeepSeek Chat Completions.
+# DeepSeek json_object responses are still validated locally by the SDK Pydantic output type.
 provider: deepseek
-runtime: chat_completions
+runtime: agents_sdk
 profile: scientific_v1
 model: deepseek-v4-flash
 base_url: https://api.deepseek.com

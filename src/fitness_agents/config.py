@@ -250,6 +250,7 @@ class CriticConfig:
 @dataclass
 class LLMConfig:
     provider: str = "mock"
+    runtime: str = "chat_completions"
     profile: str = "scientific_v1"
     model: str | None = None
     base_url: str | None = None
@@ -258,6 +259,17 @@ class LLMConfig:
     max_tokens: int | None = None
     reasoning_effort: str | None = None
     thinking: str | None = None
+    sdk_tracing_enabled: bool = False
+    sdk_max_turns: int = 6
+    sdk_model_retries: int = 2
+
+    def __post_init__(self) -> None:
+        if self.runtime not in {"chat_completions", "agents_sdk"}:
+            raise ValueError("llm.runtime must be chat_completions or agents_sdk")
+        if self.sdk_max_turns < 1:
+            raise ValueError("llm.sdk_max_turns must be positive")
+        if self.sdk_model_retries < 0:
+            raise ValueError("llm.sdk_model_retries must be non-negative")
 
 
 @dataclass

@@ -131,6 +131,8 @@ class LLMClient(Protocol):
         sanitized_context: dict[str, Any],
         evidence: Sequence[Evidence],
         output_schema: dict[str, Any],
+        kg_tool_session: Any | None = None,
+        trace_context: dict[str, Any] | None = None,
     ) -> Hypothesis: ...
 
 

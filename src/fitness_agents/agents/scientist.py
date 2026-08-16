@@ -103,7 +103,10 @@ class ScientistAgent:
         observations: Sequence[FitnessObservation],
         evidence: Sequence[Evidence],
         kg_interaction: Any | None = None,
+        kg_tool_session: Any | None = None,
     ) -> Hypothesis:
+        if kg_interaction is not None and kg_tool_session is not None:
+            raise ValueError("Use either a precomputed KG interaction or an SDK KG session")
         context = self.sanitized_context(state, observed_variants, observations)
         if kg_interaction is not None:
             interaction_payload = asdict(kg_interaction)
@@ -124,11 +127,26 @@ class ScientistAgent:
         else:
             self.last_knowledge_query_id = None
             self.last_knowledge_query_ids = ()
-        return self.client.generate_hypothesis(
+        hypothesis = self.client.generate_hypothesis(
             sanitized_context=context,
             evidence=evidence,
             output_schema=HYPOTHESIS_SCHEMA,
+            kg_tool_session=kg_tool_session,
+            trace_context={
+                "run_id": state.run_id,
+                "round_id": state.round_id,
+                "variant_id": None,
+                "role": "scientist",
+            },
         )
+        if kg_tool_session is not None:
+            self.last_knowledge_query_ids = kg_tool_session.query_ids
+            self.last_knowledge_query_id = (
+                self.last_knowledge_query_ids[-1]
+                if self.last_knowledge_query_ids
+                else None
+            )
+        return hypothesis
 
     def inspect_variant(self, variant_id: str, *, round_id: int) -> dict[str, Any]:
         """Expose the same safe KG interface to future critic/designer agent steps."""

@@ -44,6 +44,7 @@ from fitness_agents.kg_interaction import (
     KGQueryContext,
     KGQueryPlan,
     KGQueryStep,
+    KGToolSession,
     QueryIntent,
 )
 from fitness_agents.knowledge import KnowledgeEngine
@@ -201,6 +202,7 @@ class CampaignRunner:
         self.agent = agent or ScientistAgent(
             create_llm_client(
                 self.config.llm.provider,
+                runtime=self.config.llm.runtime,
                 profile=self.config.llm.profile,
                 model=self.config.llm.model,
                 base_url=self.config.llm.base_url,
@@ -209,6 +211,9 @@ class CampaignRunner:
                 max_tokens=self.config.llm.max_tokens,
                 reasoning_effort=self.config.llm.reasoning_effort,
                 thinking=self.config.llm.thinking,
+                sdk_tracing_enabled=self.config.llm.sdk_tracing_enabled,
+                sdk_max_turns=self.config.llm.sdk_max_turns,
+                sdk_model_retries=self.config.llm.sdk_model_retries,
             ),
             knowledge_graph=graph_tool,
         )
@@ -230,6 +235,7 @@ class CampaignRunner:
             )
         self.rethink_client = create_rethink_client(
             self.config.llm.provider,
+            runtime=self.config.llm.runtime,
             model=self.config.llm.model,
             base_url=self.config.llm.base_url,
             api_key=self.config.llm.api_key,
@@ -237,6 +243,9 @@ class CampaignRunner:
             max_tokens=self.config.llm.max_tokens,
             reasoning_effort=self.config.llm.reasoning_effort,
             thinking=self.config.llm.thinking,
+            sdk_tracing_enabled=self.config.llm.sdk_tracing_enabled,
+            sdk_max_turns=self.config.llm.sdk_max_turns,
+            sdk_model_retries=self.config.llm.sdk_model_retries,
         )
         if critic_agent is None:
             rule_critic = RuleBasedCriticClient()
@@ -351,6 +360,44 @@ class CampaignRunner:
             ),
         )
 
+    def _new_sdk_kg_tool_session(
+        self, *, round_id: int, observed_variants: list[Any]
+    ) -> KGToolSession | None:
+        if (
+            self.config.mode not in {"llm_agent", "knowledge_agent"}
+            or self.kg_interaction is None
+            or not getattr(self.agent.client, "supports_kg_tools", False)
+        ):
+            return None
+        return KGToolSession(
+            self.kg_interaction,
+            KGQueryContext(
+                run_id=self.run_id,
+                round_id=round_id,
+                allowed_variant_ids=frozenset(item.variant_id for item in observed_variants),
+                max_rows=self.config.kg_interaction.max_rows,
+            ),
+            plan_id=f"kgplan:{self.run_id}:r{round_id}:sdk",
+            max_tool_calls=self.config.kg_interaction.max_tool_calls,
+        )
+
+    def _record_kg_interaction(self, *, round_id: int, interaction_result: Any) -> None:
+        self.writer.write_json(
+            f"round_{round_id:02d}/kg_interaction.json",
+            interaction_result,
+        )
+        self.writer.event(
+            "kg_interaction_completed",
+            {
+                "round_id": round_id,
+                "operators": [pack.operator for pack in interaction_result.packs],
+                "query_ids": [pack.query_id for pack in interaction_result.packs],
+                "executed_steps": interaction_result.executed_steps,
+                "skipped_steps": interaction_result.skipped_steps,
+                "stop_reason": interaction_result.stop_reason,
+            },
+        )
+
     def _config_record(self) -> dict[str, Any]:
         return {
             "mode": self.config.mode,
@@ -369,6 +416,7 @@ class CampaignRunner:
             "llm_provider": self.config.llm.provider,
             "llm": {
                 "provider": self.config.llm.provider,
+                "runtime": self.config.llm.runtime,
                 "profile": self.config.llm.profile,
                 "profile_sha256": getattr(
                     self.agent.client, "profile_sha256", None
@@ -379,6 +427,9 @@ class CampaignRunner:
                 "max_tokens": self.config.llm.max_tokens,
                 "reasoning_effort": self.config.llm.reasoning_effort,
                 "thinking": self.config.llm.thinking,
+                "sdk_tracing_enabled": self.config.llm.sdk_tracing_enabled,
+                "sdk_trace_role": "observability_only",
+                "scientific_state_source": "wet_dry_kg_artifact",
                 "api_key_ref": self.config.llm.api_key
                 if isinstance(self.config.llm.api_key, str)
                 and self.config.llm.api_key.startswith("env:")
@@ -647,25 +698,20 @@ class CampaignRunner:
                     "relation_count": len(structured_result.snapshot.relations),
                 },
             )
-            interaction_result = self._run_kg_interaction(
-                round_id=round_id,
-                observed_variants=observed_variants,
+            kg_tool_session = self._new_sdk_kg_tool_session(
+                round_id=round_id, observed_variants=observed_variants
+            )
+            interaction_result = (
+                None
+                if kg_tool_session is not None
+                else self._run_kg_interaction(
+                    round_id=round_id,
+                    observed_variants=observed_variants,
+                )
             )
             if interaction_result is not None:
-                self.writer.write_json(
-                    f"round_{round_id:02d}/kg_interaction.json",
-                    interaction_result,
-                )
-                self.writer.event(
-                    "kg_interaction_completed",
-                    {
-                        "round_id": round_id,
-                        "operators": [pack.operator for pack in interaction_result.packs],
-                        "query_ids": [pack.query_id for pack in interaction_result.packs],
-                        "executed_steps": interaction_result.executed_steps,
-                        "skipped_steps": interaction_result.skipped_steps,
-                        "stop_reason": interaction_result.stop_reason,
-                    },
+                self._record_kg_interaction(
+                    round_id=round_id, interaction_result=interaction_result
                 )
 
             hypothesis = None
@@ -676,13 +722,21 @@ class CampaignRunner:
                     phase=CampaignPhase.LLM_HYPOTHESIS,
                     model=self.config.llm.model or self.config.llm.provider,
                 )
-                hypothesis = self.agent.propose_hypothesis(
-                    self.state,
-                    observed_variants,
-                    self.state.observed,
-                    _flatten_evidence(evidence),
-                    kg_interaction=interaction_result,
-                )
+                try:
+                    hypothesis = self.agent.propose_hypothesis(
+                        self.state,
+                        observed_variants,
+                        self.state.observed,
+                        _flatten_evidence(evidence),
+                        kg_interaction=interaction_result,
+                        kg_tool_session=kg_tool_session,
+                    )
+                finally:
+                    if kg_tool_session is not None:
+                        interaction_result = kg_tool_session.result()
+                        self._record_kg_interaction(
+                            round_id=round_id, interaction_result=interaction_result
+                        )
                 self.state.hypotheses.append(hypothesis)
                 self.knowledge.graph.add_hypothesis(
                     hypothesis.hypothesis_id,

@@ -42,7 +42,10 @@ class MockScientistLLMClient:
         sanitized_context: dict[str, Any],
         evidence: Sequence[Evidence],
         output_schema: dict[str, Any],
+        kg_tool_session: Any | None = None,
+        trace_context: dict[str, Any] | None = None,
     ) -> Hypothesis:
+        del kg_tool_session, trace_context
         observations = list(sanitized_context.get("visible_observations", []))
         if not observations:
             preferred = {39: ("V",), 40: ("D",), 41: ("G",), 54: ("V",)}
@@ -154,7 +157,10 @@ class OpenAICompatibleLLMClient:
         sanitized_context: dict[str, Any],
         evidence: Sequence[Evidence],
         output_schema: dict[str, Any],
+        kg_tool_session: Any | None = None,
+        trace_context: dict[str, Any] | None = None,
     ) -> Hypothesis:
+        del kg_tool_session, trace_context
         evidence_payload = [entry.__dict__ for entry in evidence[:80]]
         expected_id = str(sanitized_context["expected_hypothesis_id"])
         expected_parent_id = sanitized_context.get("previous_hypothesis_id")
@@ -200,6 +206,7 @@ class OpenAICompatibleLLMClient:
 
 
 def create_llm_client(provider: str, **kwargs: Any):
+    runtime = str(kwargs.pop("runtime", "chat_completions"))
     if provider == "mock":
         return MockScientistLLMClient()
     if provider in {"openai", "openai_compatible", "deepseek"}:
@@ -207,5 +214,14 @@ def create_llm_client(provider: str, **kwargs: Any):
             kwargs.setdefault("provider", "deepseek")
             kwargs.setdefault("base_url", resolve_base_url(kwargs.get("base_url"), provider="deepseek"))
             kwargs.setdefault("model", resolve_model(kwargs.get("model"), provider="deepseek"))
+        if runtime == "agents_sdk":
+            from .sdk_agents import AgentsSDKScientistLLMClient
+
+            return AgentsSDKScientistLLMClient(**kwargs)
+        if runtime != "chat_completions":
+            raise ValueError(f"Unknown LLM runtime {runtime!r}")
+        kwargs.pop("sdk_tracing_enabled", None)
+        kwargs.pop("sdk_max_turns", None)
+        kwargs.pop("sdk_model_retries", None)
         return OpenAICompatibleLLMClient(**kwargs)
     raise ValueError(f"Unknown LLM provider {provider!r}")
