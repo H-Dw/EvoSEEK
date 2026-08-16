@@ -1,6 +1,7 @@
 # DeepSeek V4 via Chat Completions. The key stays in `.env` / the process environment.
 # Never put a literal sk-... value in this file or in experiment YAML.
 provider: deepseek
+profile: scientific_v1
 model: deepseek-v4-flash
 base_url: https://api.deepseek.com
 api_key: env:DEEPSEEK_API_KEY

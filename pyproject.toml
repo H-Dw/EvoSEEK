@@ -44,6 +44,7 @@ where = ["src"]
   "critic_profiles/scientific_v1/*.yaml",
   "critic_profiles/scientific_v1/*.json",
   "critic_profiles/scientific_v1/*.jsonl",
+  "scientist_profiles/scientific_v1/*.md",
 ]
 
 [tool.pytest.ini_options]

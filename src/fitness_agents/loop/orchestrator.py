@@ -201,6 +201,7 @@ class CampaignRunner:
         self.agent = agent or ScientistAgent(
             create_llm_client(
                 self.config.llm.provider,
+                profile=self.config.llm.profile,
                 model=self.config.llm.model,
                 base_url=self.config.llm.base_url,
                 api_key=self.config.llm.api_key,
@@ -368,6 +369,10 @@ class CampaignRunner:
             "llm_provider": self.config.llm.provider,
             "llm": {
                 "provider": self.config.llm.provider,
+                "profile": self.config.llm.profile,
+                "profile_sha256": getattr(
+                    self.agent.client, "profile_sha256", None
+                ),
                 "model": self.config.llm.model,
                 "base_url": self.config.llm.base_url,
                 "temperature": self.config.llm.temperature,

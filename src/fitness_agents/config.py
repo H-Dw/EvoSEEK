@@ -250,6 +250,7 @@ class CriticConfig:
 @dataclass
 class LLMConfig:
     provider: str = "mock"
+    profile: str = "scientific_v1"
     model: str | None = None
     base_url: str | None = None
     api_key: str | None = None

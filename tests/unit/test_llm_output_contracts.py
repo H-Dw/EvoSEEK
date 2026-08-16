@@ -5,7 +5,11 @@ import json
 import pytest
 from pydantic import ValidationError
 
-from fitness_agents.agents.llm import HYPOTHESIS_SCHEMA, OpenAICompatibleLLMClient
+from fitness_agents.agents.llm import (
+    HYPOTHESIS_SCHEMA,
+    OpenAICompatibleLLMClient,
+    load_scientist_profile,
+)
 from fitness_agents.agents.output_contracts import HypothesisOutput
 
 
@@ -54,6 +58,7 @@ def _client(remote: _SequenceClient) -> OpenAICompatibleLLMClient:
     client.max_tokens = 1024
     client.reasoning_effort = None
     client.thinking = None
+    client.profile = "Return the complete hypothesis contract."
     client.client = remote
     return client
 
@@ -107,3 +112,12 @@ def test_hypothesis_output_schema_has_fixed_site_keys() -> None:
 
     assert site_schema["additionalProperties"] is False
     assert set(site_schema["required"]) == {"39", "40", "41", "54"}
+
+
+def test_scientist_profile_defines_output_and_authority_boundaries() -> None:
+    profile = load_scientist_profile("scientific_v1")
+
+    assert "expected_hypothesis_id" in profile
+    assert "oracle" in profile
+    assert "final-test" in profile
+    assert "batch submission" in profile

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from collections import defaultdict
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
 
 from fitness_agents.agents.remote_llm import (
@@ -16,6 +18,13 @@ from fitness_agents.contracts.schemas import Evidence, Hypothesis
 from .output_contracts import HypothesisOutput, validate_hypothesis_payload
 
 HYPOTHESIS_SCHEMA: dict[str, Any] = HypothesisOutput.model_json_schema()
+
+
+def load_scientist_profile(profile: str) -> str:
+    skill = Path(__file__).with_name("scientist_profiles") / profile / "SKILL.md"
+    if not skill.is_file():
+        raise FileNotFoundError(f"Unknown scientist profile {profile!r}")
+    return skill.read_text(encoding="utf-8")
 
 
 class MockScientistLLMClient:
@@ -127,12 +136,16 @@ class OpenAICompatibleLLMClient:
         reasoning_effort: str | None = None,
         thinking: str | None = None,
         api_key: str | None = None,
+        profile: str = "scientific_v1",
     ) -> None:
         self.model = resolve_model(model, provider=provider)
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.reasoning_effort = reasoning_effort
         self.thinking = thinking
+        self.profile_name = profile
+        self.profile = load_scientist_profile(profile)
+        self.profile_sha256 = hashlib.sha256(self.profile.encode()).hexdigest()
         self.client = create_openai_client(api_key=api_key, base_url=base_url, provider=provider)
 
     def generate_hypothesis(
@@ -153,12 +166,10 @@ class OpenAICompatibleLLMClient:
                 {
                     "role": "system",
                     "content": (
-                        "You are a protein-engineering hypothesis agent. Use only supplied visible "
-                        "measurements and cited evidence. Do not invent fitness values. Reply with "
-                        "a single JSON object that matches this schema: "
+                        self.profile
+                        + "\n\nReply with a single JSON object that matches this schema: "
                         + json.dumps(output_schema, ensure_ascii=False)
-                        + " preferred_residues keys must be the integer site numbers 39, 40, 41, "
-                        "and 54. Do not include markdown."
+                        + " Do not include markdown."
                     ),
                 },
                 {
