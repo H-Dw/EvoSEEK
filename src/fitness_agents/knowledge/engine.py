@@ -8,8 +8,25 @@ from pathlib import Path
 
 import numpy as np
 
-from fitness_agents.config import KnowledgeConfig
-from fitness_agents.contracts.schemas import Evidence, FitnessObservation, Prediction, Variant
+from fitness_agents.config import KnowledgeConfig, ValidationConfig
+from fitness_agents.contracts.schemas import (
+    Evidence,
+    FitnessObservation,
+    Hypothesis,
+    Prediction,
+    ReThinkReflection,
+    ValidationRecord,
+    Variant,
+)
+from fitness_agents.kg_knowledge import (
+    BuildContext,
+    CampaignObservationAdapter,
+    InferenceKnowledgeAdapter,
+    KnowledgeGraphBuilder,
+    SQLiteGraphSink,
+    ValidationKnowledgeAdapter,
+)
+from fitness_agents.plugin_registry import PluginRegistry
 from fitness_agents.utils.progress import heartbeat
 
 from .graph import ObservationKnowledgeGraph
@@ -74,12 +91,34 @@ class KnowledgeEngine:
         *,
         graph_path: str | Path,
         assay_id: str,
+        protein_id: str = "unknown",
+        validation_config: ValidationConfig | None = None,
+        structured_graph_path: str | Path | None = None,
     ) -> None:
         self.config = config
-        self.graph = ObservationKnowledgeGraph(graph_path, assay_id=assay_id)
+        self.validation_config = validation_config or ValidationConfig()
+        self.protein_id = protein_id
+        self.graph = ObservationKnowledgeGraph(
+            graph_path,
+            assay_id=assay_id,
+            recency_decay=self.validation_config.recency_decay,
+        )
         self._observed_variants: dict[str, Variant] = {}
         self._observations: dict[str, FitnessObservation] = {}
+        self._validation_records: dict[str, ValidationRecord] = {}
+        self._reflections: dict[str, ReThinkReflection] = {}
         self.providers: dict[str, object] = {}
+        sink_path = structured_graph_path or Path(graph_path).with_name("structured_kg.sqlite")
+        self.structured_sink = SQLiteGraphSink(sink_path)
+        adapters = PluginRegistry("knowledge_adapter")
+        adapters.register("campaign_observations", CampaignObservationAdapter())
+        adapters.register("inference_records", InferenceKnowledgeAdapter())
+        adapters.register("validation_records", ValidationKnowledgeAdapter())
+        self.structured_builder = KnowledgeGraphBuilder(
+            adapters,
+            sinks=(self.structured_sink,),
+            strict=True,
+        )
         for enabled, channel, function in (
             (config.physchem, "physchem", self._physchem),
             (config.conservation, "conservation", self._conservation),
@@ -107,6 +146,71 @@ class KnowledgeEngine:
         for observation in observations:
             self._observations[observation.variant_id] = observation
         self.graph.add_observations(variants, observations)
+
+    def record_validation(
+        self,
+        records: Sequence[ValidationRecord],
+        reflections: Sequence[ReThinkReflection],
+    ) -> None:
+        self.graph.add_validation_records(records)
+        self._validation_records.update({item.record_id: item for item in records})
+        self._reflections.update({item.reflection_id: item for item in reflections})
+
+    def validation_prior_scores(
+        self,
+        variants: Sequence[Variant],
+        *,
+        round_id: int,
+    ) -> dict[str, float]:
+        statistics = self.graph.validation_prior_statistics(round_id=round_id)
+        if not statistics:
+            return {item.variant_id: 0.0 for item in variants}
+        global_mean = float(np.average(
+            [item[0] for item in statistics.values()],
+            weights=[max(item[1], 1e-8) for item in statistics.values()],
+        ))
+        output: dict[str, float] = {}
+        for variant in variants:
+            effects = []
+            for index, residue in enumerate(variant.variant):
+                position = (39, 40, 41, 54)[index]
+                if (position, residue) not in statistics:
+                    continue
+                mean, weight, _wet_count, _dry_count = statistics[(position, residue)]
+                effects.append((weight / (weight + 1.0)) * (mean - global_mean))
+            output[variant.variant_id] = float(np.tanh(np.mean(effects))) if effects else 0.0
+        return output
+
+    def sync_structured_kg(
+        self,
+        *,
+        run_id: str,
+        round_id: int,
+        variants: Sequence[Variant],
+        observations: Sequence[FitnessObservation],
+        predictions: Sequence[Prediction] = (),
+        evidence: Sequence[Evidence] = (),
+        hypotheses: Sequence[Hypothesis] = (),
+    ):
+        """Build, validate, and persist the external structured KG during the campaign."""
+
+        return self.structured_builder.build(
+            BuildContext(
+                run_id=run_id,
+                round_id=round_id,
+                protein_id=self.protein_id,
+                assay_id=self.graph.assay_id,
+                resources={
+                    "variants": tuple(variants),
+                    "observations": tuple(observations),
+                    "predictions": tuple(predictions),
+                    "evidence": tuple(evidence),
+                    "hypotheses": tuple(hypotheses),
+                    "validation_records": tuple(self._validation_records.values()),
+                    "reflections": tuple(self._reflections.values()),
+                },
+            )
+        )
 
     def _physchem(self, variant: Variant, round_id: int, **_kwargs) -> Evidence:
         distances = []
@@ -276,4 +380,5 @@ class KnowledgeEngine:
         }
 
     def close(self) -> None:
+        self.structured_sink.close()
         self.graph.close()

@@ -1,6 +1,8 @@
 import json
 
-from fitness_agents.contracts.schemas import FitnessObservation, Prediction
+import pytest
+
+from fitness_agents.contracts.schemas import FitnessObservation, Prediction, ValidationRecord
 from fitness_agents.data import load_dataset_bundle
 from fitness_agents.knowledge import KnowledgeEngine
 
@@ -96,4 +98,46 @@ def test_hypothesis_context_includes_persisted_evidence_before_predictions(
     assert all(
         item["source_type"] == "computed_evidence" for item in context["top_knowledge_evidence"]
     )
+    engine.close()
+
+
+def test_validation_priors_append_and_apply_fidelity_and_recency_weights(
+    experiment_config, tmp_path
+):
+    bundle = load_dataset_bundle(
+        experiment_config.task.public_data_path, experiment_config.task.oracle_data_path
+    )
+    variant = bundle.oracle_pool[0]
+    engine = KnowledgeEngine(
+        experiment_config.knowledge,
+        graph_path=tmp_path / "validation-prior-kg.sqlite",
+        assay_id="test",
+    )
+    engine.graph.add_variants([variant])
+    records = (
+        ValidationRecord(
+            "wet:1", variant.variant_id, 1, "wet", variant.mutation_notation,
+            1.0, 0.0, "assay", None, 1.0, 1.0, "reason", "h1", (),
+            None, "supported", "wet support",
+        ),
+        ValidationRecord(
+            "dry:1", variant.variant_id, 1, "dry", variant.mutation_notation,
+            0.8, 0.2, "predictor", "model:v1", 0.2, 0.5, "reason", "h1", (),
+            None, "supported", "dry support",
+        ),
+    )
+    engine.record_validation(records, ())
+    engine.record_validation(records, ())
+
+    next_round = engine.graph.validation_prior_context(round_id=2, limit=10)
+    later_round = engine.graph.validation_prior_context(round_id=3, limit=10)
+
+    assert len(next_round) == 2
+    weights = {item["validation_type"]: item["effective_weight"] for item in next_round}
+    later_weights = {
+        item["validation_type"]: item["effective_weight"] for item in later_round
+    }
+    assert weights == {"dry": 0.1, "wet": 1.0}
+    assert later_weights["wet"] == pytest.approx(0.85)
+    assert later_weights["dry"] == pytest.approx(0.085)
     engine.close()

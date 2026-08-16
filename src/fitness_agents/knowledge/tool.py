@@ -40,7 +40,8 @@ class AgentKnowledgeGraphTool:
             "as_of_round": round_id,
             "visibility_rule": (
                 "measurements require round_revealed < as_of_round; current-round model "
-                "predictions and computed evidence remain explicitly typed and are not measurements"
+                "predictions and computed evidence remain explicitly typed and are not measurements; "
+                "validation priors are append-only and retain wet/dry provenance"
             ),
             **result,
         }

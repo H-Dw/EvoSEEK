@@ -1,8 +1,4 @@
-"""Optional schema-first construction pipeline for an external scientific KG.
-
-The package is not connected to the campaign orchestrator by default. It can be
-enabled per experiment while the current observation-log baseline remains unchanged.
-"""
+"""Schema-first construction pipeline for the campaign's external scientific KG."""
 
 from .ablation import KnowledgeAblationConfig
 from .adapters import (
@@ -11,6 +7,7 @@ from .adapters import (
     InferenceKnowledgeAdapter,
     KnowledgeAdapter,
     StaticKnowledgeAdapter,
+    ValidationKnowledgeAdapter,
 )
 from .builder import BuildReport, BuildResult, KnowledgeGraphBuilder
 from .catalog import DEFAULT_ENTITY_SPECS, DEFAULT_RELATION_SPECS, EntitySpec, RelationSpec
@@ -26,7 +23,7 @@ from .schema import (
     RelationRecord,
     stable_record_id,
 )
-from .sinks import InMemoryGraphSink, KnowledgeGraphSink
+from .sinks import InMemoryGraphSink, KnowledgeGraphSink, SQLiteGraphSink
 from .validation import CoreSchemaValidator, KnowledgeValidator, ValidationIssue
 
 __all__ = [
@@ -58,7 +55,9 @@ __all__ = [
     "ProvenanceAwareFusion",
     "RelationRecord",
     "RelationSpec",
+    "SQLiteGraphSink",
     "StaticKnowledgeAdapter",
     "ValidationIssue",
+    "ValidationKnowledgeAdapter",
     "stable_record_id",
 ]

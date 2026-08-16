@@ -1,8 +1,4 @@
-"""Optional, bounded LLM-KG interaction components.
-
-The package is intentionally not wired into the campaign orchestrator by default.
-Experiments can opt in one component at a time and keep the current baseline intact.
-"""
+"""Bounded LLM-KG interaction components used by the knowledge-agent campaign path."""
 
 from .ablation import InteractionAblationConfig
 from .contracts import (

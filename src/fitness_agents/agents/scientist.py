@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import asdict
 from typing import Any
 
 from fitness_agents.contracts.interfaces import KnowledgeGraphTool, LLMClient
@@ -49,6 +50,7 @@ class ScientistAgent:
         self.client = client
         self.knowledge_graph = knowledge_graph
         self.last_knowledge_query_id: str | None = None
+        self.last_knowledge_query_ids: tuple[str, ...] = ()
 
     @staticmethod
     def sanitized_context(
@@ -99,15 +101,28 @@ class ScientistAgent:
         observed_variants: Sequence[Variant],
         observations: Sequence[FitnessObservation],
         evidence: Sequence[Evidence],
+        kg_interaction: Any | None = None,
     ) -> Hypothesis:
         context = self.sanitized_context(state, observed_variants, observations)
-        if self.knowledge_graph is not None:
+        if kg_interaction is not None:
+            interaction_payload = asdict(kg_interaction)
+            assert_sanitized(interaction_payload, "context.kg_interaction")
+            context["kg_interaction"] = interaction_payload
+            self.last_knowledge_query_ids = tuple(
+                pack.query_id for pack in kg_interaction.packs
+            )
+            self.last_knowledge_query_id = (
+                self.last_knowledge_query_ids[-1] if self.last_knowledge_query_ids else None
+            )
+        elif self.knowledge_graph is not None:
             graph_context = self.knowledge_graph.hypothesis_context(round_id=state.round_id)
             assert_sanitized(graph_context, "context.knowledge_graph")
             context["knowledge_graph"] = graph_context
             self.last_knowledge_query_id = str(graph_context["query_id"])
+            self.last_knowledge_query_ids = (self.last_knowledge_query_id,)
         else:
             self.last_knowledge_query_id = None
+            self.last_knowledge_query_ids = ()
         return self.client.generate_hypothesis(
             sanitized_context=context,
             evidence=evidence,

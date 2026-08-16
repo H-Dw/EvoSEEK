@@ -47,6 +47,9 @@ DEFAULT_ENTITY_SPECS = (
     EntitySpec("ModelRun", KnowledgeLayer.MODEL, "P1", 5, 2, "model", "模型和特征版本"),
     EntitySpec("Evidence", KnowledgeLayer.AGENT, "P1", 5, 1, "reasoning", "可追溯证据单元"),
     EntitySpec("Hypothesis", KnowledgeLayer.AGENT, "P1", 5, 2, "reasoning", "可证伪设计假设"),
+    EntitySpec("WetValidation", KnowledgeLayer.EXPERIMENTAL, "P1", 5, 1, "validation", "真实适应度验证"),
+    EntitySpec("DryValidation", KnowledgeLayer.MODEL, "P1", 4, 1, "validation", "模型适应度验证"),
+    EntitySpec("ReThinkReflection", KnowledgeLayer.AGENT, "P1", 5, 2, "reasoning", "推荐原因与验证一致性反思"),
     EntitySpec("Decision", KnowledgeLayer.AGENT, "P1", 5, 2, "reasoning", "候选选择与理由"),
     EntitySpec(
         "Structure", KnowledgeLayer.STRUCTURE, "P1", 5, 2, "structure", "实验或预测结构版本"
@@ -96,6 +99,9 @@ DEFAULT_RELATION_SPECS = (
     RelationSpec("ABOUT", "Evidence", "Variant", KnowledgeLayer.AGENT, "P1"),
     RelationSpec("SUPPORTED_BY", "Hypothesis", "Evidence", KnowledgeLayer.AGENT, "P1"),
     RelationSpec("CONTRADICTED_BY", "Hypothesis", "Evidence", KnowledgeLayer.AGENT, "P1"),
+    RelationSpec("VALIDATES", "WetValidation", "Variant", KnowledgeLayer.EXPERIMENTAL, "P1"),
+    RelationSpec("VALIDATES", "DryValidation", "Variant", KnowledgeLayer.MODEL, "P1"),
+    RelationSpec("REFLECTED_BY", "WetValidation", "ReThinkReflection", KnowledgeLayer.AGENT, "P1"),
     RelationSpec(
         "MAPPED_TO_STRUCTURE",
         "ResiduePosition",

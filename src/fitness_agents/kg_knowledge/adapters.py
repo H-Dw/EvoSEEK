@@ -8,6 +8,8 @@ from fitness_agents.contracts.schemas import (
     FitnessObservation,
     Hypothesis,
     Prediction,
+    ReThinkReflection,
+    ValidationRecord,
     Variant,
 )
 from fitness_agents.mutation.notation import InvalidMutationNotation, parse_mutation_notation
@@ -500,6 +502,105 @@ class InferenceKnowledgeAdapter:
                         source_group="agent",
                         confidence=evidence.confidence,
                         valid_from_round=context.round_id,
+                    )
+                )
+        return KnowledgeBatch(self.name, tuple(entities.values()), tuple(relations))
+
+
+class ValidationKnowledgeAdapter:
+    """Expose append-only wet/dry validation and ReThink records in the external KG."""
+
+    name = "validation_records"
+
+    def extract(self, context: BuildContext) -> KnowledgeBatch:
+        records = tuple(context.resources.get("validation_records", ()))
+        reflections = tuple(context.resources.get("reflections", ()))
+        if not all(isinstance(item, ValidationRecord) for item in records):
+            raise TypeError("resources['validation_records'] must contain ValidationRecord records")
+        if not all(isinstance(item, ReThinkReflection) for item in reflections):
+            raise TypeError("resources['reflections'] must contain ReThinkReflection records")
+        entities: dict[str, EntityRecord] = {}
+        relations: list[RelationRecord] = []
+        reflection_lookup = {item.reflection_id: item for item in reflections}
+        for reflection in reflections:
+            entities[reflection.reflection_id] = EntityRecord(
+                reflection.reflection_id,
+                "ReThinkReflection",
+                KnowledgeLayer.AGENT,
+                frozenset({Modality.TEXT, Modality.TIME_SERIES}),
+                {
+                    "variant_id": reflection.variant_id,
+                    "round_id": reflection.round_id,
+                    "verdict": reflection.verdict,
+                    "summary": reflection.summary,
+                    "positive_findings": reflection.positive_findings,
+                    "negative_findings": reflection.negative_findings,
+                    "revised_reason": reflection.revised_reason,
+                    "next_round_advice": reflection.next_round_advice,
+                    "provider": reflection.provider,
+                },
+                (f"agent:{reflection.provider}",),
+                "rethink_agent",
+                valid_from_round=reflection.round_id,
+            )
+        for record in records:
+            layer = (
+                KnowledgeLayer.EXPERIMENTAL
+                if record.validation_type == "wet"
+                else KnowledgeLayer.MODEL
+            )
+            entities[record.record_id] = EntityRecord(
+                record.record_id,
+                "WetValidation" if record.validation_type == "wet" else "DryValidation",
+                layer,
+                frozenset({Modality.TABULAR, Modality.TIME_SERIES}),
+                {
+                    "validation_type": record.validation_type,
+                    "mutation_notation": record.mutation_notation,
+                    "value": record.value,
+                    "uncertainty": record.uncertainty,
+                    "model_version": record.model_version,
+                    "base_weight": record.base_weight,
+                    "reliability": record.reliability,
+                    "agent_reason": record.agent_reason,
+                    "hypothesis_id": record.hypothesis_id,
+                    "reflection_verdict": record.reflection_verdict,
+                    "reflection_summary": record.reflection_summary,
+                },
+                (record.source_id,),
+                "wet_validation" if record.validation_type == "wet" else "dry_validation",
+                record.reliability,
+                valid_from_round=record.round_id,
+            )
+            relations.append(
+                _relation(
+                    self.name,
+                    record.record_id,
+                    "VALIDATES",
+                    f"variant:{record.variant_id}",
+                    layer,
+                    modality=Modality.TABULAR,
+                    source_id=record.source_id,
+                    source_group=(
+                        "wet_validation" if record.validation_type == "wet" else "dry_validation"
+                    ),
+                    context_id=record.record_id,
+                    valid_from_round=record.round_id,
+                )
+            )
+            if record.reflection_id and record.reflection_id in reflection_lookup:
+                relations.append(
+                    _relation(
+                        self.name,
+                        record.record_id,
+                        "REFLECTED_BY",
+                        record.reflection_id,
+                        KnowledgeLayer.AGENT,
+                        modality=Modality.TEXT,
+                        source_id=f"agent:{reflection_lookup[record.reflection_id].provider}",
+                        source_group="rethink_agent",
+                        context_id=record.record_id,
+                        valid_from_round=record.round_id,
                     )
                 )
         return KnowledgeBatch(self.name, tuple(entities.values()), tuple(relations))

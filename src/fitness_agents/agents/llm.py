@@ -80,6 +80,15 @@ class MockScientistLLMClient:
             residue = str(item["residue"])
             if residue not in graph_preferences[position]:
                 graph_preferences[position].append(residue)
+        interaction_context = sanitized_context.get("kg_interaction", {})
+        for pack in interaction_context.get("packs", []):
+            for item in pack.get("facts", []):
+                if item.get("fact_type") != "residue_aggregate":
+                    continue
+                position = int(item["position"])
+                residue = str(item["residue"])
+                if residue not in graph_preferences[position]:
+                    graph_preferences[position].append(residue)
         for position in (39, 40, 41, 54):
             merged = graph_preferences[position] + list(preferred.get(position, ()))
             preferred[position] = tuple(dict.fromkeys(merged))[:2]
@@ -94,9 +103,13 @@ class MockScientistLLMClient:
             f"{position}:{'/'.join(residues)}" for position, residues in preferred.items()
         )
         evidence_source = (
-            "Visible observations and the audited knowledge-graph query"
-            if graph_context
-            else "Visible elite observations"
+            "Visible observations and the audited multi-step KG interaction"
+            if interaction_context
+            else (
+                "Visible observations and the audited knowledge-graph query"
+                if graph_context
+                else "Visible elite observations"
+            )
         )
         return Hypothesis(
             hypothesis_id=f"hyp:{sanitized_context['run_id']}:r{round_id}",
@@ -117,7 +130,7 @@ class MockScientistLLMClient:
 
 def _preferred_residues(raw: Any) -> dict[int, tuple[str, ...]]:
     if not isinstance(raw, dict):
-        raise ValueError("preferred_residues must be a JSON object keyed by site number")
+        raise TypeError("preferred_residues must be a JSON object keyed by site number")
     parsed: dict[int, tuple[str, ...]] = {}
     for position, residues in raw.items():
         values = residues if isinstance(residues, (list, tuple)) else [residues]

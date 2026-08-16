@@ -11,6 +11,7 @@ from fitness_agents.contracts.schemas import (
     Evidence,
     FitnessObservation,
     Prediction,
+    ValidationRecord,
     Variant,
 )
 
@@ -26,10 +27,17 @@ class ObservationKnowledgeGraph:
     _WT_CODE = "VDGV"
     _POSITIONS = (39, 40, 41, 54)
 
-    def __init__(self, path: str | Path, *, assay_id: str) -> None:
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        assay_id: str,
+        recency_decay: float = 0.85,
+    ) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.assay_id = assay_id
+        self.recency_decay = recency_decay
         self.connection = sqlite3.connect(self.path)
         self.connection.execute("PRAGMA foreign_keys = ON")
         self.connection.executescript(
@@ -99,12 +107,34 @@ class ObservationKnowledgeGraph:
                 parameters_json TEXT NOT NULL,
                 result_json TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS validation_records (
+                record_id TEXT PRIMARY KEY,
+                variant_id TEXT NOT NULL,
+                round_id INTEGER NOT NULL,
+                validation_type TEXT NOT NULL CHECK(validation_type IN ('wet', 'dry')),
+                mutation_notation TEXT NOT NULL,
+                value REAL NOT NULL,
+                uncertainty REAL NOT NULL,
+                source_id TEXT NOT NULL,
+                model_version TEXT,
+                base_weight REAL NOT NULL,
+                reliability REAL NOT NULL,
+                agent_reason TEXT NOT NULL,
+                hypothesis_id TEXT,
+                evidence_ids_json TEXT NOT NULL,
+                reflection_id TEXT,
+                reflection_verdict TEXT,
+                reflection_summary TEXT NOT NULL,
+                FOREIGN KEY (variant_id) REFERENCES variants(variant_id)
+            );
             CREATE INDEX IF NOT EXISTS idx_observations_round
                 ON observations(round_id, variant_id);
             CREATE INDEX IF NOT EXISTS idx_predictions_round
                 ON predictions(round_id, fitness_mean DESC);
             CREATE INDEX IF NOT EXISTS idx_evidence_round
                 ON evidence(round_id, variant_id, channel);
+            CREATE INDEX IF NOT EXISTS idx_validation_round
+                ON validation_records(round_id, validation_type, variant_id);
             """
         )
         self._migrate_legacy_variants_table()
@@ -276,6 +306,152 @@ class ObservationKnowledgeGraph:
                 (hypothesis_id, round_id, statement, json.dumps(list(evidence_ids)), status),
             )
 
+    def add_validation_records(self, records: Sequence[ValidationRecord]) -> None:
+        """Append versioned wet/dry validation records without replacing earlier rounds."""
+
+        known = {
+            str(row[0])
+            for row in self.connection.execute("SELECT variant_id FROM variants").fetchall()
+        }
+        missing = {item.variant_id for item in records}.difference(known)
+        if missing:
+            raise ValueError(f"Validation records reference missing variants: {sorted(missing)}")
+        with self.connection:
+            for item in records:
+                self.connection.execute(
+                    """
+                    INSERT OR IGNORE INTO validation_records
+                        (record_id, variant_id, round_id, validation_type,
+                         mutation_notation, value, uncertainty, source_id, model_version,
+                         base_weight, reliability, agent_reason, hypothesis_id,
+                         evidence_ids_json, reflection_id, reflection_verdict,
+                         reflection_summary)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        item.record_id,
+                        item.variant_id,
+                        item.round_id,
+                        item.validation_type,
+                        item.mutation_notation,
+                        item.value,
+                        item.uncertainty,
+                        item.source_id,
+                        item.model_version,
+                        item.base_weight,
+                        item.reliability,
+                        item.agent_reason,
+                        item.hypothesis_id,
+                        json.dumps(item.evidence_ids),
+                        item.reflection_id,
+                        item.reflection_verdict,
+                        item.reflection_summary,
+                    ),
+                )
+
+    def dry_model_reliability(self, model_version: str, *, floor: float = 0.05) -> float:
+        rows = self.connection.execute(
+            """
+            SELECT dry.value, wet.value
+            FROM validation_records dry
+            JOIN validation_records wet
+              ON dry.variant_id = wet.variant_id AND dry.round_id = wet.round_id
+            WHERE dry.validation_type = 'dry' AND wet.validation_type = 'wet'
+              AND dry.model_version = ?
+            ORDER BY dry.round_id, dry.variant_id
+            """,
+            (model_version,),
+        ).fetchall()
+        if len(rows) < 2:
+            return 0.5
+        dry = [float(row[0]) for row in rows]
+        wet = [float(row[1]) for row in rows]
+        rmse = float((sum((left - right) ** 2 for left, right in zip(dry, wet)) / len(rows)) ** 0.5)
+        scale = max(
+            (sum((value - sum(wet) / len(wet)) ** 2 for value in wet) / len(wet)) ** 0.5,
+            1e-6,
+        )
+        return max(floor, min(1.0, 1.0 / (1.0 + rmse / scale)))
+
+    def validation_prior_context(self, *, round_id: int, limit: int) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            """
+            SELECT record_id, variant_id, round_id, validation_type, mutation_notation,
+                   value, uncertainty, source_id, model_version, base_weight,
+                   reliability, agent_reason, hypothesis_id, evidence_ids_json,
+                   reflection_id, reflection_verdict, reflection_summary
+            FROM validation_records
+            WHERE round_id < ?
+            ORDER BY round_id DESC, validation_type, variant_id, record_id
+            LIMIT ?
+            """,
+            (round_id, limit),
+        ).fetchall()
+        output = []
+        for row in rows:
+            age = max(0, round_id - int(row[2]) - 1)
+            effective_weight = float(row[9]) * float(row[10]) * self.recency_decay**age
+            output.append(
+                {
+                    "record_id": row[0],
+                    "variant_id": row[1],
+                    "source_round": int(row[2]),
+                    "validation_type": row[3],
+                    "mutation_notation": row[4],
+                    "validation_value": float(row[5]),
+                    "uncertainty": float(row[6]),
+                    "source_id": row[7],
+                    "model_version": row[8],
+                    "base_weight": float(row[9]),
+                    "reliability": float(row[10]),
+                    "effective_weight": effective_weight,
+                    "recency_age": age,
+                    "agent_reason": row[11],
+                    "hypothesis_id": row[12],
+                    "evidence_ids": json.loads(row[13]),
+                    "reflection_id": row[14],
+                    "reflection_verdict": row[15],
+                    "reflection_summary": row[16],
+                    "source_type": (
+                        "measurement" if row[3] == "wet" else "model_prediction"
+                    ),
+                }
+            )
+        return output
+
+    def validation_prior_statistics(
+        self, *, round_id: int
+    ) -> dict[tuple[int, str], tuple[float, float, int, int]]:
+        rows = self.connection.execute(
+            """
+            SELECT v.round_id, v.validation_type, v.value, v.base_weight,
+                   v.reliability, m.position, m.mutant_aa
+            FROM validation_records v JOIN mutations m ON v.variant_id = m.variant_id
+            WHERE v.round_id < ?
+            ORDER BY v.round_id, v.record_id, m.position
+            """,
+            (round_id,),
+        ).fetchall()
+        buckets: dict[tuple[int, str], list[tuple[float, float, str]]] = {}
+        for source_round, validation_type, value, base_weight, reliability, position, residue in rows:
+            age = max(0, round_id - int(source_round) - 1)
+            weight = float(base_weight) * float(reliability) * self.recency_decay**age
+            buckets.setdefault((int(position), str(residue)), []).append(
+                (float(value), weight, str(validation_type))
+            )
+        output: dict[tuple[int, str], tuple[float, float, int, int]] = {}
+        for key, entries in buckets.items():
+            total_weight = sum(weight for _, weight, _ in entries)
+            if total_weight <= 0:
+                continue
+            output[key] = (
+                sum(value * weight for value, weight, _ in entries) / total_weight,
+                total_weight,
+                sum(kind == "wet" for _, _, kind in entries),
+                sum(kind == "dry" for _, _, kind in entries),
+            )
+        return output
+
     def residue_statistics(self) -> dict[tuple[int, str], tuple[float, int]]:
         rows = self.connection.execute(
             """
@@ -446,6 +622,7 @@ class ObservationKnowledgeGraph:
             }
             for row in evidence_preview_rows
         ]
+        validation_prior = self.validation_prior_context(round_id=round_id, limit=limit)
         return {
             "visible_observation_count": observation_count,
             "visible_global_mean_fitness": global_mean,
@@ -454,6 +631,7 @@ class ObservationKnowledgeGraph:
             "top_knowledge_evidence": top_knowledge_evidence,
             "current_candidate_predictions": candidates,
             "prior_hypotheses": prior_hypotheses,
+            "validation_prior": validation_prior,
         }
 
     def explain_variant(self, variant_id: str, *, round_id: int) -> dict[str, Any]:
@@ -489,6 +667,16 @@ class ObservationKnowledgeGraph:
                    confidence, evidence_type
             FROM evidence WHERE variant_id = ? AND round_id <= ?
             ORDER BY round_id DESC, confidence * ABS(score) DESC, evidence_id
+            """,
+            (variant_id, round_id),
+        ).fetchall()
+        validation = self.connection.execute(
+            """
+            SELECT record_id, round_id, validation_type, value, uncertainty, source_id,
+                   model_version, base_weight, reliability, agent_reason,
+                   reflection_verdict, reflection_summary
+            FROM validation_records WHERE variant_id = ? AND round_id < ?
+            ORDER BY round_id DESC, validation_type, record_id
             """,
             (variant_id, round_id),
         ).fetchall()
@@ -534,6 +722,23 @@ class ObservationKnowledgeGraph:
                     "evidence_type": row[7],
                 }
                 for row in evidence
+            ],
+            "validation_history": [
+                {
+                    "record_id": row[0],
+                    "round_id": int(row[1]),
+                    "validation_type": row[2],
+                    "value": float(row[3]),
+                    "uncertainty": float(row[4]),
+                    "source_id": row[5],
+                    "model_version": row[6],
+                    "base_weight": float(row[7]),
+                    "reliability": float(row[8]),
+                    "agent_reason": row[9],
+                    "reflection_verdict": row[10],
+                    "reflection_summary": row[11],
+                }
+                for row in validation
             ],
         }
 
@@ -656,6 +861,32 @@ class ObservationKnowledgeGraph:
                 "predicate": "SUPPORTED_BY_EVIDENCE",
             }
             for row in evidence_rows
+        )
+        validation_rows = self.connection.execute(
+            """
+            SELECT record_id, variant_id, round_id, validation_type, value,
+                   uncertainty, source_id, model_version, base_weight, reliability,
+                   reflection_id, reflection_verdict
+            FROM validation_records ORDER BY round_id, validation_type, variant_id
+            """
+        ).fetchall()
+        edges.extend(
+            {
+                "entity_id": row[0],
+                "variant_id": row[1],
+                "round_id": row[2],
+                "validation_type": row[3],
+                "value": row[4],
+                "uncertainty": row[5],
+                "source_id": row[6],
+                "model_version": row[7],
+                "base_weight": row[8],
+                "reliability": row[9],
+                "reflection_id": row[10],
+                "reflection_verdict": row[11],
+                "predicate": "VALIDATED_BY_WET" if row[3] == "wet" else "VALIDATED_BY_DRY",
+            }
+            for row in validation_rows
         )
         return edges
 

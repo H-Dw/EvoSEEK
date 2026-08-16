@@ -56,6 +56,8 @@ class HypothesisContextOperator:
             facts.append({"fact_type": "measurement", **item})
         for item in _dict_tuple(result.get("top_knowledge_evidence")):
             facts.append({"fact_type": "computed_evidence", **item})
+        for item in _dict_tuple(result.get("validation_prior")):
+            facts.append({"fact_type": "validation_prior", **item})
         predictions = _dict_tuple(result.get("current_candidate_predictions"))
         evidence = tuple(
             dict(item)
@@ -97,7 +99,13 @@ class ExplainVariantOperator:
             query_id=str(result.get("query_id", _stable_query_id(self.name, (variant_id,)))),
             operator=self.name,
             as_of_round=context.round_id,
-            facts=_dict_tuple(result.get("visible_observations")),
+            facts=(
+                *_dict_tuple(result.get("visible_observations")),
+                *(
+                    {"fact_type": "validation_record", **item}
+                    for item in _dict_tuple(result.get("validation_history"))
+                ),
+            ),
             predictions=_dict_tuple(result.get("predictions")),
             evidence=evidence,
             supporting_paths=_dict_tuple(result.get("supporting_paths")),
@@ -141,6 +149,7 @@ class CompareVariantsOperator:
                     "found": bool(result.get("found", False)),
                     "mutation_notation": result.get("mutation_notation"),
                     "visible_observations": list(result.get("visible_observations", ())),
+                    "validation_history": list(result.get("validation_history", ())),
                 }
             )
             predictions.extend(
@@ -152,8 +161,21 @@ class CompareVariantsOperator:
                 evidence.append(record)
                 if float(item.get("score", 0.0)) < 0.0:
                     counterevidence.append(record)
+        query_id = _stable_query_id(self.name, query_ids)
+        if hasattr(self.tool, "graph"):
+            query_id = self.tool.graph.record_agent_query(
+                self.name,
+                round_id=context.round_id,
+                parameters={"variant_ids": list(variant_ids)},
+                result={
+                    "child_query_ids": query_ids,
+                    "fact_count": len(facts),
+                    "prediction_count": len(predictions),
+                    "evidence_count": len(evidence),
+                },
+            )
         return EvidencePack(
-            query_id=_stable_query_id(self.name, query_ids),
+            query_id=query_id,
             operator=self.name,
             as_of_round=context.round_id,
             facts=tuple(facts),
