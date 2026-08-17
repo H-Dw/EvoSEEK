@@ -1,0 +1,35 @@
+mode: fitness_direct
+seed: 11
+rounds: 3
+budget_per_round: 32
+candidate_limit: 0
+acquisition: greedy
+ucb_beta: 1.5
+diversity_lambda: 0.10
+task_config: configs/task/gb1_binding_al96.yaml
+model_config: configs/model/kermut.yaml
+knowledge_config: configs/knowledge/gb1.yaml
+output_root: artifacts/runs
+llm_provider: mock
+knowledge_enabled: false
+score_shuffle: false
+evidence_deletion: false
+run_label: GB1-AL96-5CV
+generation:
+  selection_driver: predictor
+  use_fitness_predictors: true
+  predictor_models: []
+validation:
+  enabled: true
+  predictor_models: []
+  wet_weight: 1.0
+  dry_weight_cap: 0.20
+  recency_decay: 0.85
+  rethink_enabled: true
+evaluation:
+  metrics: [spearman, pearson, mse, rmse, ndcg, top_k_hit, top_k_recall,
+    regret_at_k, interval_90_coverage, gaussian_nll]
+  top_k: 10
+output:
+  artifacts: [json, csv, markdown, svg, reasoning]
+  top_k: 16

@@ -1,0 +1,15 @@
+# DeepSeek V4 through the OpenAI Agents SDK Chat Completions transport.
+# CampaignRunner still owns oracle visibility, approval, and artifacts.
+provider: deepseek
+runtime: agents_sdk
+profile: scientific_v1
+model: deepseek-v4-flash
+base_url: https://api.deepseek.com
+api_key: env:DEEPSEEK_API_KEY
+temperature: 0.0
+max_tokens: 16384
+reasoning_effort: high
+thinking: enabled
+sdk_tracing_enabled: false
+sdk_max_turns: 6
+sdk_model_retries: 2

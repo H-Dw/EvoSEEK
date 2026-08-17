@@ -13,6 +13,7 @@ from fitness_agents.kg_interaction import (
     KGQueryContext,
     KGQueryPlan,
     KGQueryStep,
+    KGToolSession,
     ProposalGateway,
     QueryIntent,
 )
@@ -167,3 +168,20 @@ def test_invalid_hypothesis_transition_is_rejected():
     result = ProposalGateway(InMemoryChangeWriter(), read_only=False).submit(proposal)
     assert result.status == "rejected"
     assert "invalid hypothesis status" in result.errors
+
+
+def test_kg_tool_session_records_bounded_sdk_calls_and_enforces_budget():
+    session = KGToolSession(
+        KGInteractionController(_registry()),
+        KGQueryContext("run:sdk", 1, frozenset({"v_good", "v_bad"}), max_rows=4),
+        plan_id="kgplan:sdk",
+        max_tool_calls=1,
+    )
+    pack = session.call("hypothesis_context", QueryIntent.CONTEXT, {"limit": 4})
+    assert pack["operator"] == "hypothesis_context"
+    assert session.query_ids
+    with pytest.raises(RuntimeError, match="budget"):
+        session.call("explain_variant", QueryIntent.EXPLAIN, {"variant_id": "v_good"})
+    result = session.result()
+    assert result.stop_reason == "tool_call_budget_exhausted"
+    assert result.executed_steps == ("sdk_tool_01",)

@@ -1,78 +1,141 @@
-"""Optional OpenAI Agents SDK adapters with DeepSeek Chat Completions compatibility."""
+"""OpenAI Agents SDK adapters for Scientist and ReThink.
+
+CampaignRunner remains the scientific state machine. These clients only execute the
+authorized cognitive step: structured JSON plus optional round-scoped KG function tools.
+"""
 
 from __future__ import annotations
 
 import hashlib
 import json
+import time
 from collections.abc import Callable, Sequence
-from typing import Any, TypeVar
+from typing import Any
 
+from fitness_agents.agents.llm import HYPOTHESIS_SCHEMA, load_scientist_profile
+from fitness_agents.agents.output_contracts import (
+    HypothesisOutput,
+    ReThinkOutput,
+    validate_hypothesis_payload,
+    validate_rethink_payload,
+)
+from fitness_agents.agents.remote_llm import (
+    extract_json_object,
+    load_project_env,
+    resolve_api_key,
+    resolve_base_url,
+    resolve_model,
+    uses_deepseek,
+)
+from fitness_agents.agents.rethink import RETHINK_SCHEMA, _parse_reflections
 from fitness_agents.contracts.schemas import Evidence, Hypothesis, ReThinkReflection
-from fitness_agents.kg_interaction import KGToolSession, QueryIntent
-from fitness_agents.utils.progress import report_event
+from fitness_agents.kg_interaction.contracts import QueryIntent
+from fitness_agents.utils.progress import TimedHeartbeat, report_event
 
-from .llm import load_scientist_profile
-from .output_contracts import HypothesisOutput, ReThinkOutput
-from .remote_llm import resolve_api_key, resolve_base_url, resolve_model, uses_deepseek
+_SDK_IMPORT_ERROR = (
+    "Install the agents-sdk extra before using llm.runtime=agents_sdk: "
+    "pip install 'fitness-agents[agents-sdk]'"
+)
 
-OutputT = TypeVar("OutputT")
+
+def _import_agents() -> Any:
+    try:
+        import agents
+    except ImportError as error:
+        raise RuntimeError(_SDK_IMPORT_ERROR) from error
+    return agents
 
 
-class _CompletionsProxy:
-    def __init__(self, delegate: Any) -> None:
-        self._delegate = delegate
+def _json_safe(value: Any) -> Any:
+    return json.loads(json.dumps(value, ensure_ascii=False, default=str))
 
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._delegate, name)
 
-    async def create(self, **kwargs: Any) -> Any:
-        response_format = kwargs.get("response_format")
-        if isinstance(response_format, dict) and response_format.get("type") == "json_schema":
-            schema = response_format.get("json_schema", {}).get("schema", {})
-            kwargs["response_format"] = {"type": "json_object"}
-            messages = [dict(item) for item in kwargs.get("messages", ())]
-            schema_instruction = (
-                "Return one JSON object matching this exact schema. Do not omit required keys: "
-                + json.dumps(schema, ensure_ascii=False)
+def _trace_metadata(trace_context: dict[str, Any] | None) -> dict[str, str]:
+    metadata: dict[str, str] = {}
+    for key, value in (trace_context or {}).items():
+        if value is None:
+            continue
+        metadata[str(key)] = str(value)
+    return metadata
+
+
+def _payload_from_result(result: Any) -> dict[str, Any]:
+    output = getattr(result, "final_output", result)
+    if isinstance(output, (HypothesisOutput, ReThinkOutput)):
+        by_alias = isinstance(output, HypothesisOutput)
+        return output.model_dump(mode="json", by_alias=by_alias)
+    if hasattr(output, "model_dump"):
+        dumped = output.model_dump(mode="json", by_alias=True)
+        if isinstance(dumped, dict):
+            return dumped
+    if isinstance(output, dict):
+        return output
+    if isinstance(output, str):
+        return extract_json_object(output)
+    raise TypeError(f"SDK agent returned unsupported output type {type(output)!r}")
+
+
+def _validation_detail(error: Exception) -> str:
+    errors = getattr(error, "errors", None)
+    if callable(errors):
+        try:
+            entries = errors(include_input=False, include_url=False)
+            summary = [
+                {
+                    "location": ".".join(str(part) for part in item.get("loc", ())),
+                    "type": item.get("type"),
+                    "message": item.get("msg"),
+                }
+                for item in entries[:12]
+            ]
+            return json.dumps(summary, ensure_ascii=False)
+        except (TypeError, ValueError):
+            pass
+    return f"{type(error).__name__}: {error}"
+
+
+def build_kg_function_tools(session: Any) -> list[Any]:
+    """Wrap a round-scoped KGToolSession as Agents SDK function tools."""
+
+    agents = _import_agents()
+
+    @agents.function_tool
+    def hypothesis_context(limit: int = 12) -> dict[str, Any]:
+        """Read round-visible residue aggregates, measurements, and computed evidence."""
+        return _json_safe(
+            session.call("hypothesis_context", QueryIntent.CONTEXT, {"limit": int(limit)})
+        )
+
+    @agents.function_tool
+    def explain_variant(variant_id: str) -> dict[str, Any]:
+        """Explain one currently visible variant. Hidden oracle labels are not available."""
+        return _json_safe(
+            session.call(
+                "explain_variant",
+                QueryIntent.EXPLAIN,
+                {"variant_id": str(variant_id)},
             )
-            if messages and messages[0].get("role") == "system":
-                messages[0]["content"] = (
-                    str(messages[0].get("content", "")) + "\n\n" + schema_instruction
-                )
-            else:
-                messages.insert(0, {"role": "system", "content": schema_instruction})
-            kwargs["messages"] = messages
-        return await self._delegate.create(**kwargs)
+        )
+
+    @agents.function_tool
+    def compare_variants(variant_ids: list[str]) -> dict[str, Any]:
+        """Compare two or more currently visible variants and surface counterevidence."""
+        cleaned = [str(item) for item in variant_ids]
+        if len(cleaned) < 2:
+            raise ValueError("compare_variants requires at least two variant_ids")
+        return _json_safe(
+            session.call(
+                "compare_variants",
+                QueryIntent.COMPARE,
+                {"variant_ids": cleaned},
+            )
+        )
+
+    return [hypothesis_context, explain_variant, compare_variants]
 
 
-class _ChatProxy:
-    def __init__(self, delegate: Any) -> None:
-        self._delegate = delegate
-        self.completions = _CompletionsProxy(delegate.completions)
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._delegate, name)
-
-
-class _DeepSeekAsyncClientProxy:
-    """Downgrade SDK json_schema requests to DeepSeek json_object, retaining local validation."""
-
-    def __init__(self, delegate: Any) -> None:
-        self._delegate = delegate
-        self.chat = _ChatProxy(delegate.chat)
-        self.base_url = delegate.base_url
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._delegate, name)
-
-
-def _trace_id(metadata: dict[str, Any], attempt: int) -> str:
-    raw = json.dumps([metadata, attempt], sort_keys=True, default=str).encode()
-    return "trace_" + hashlib.sha256(raw).hexdigest()[:32]
-
-
-class SDKStructuredRuntime:
-    """Runs one typed SDK role; traces are observational and disabled unless opted in."""
+class _AgentsSDKRoleClient:
+    """Shared Chat Completions + structured-JSON runner for one campaign role."""
 
     def __init__(
         self,
@@ -88,169 +151,189 @@ class SDKStructuredRuntime:
         sdk_tracing_enabled: bool = False,
         sdk_max_turns: int = 6,
         sdk_model_retries: int = 2,
+        profile: str = "scientific_v1",
     ) -> None:
-        try:
-            from agents import ModelSettings
-            from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
-            from openai import AsyncOpenAI
-            from openai.types.shared import Reasoning
-        except ImportError as error:
-            raise RuntimeError(
-                "Install the 'agents-sdk' optional dependency to use runtime=agents_sdk"
-            ) from error
+        load_project_env()
+        self.provider = provider
+        self.model = resolve_model(model, provider=provider)
+        self.base_url = resolve_base_url(base_url, provider=provider)
+        self.api_key = api_key
+        self.temperature = temperature
+        self.max_tokens = max_tokens
+        self.reasoning_effort = reasoning_effort
+        self.thinking = thinking
+        self.sdk_tracing_enabled = bool(sdk_tracing_enabled)
+        self.sdk_max_turns = int(sdk_max_turns)
+        self.sdk_model_retries = int(sdk_model_retries)
+        self.profile_name = profile
+        self._openai_client: Any | None = None
+        self._model: Any | None = None
 
-        self.model_name = resolve_model(model, provider=provider)
-        resolved_base = resolve_base_url(base_url, provider=provider)
-        client: Any = AsyncOpenAI(
-            api_key=resolve_api_key(api_key),
-            base_url=resolved_base,
+    def _ensure_model(self) -> tuple[Any, Any]:
+        if self._model is not None and self._openai_client is not None:
+            return self._model, self._openai_client
+        agents = _import_agents()
+        from openai import AsyncOpenAI
+
+        client = AsyncOpenAI(
+            api_key=resolve_api_key(self.api_key),
+            base_url=self.base_url,
+            max_retries=0,
         )
-        if uses_deepseek(self.model_name, resolved_base):
-            client = _DeepSeekAsyncClientProxy(client)
-        self.strict_function_tools = not uses_deepseek(
-            self.model_name, resolved_base
-        ) or str(resolved_base or "").rstrip("/").endswith("/beta")
-        self.model = OpenAIChatCompletionsModel(
-            model=self.model_name,
+        self._openai_client = client
+        self._model = agents.OpenAIChatCompletionsModel(
+            model=self.model,
             openai_client=client,
         )
-        reasoning = Reasoning(effort=reasoning_effort) if reasoning_effort else None
-        extra_body = {"thinking": {"type": thinking}} if thinking else None
-        self.model_settings = ModelSettings(
-            temperature=temperature,
-            max_tokens=max_tokens,
-            reasoning=reasoning,
-            parallel_tool_calls=False,
-            extra_body=extra_body,
-        )
-        self.tracing_enabled = sdk_tracing_enabled
-        self.max_turns = sdk_max_turns
-        self.model_retries = sdk_model_retries
+        return self._model, client
 
-    def run(
+    def _model_settings(self, *, thinking: str | None) -> Any:
+        agents = _import_agents()
+        extra_args: dict[str, Any] = {}
+        extra_body: dict[str, Any] = {}
+        deepseek = uses_deepseek(self.model, self.base_url)
+        effort = self.reasoning_effort
+        if deepseek:
+            effort = effort or "high"
+            thinking = thinking or "enabled"
+        if deepseek and effort:
+            extra_args["reasoning_effort"] = effort
+        if deepseek and thinking:
+            extra_body["thinking"] = {"type": thinking}
+        return agents.ModelSettings(
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
+            extra_args=extra_args or None,
+            extra_body=extra_body or None,
+        )
+
+    def _run_sdk(
         self,
         *,
-        role_name: str,
+        role: str,
         instructions: str,
-        input_payload: dict[str, Any],
-        output_type: type[OutputT],
-        tools: list[Any],
-        trace_context: dict[str, Any],
-        validate_output: Callable[[OutputT], None] | None = None,
-    ) -> OutputT:
-        from agents import Agent, RunConfig, Runner
+        user_payload: dict[str, Any],
+        output_model: type[HypothesisOutput | ReThinkOutput],
+        validator: Callable[[dict[str, Any]], dict[str, Any]],
+        kg_tool_session: Any | None,
+        trace_context: dict[str, Any] | None,
+        schema: dict[str, Any],
+    ) -> dict[str, Any]:
+        agents = _import_agents()
+        model, _client = self._ensure_model()
+        if not self.sdk_tracing_enabled:
+            agents.set_tracing_disabled(True)
 
-        agent = Agent(
-            name=role_name,
-            instructions=instructions,
-            model=self.model,
-            model_settings=self.model_settings,
-            tools=tools,
-            handoffs=[],
-            output_type=output_type,
+        tools = build_kg_function_tools(kg_tool_session) if kg_tool_session is not None else []
+        use_structured = not uses_deepseek(self.model, self.base_url)
+        output_type: Any | None = None
+        if use_structured:
+            output_type = agents.AgentOutputSchema(output_model, strict_json_schema=False)
+
+        system = (
+            instructions
+            + "\n\nReply with a single JSON object that matches this schema: "
+            + json.dumps(schema, ensure_ascii=False)
+            + " Do not include markdown."
         )
+        user_text = json.dumps(user_payload, ensure_ascii=False)
+        input_items: list[dict[str, str]] = [{"role": "user", "content": user_text}]
+        current_thinking = self.thinking
         last_error: Exception | None = None
-        base_input = json.dumps(input_payload, ensure_ascii=False)
-        for attempt in range(self.model_retries + 1):
-            trace_id = _trace_id(trace_context, attempt)
-            report_event(
-                "sdk_agent_started",
-                message=f"SDK {role_name} attempt {attempt + 1}",
-                attempt=attempt,
-                trace_id=trace_id,
-                **trace_context,
+        metadata = _trace_metadata(trace_context)
+
+        for attempt in range(self.sdk_model_retries + 1):
+            agent = agents.Agent(
+                name=role,
+                instructions=system,
+                model=model,
+                model_settings=self._model_settings(thinking=current_thinking),
+                tools=tools,
+                output_type=output_type,
             )
+            run_config = agents.RunConfig(
+                tracing_disabled=not self.sdk_tracing_enabled,
+                workflow_name=f"fitness-agents:{role}",
+                trace_metadata=metadata or None,
+            )
+            report_event(
+                "sdk_request_started",
+                message=f"SDK {role} {self.model} attempt {attempt + 1}/{self.sdk_model_retries + 1}",
+                model=self.model,
+                role=role,
+                attempt=attempt,
+                max_turns=self.sdk_max_turns,
+                kg_tools=bool(tools),
+            )
+            started = time.perf_counter()
+            result = None
             try:
-                run_input = base_input
-                if last_error is not None:
-                    run_input += (
-                        "\n\nThe previous output failed validation. Return a complete corrected "
-                        f"object. Error type: {type(last_error).__name__}."
+                with TimedHeartbeat(f"SDK {role} {self.model} attempt {attempt + 1}"):
+                    result = agents.Runner.run_sync(
+                        agent,
+                        input_items,
+                        max_turns=self.sdk_max_turns,
+                        run_config=run_config,
                     )
-                result = Runner.run_sync(
-                    agent,
-                    run_input,
-                    max_turns=self.max_turns,
-                    run_config=RunConfig(
-                        tracing_disabled=not self.tracing_enabled,
-                        trace_include_sensitive_data=False,
-                        workflow_name=f"fitness-agents:{role_name}",
-                        trace_id=trace_id,
-                        group_id=str(trace_context.get("run_id", "")),
-                        trace_metadata=dict(trace_context),
-                    ),
-                )
-                output = result.final_output_as(output_type, raise_if_incorrect_type=True)
-                if validate_output is not None:
-                    validate_output(output)
+                payload = validator(_payload_from_result(result))
                 report_event(
-                    "sdk_agent_completed",
-                    message=f"SDK {role_name} completed",
+                    "sdk_request_completed",
+                    message=f"SDK {role} {self.model} completed",
+                    model=self.model,
+                    role=role,
                     attempt=attempt,
-                    trace_id=trace_id,
-                    **trace_context,
+                    latency_s=round(time.perf_counter() - started, 3),
                 )
-                return output
-            except Exception as error:  # noqa: BLE001 - typed provider boundary retries
+                return payload
+            except Exception as error:  # noqa: BLE001 - retry schema/provider failures together
                 last_error = error
                 report_event(
-                    "sdk_agent_retry" if attempt < self.model_retries else "sdk_agent_failed",
-                    message=f"SDK {role_name} validation/provider failure",
+                    "sdk_request_retry",
+                    message=f"SDK {role} {self.model} retry ({type(error).__name__})",
+                    model=self.model,
+                    role=role,
                     attempt=attempt,
-                    trace_id=trace_id,
                     error_type=type(error).__name__,
-                    **trace_context,
+                    latency_s=round(time.perf_counter() - started, 3),
                 )
-        raise RuntimeError(f"SDK {role_name} failed") from last_error
-
-
-def build_scientist_kg_tools(
-    session: KGToolSession | None, *, strict_mode: bool = True
-) -> list[Any]:
-    if session is None:
-        return []
-    from agents import function_tool
-
-    @function_tool(strict_mode=strict_mode)
-    def kg_hypothesis_context(limit: int) -> dict[str, Any]:
-        """Return bounded visible KG context for the current campaign round."""
-
-        return session.call("hypothesis_context", QueryIntent.CONTEXT, {"limit": limit})
-
-    @function_tool(strict_mode=strict_mode)
-    def kg_explain_variant(variant_id: str) -> dict[str, Any]:
-        """Explain one in-scope variant using only round-visible KG records."""
-
-        return session.call(
-            "explain_variant", QueryIntent.EXPLAIN, {"variant_id": variant_id}
+                if uses_deepseek(self.model, self.base_url) and current_thinking == "enabled":
+                    current_thinking = "disabled"
+                if attempt < self.sdk_model_retries:
+                    detail = _validation_detail(error)
+                    correction = (
+                        "The previous JSON failed the required output contract: "
+                        f"{detail}. Return a complete corrected JSON object with every "
+                        "required key and no Markdown."
+                    )
+                    to_input_list = getattr(result, "to_input_list", None)
+                    if callable(to_input_list):
+                        input_items = list(to_input_list()) + [
+                            {"role": "user", "content": correction}
+                        ]
+                    else:
+                        input_items = [
+                            {"role": "user", "content": user_text},
+                            {"role": "user", "content": correction},
+                        ]
+                continue
+        report_event(
+            "sdk_request_failed",
+            message=f"SDK {role} {self.model} failed",
+            model=self.model,
+            role=role,
+            error_type=type(last_error).__name__ if last_error is not None else "RuntimeError",
         )
-
-    @function_tool(strict_mode=strict_mode)
-    def kg_compare_variants(variant_ids: list[str]) -> dict[str, Any]:
-        """Compare in-scope variants through the bounded KG controller."""
-
-        return session.call(
-            "compare_variants", QueryIntent.COMPARE, {"variant_ids": variant_ids}
-        )
-
-    return [kg_hypothesis_context, kg_explain_variant, kg_compare_variants]
+        raise RuntimeError(f"Agents SDK {role} JSON completion failed") from last_error
 
 
-class AgentsSDKScientistLLMClient:
-    provider_name = "agents_sdk_scientist"
+class AgentsSDKScientistLLMClient(_AgentsSDKRoleClient):
+    provider_name = "agents_sdk"
     supports_kg_tools = True
 
-    def __init__(
-        self,
-        *,
-        profile: str = "scientific_v1",
-        sdk_runtime: SDKStructuredRuntime | None = None,
-        **runtime_kwargs: Any,
-    ) -> None:
-        self.profile_name = profile
-        self.profile = load_scientist_profile(profile)
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.profile = load_scientist_profile(self.profile_name)
         self.profile_sha256 = hashlib.sha256(self.profile.encode()).hexdigest()
-        self.runtime = sdk_runtime or SDKStructuredRuntime(**runtime_kwargs)
 
     def generate_hypothesis(
         self,
@@ -258,93 +341,65 @@ class AgentsSDKScientistLLMClient:
         sanitized_context: dict[str, Any],
         evidence: Sequence[Evidence],
         output_schema: dict[str, Any],
-        kg_tool_session: KGToolSession | None = None,
+        kg_tool_session: Any | None = None,
         trace_context: dict[str, Any] | None = None,
     ) -> Hypothesis:
-        from .scientist import assert_sanitized
-
         del output_schema
-        assert_sanitized(sanitized_context)
+        evidence_payload = [entry.__dict__ for entry in evidence[:80]]
         expected_id = str(sanitized_context["expected_hypothesis_id"])
         expected_parent_id = sanitized_context.get("previous_hypothesis_id")
         allowed_evidence_ids = frozenset(entry.evidence_id for entry in evidence[:80])
-        metadata = dict(trace_context or {})
         if kg_tool_session is not None:
-            scope = sorted(kg_tool_session.context.allowed_variant_ids or ())
-            metadata["variant_ids"] = scope
-            metadata["variant_scope_count"] = len(scope)
-            metadata["variant_scope_sha256"] = hashlib.sha256(
-                json.dumps(scope).encode()
-            ).hexdigest()
-        output = self.runtime.run(
-            role_name="ScientistAgent",
+            allowed_evidence_ids = None
+        payload = self._run_sdk(
+            role="scientist",
             instructions=self.profile,
-            input_payload={
-                "context": sanitized_context,
-                "evidence": [entry.__dict__ for entry in evidence[:80]],
-            },
-            output_type=HypothesisOutput,
-            tools=build_scientist_kg_tools(
-                kg_tool_session,
-                strict_mode=getattr(self.runtime, "strict_function_tools", True),
-            ),
-            trace_context=metadata,
-            validate_output=lambda item: item.to_hypothesis(
+            user_payload={"context": sanitized_context, "evidence": evidence_payload},
+            output_model=HypothesisOutput,
+            validator=lambda value: validate_hypothesis_payload(
+                value,
                 expected_hypothesis_id=expected_id,
                 expected_parent_hypothesis_id=expected_parent_id,
                 allowed_evidence_ids=allowed_evidence_ids,
             ),
+            kg_tool_session=kg_tool_session,
+            trace_context=trace_context,
+            schema=HYPOTHESIS_SCHEMA,
         )
-        return output.to_hypothesis(
+        return HypothesisOutput.model_validate(payload).to_hypothesis(
             expected_hypothesis_id=expected_id,
             expected_parent_hypothesis_id=expected_parent_id,
             allowed_evidence_ids=allowed_evidence_ids,
         )
 
 
-class AgentsSDKReThinkClient:
+class AgentsSDKReThinkClient(_AgentsSDKRoleClient):
     provider_name = "agents_sdk_rethink"
 
-    def __init__(
-        self,
-        *,
-        sdk_runtime: SDKStructuredRuntime | None = None,
-        **runtime_kwargs: Any,
-    ) -> None:
-        self.runtime = sdk_runtime or SDKStructuredRuntime(**runtime_kwargs)
-
     def reflect_round(self, *, context: dict[str, Any]) -> tuple[ReThinkReflection, ...]:
-        run_id = str(context["run_id"])
-        round_id = int(context["round_id"])
-        expected_variants = {str(item["variant_id"]) for item in context.get("candidates", ())}
-
-        def validate(output: ReThinkOutput) -> None:
-            actual = {item.variant_id for item in output.reflections}
-            if actual != expected_variants:
-                raise ValueError("ReThink output must cover exactly the supplied candidate IDs")
-
-        output = self.runtime.run(
-            role_name="ReThinkAgent",
+        payload = self._run_sdk(
+            role="rethink",
             instructions=(
-                "You are the post-validation ReThink role. Use only the wet and dry values in the "
-                "current CampaignRunner context. Wet values are authoritative; dry predictions are "
-                "lower-fidelity. Do not invent data or call tools. Return one typed reflection per "
-                "supplied candidate. You cannot submit experiments, query an oracle or final test, "
-                "write the KG, approve a batch, or modify campaign state."
+                "You are the ReThink Agent in an iterative protein-design campaign. "
+                "For every candidate, assess whether the original recommendation reason "
+                "is supported, contradicted, mixed, or inconclusive using supplied wet and "
+                "dry validation. Wet measurements are authoritative; dry model values are "
+                "lower-fidelity evidence. Do not invent measurements."
             ),
-            input_payload=context,
-            output_type=ReThinkOutput,
-            tools=[],
+            user_payload=context,
+            output_model=ReThinkOutput,
+            validator=validate_rethink_payload,
+            kg_tool_session=None,
             trace_context={
-                "run_id": run_id,
-                "round_id": round_id,
-                "variant_ids": sorted(expected_variants),
+                "run_id": context.get("run_id"),
+                "round_id": context.get("round_id"),
                 "role": "rethink",
             },
-            validate_output=validate,
+            schema=RETHINK_SCHEMA,
         )
-        return output.to_reflections(
-            run_id=run_id,
-            round_id=round_id,
+        return _parse_reflections(
+            payload,
+            run_id=str(context["run_id"]),
+            round_id=int(context["round_id"]),
             provider=self.provider_name,
         )

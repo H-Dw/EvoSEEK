@@ -118,6 +118,9 @@ class ScientistAgent:
             self.last_knowledge_query_id = (
                 self.last_knowledge_query_ids[-1] if self.last_knowledge_query_ids else None
             )
+        elif kg_tool_session is not None:
+            self.last_knowledge_query_id = None
+            self.last_knowledge_query_ids = ()
         elif self.knowledge_graph is not None:
             graph_context = self.knowledge_graph.hypothesis_context(round_id=state.round_id)
             assert_sanitized(graph_context, "context.knowledge_graph")

@@ -604,3 +604,13 @@ ALDE 的离散 batch acquisition/UQ 分层、FLIP 的 GB1 数据语义、BioDesi
 - ensemble uncertainty 必须同时用 coverage/NLL 和闭环 acquisition utility 评估；
 - 小样本 KG residue aggregate 可能受上位性混杂，故 fitness 始终绑定完整 variant、assay 和 observation；
 - 正式结论应使用 paired seeds、bootstrap 置信区间和多重比较校正。
+
+
+## Test Command
+```bash
+nohup .venv/bin/python scripts/run_sdk_baselines.py \
+  --preset al96 \
+  --folds 0,1,2 \
+  --seed 42 \
+  --modes random,fitness_direct,llm_agent,knowledge_agent > benchmark_comp.log 2>&1 &
+```

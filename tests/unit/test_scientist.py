@@ -59,3 +59,26 @@ def test_scientist_agent_calls_configured_knowledge_graph(experiment_config):
     assert hypothesis.preferred_residues[39][0] == "W"
     assert "knowledge-graph query" in hypothesis.statement
     assert agent.inspect_variant(bundle.initial_variants[0].variant_id, round_id=1)["found"]
+
+
+def test_scientist_skips_precomputed_graph_query_when_sdk_session_is_present(experiment_config):
+    bundle = load_dataset_bundle(
+        experiment_config.task.public_data_path, experiment_config.task.oracle_data_path
+    )
+    state = CampaignState(run_id="test", mode="knowledge_agent", seed=1, round_id=1)
+    tool = _StubKnowledgeGraphTool()
+    agent = ScientistAgent(MockScientistLLMClient(), knowledge_graph=tool)
+
+    class _Session:
+        query_ids = ("kgq:sdk:tool",)
+
+    hypothesis = agent.propose_hypothesis(
+        state,
+        bundle.initial_variants,
+        bundle.initial_observations,
+        [],
+        kg_tool_session=_Session(),
+    )
+    assert tool.calls == 0
+    assert agent.last_knowledge_query_ids == ("kgq:sdk:tool",)
+    assert "knowledge-graph query" not in hypothesis.statement
