@@ -3,8 +3,10 @@ import pytest
 from fitness_agents.kg_interaction import (
     ChangeOperation,
     CompareVariantsOperator,
+    EvidenceProvenanceOperator,
     EvidenceSufficiencyPolicy,
     ExplainVariantOperator,
+    FeatureEvidenceOperator,
     HypothesisContextOperator,
     InMemoryChangeWriter,
     InteractionAblationConfig,
@@ -13,9 +15,9 @@ from fitness_agents.kg_interaction import (
     KGQueryContext,
     KGQueryPlan,
     KGQueryStep,
-    KGToolSession,
     ProposalGateway,
     QueryIntent,
+    RoundScopedToolExecutor,
 )
 from fitness_agents.plugin_registry import PluginRegistry
 
@@ -49,6 +51,31 @@ class FakeGraphTool:
             ],
         }
 
+    def feature_evidence(self, variant_id, *, channel, round_id):
+        return {
+            "query_id": f"feature:{round_id}:{variant_id}:{channel}",
+            "variant_id": variant_id,
+            "channel": channel,
+            "evidence": [
+                {
+                    "evidence_id": "ev:feature",
+                    "channel": channel,
+                    "score": 0.2,
+                    "warnings": ["descriptor_only"],
+                    "provenance": {"resource_sha256": "abc"},
+                }
+            ],
+        }
+
+    def evidence_provenance(self, evidence_id, *, round_id):
+        return {
+            "query_id": f"provenance:{round_id}:{evidence_id}",
+            "evidence_id": evidence_id,
+            "found": True,
+            "warnings": ["descriptor_only"],
+            "provenance": {"resource_sha256": "abc"},
+        }
+
 
 def _registry():
     tool = FakeGraphTool()
@@ -56,6 +83,13 @@ def _registry():
     registry.register("hypothesis_context", HypothesisContextOperator(tool))
     registry.register("explain_variant", ExplainVariantOperator(tool))
     registry.register("compare_variants", CompareVariantsOperator(tool))
+    registry.register(
+        "query_physchem_delta",
+        FeatureEvidenceOperator("query_physchem_delta", "physchem", tool),
+    )
+    registry.register(
+        "query_evidence_provenance", EvidenceProvenanceOperator(tool)
+    )
     return registry
 
 
@@ -170,8 +204,8 @@ def test_invalid_hypothesis_transition_is_rejected():
     assert "invalid hypothesis status" in result.errors
 
 
-def test_kg_tool_session_records_bounded_sdk_calls_and_enforces_budget():
-    session = KGToolSession(
+def test_round_scoped_tool_executor_records_calls_and_enforces_budget():
+    session = RoundScopedToolExecutor(
         KGInteractionController(_registry()),
         KGQueryContext("run:sdk", 1, frozenset({"v_good", "v_bad"}), max_rows=4),
         plan_id="kgplan:sdk",
@@ -184,4 +218,44 @@ def test_kg_tool_session_records_bounded_sdk_calls_and_enforces_budget():
         session.call("explain_variant", QueryIntent.EXPLAIN, {"variant_id": "v_good"})
     result = session.result()
     assert result.stop_reason == "tool_call_budget_exhausted"
-    assert result.executed_steps == ("sdk_tool_01",)
+    assert result.executed_steps == ("tool_01",)
+
+
+def test_feature_and_provenance_tools_remain_scoped_and_bounded():
+    controller = KGInteractionController(
+        _registry(),
+        config=InteractionAblationConfig(
+            enabled_operators=frozenset(
+                {"query_physchem_delta", "query_evidence_provenance"}
+            ),
+            max_tool_calls=2,
+            stop_when_sufficient=False,
+        ),
+    )
+    result = controller.execute(
+        KGQueryPlan(
+            "plan:features",
+            "inspect typed feature evidence",
+            (
+                KGQueryStep(
+                    "feature",
+                    "query_physchem_delta",
+                    QueryIntent.EXPLAIN,
+                    {"variant_id": "v_good"},
+                ),
+                KGQueryStep(
+                    "provenance",
+                    "query_evidence_provenance",
+                    QueryIntent.HISTORY,
+                    {"evidence_id": "ev:feature"},
+                    ("feature",),
+                ),
+            ),
+            max_tool_calls=2,
+        ),
+        KGQueryContext("run:1", 2, frozenset({"v_good"}), max_rows=2),
+    )
+
+    assert result.executed_steps == ("feature", "provenance")
+    assert result.packs[0].evidence[0]["channel"] == "physchem"
+    assert result.packs[1].provenance[0]["resource_sha256"] == "abc"

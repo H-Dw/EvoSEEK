@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import asdict
 from typing import Any, Protocol
 
 from .contracts import EvidencePack, KGQueryContext, KGQueryStep
@@ -186,6 +187,178 @@ class CompareVariantsOperator:
             counterevidence=tuple(counterevidence[: context.max_rows]),
             provenance=_collect_provenance(evidence)[: context.max_rows],
             metadata={"variant_ids": list(variant_ids), "child_query_ids": query_ids},
+        )
+
+
+class FeatureEvidenceOperator:
+    """Expose one scientific feature channel without granting raw database access."""
+
+    def __init__(self, name: str, channel: str, tool: Any) -> None:
+        self.name = name
+        self.channel = channel
+        self.tool = tool
+
+    def execute(self, step: KGQueryStep, context: KGQueryContext) -> EvidencePack:
+        variant_id = str(step.arguments["variant_id"])
+        result = self.tool.feature_evidence(
+            variant_id,
+            channel=self.channel,
+            round_id=context.round_id,
+        )
+        evidence = _dict_tuple(result.get("evidence"))[: context.max_rows]
+        return EvidencePack(
+            query_id=str(result["query_id"]),
+            operator=self.name,
+            as_of_round=context.round_id,
+            evidence=evidence,
+            counterevidence=tuple(
+                item for item in evidence if float(item.get("score", 0.0)) < 0.0
+            ),
+            caveats=tuple(
+                warning
+                for item in evidence
+                for warning in item.get("warnings", ())
+            )[: context.max_rows],
+            provenance=tuple(
+                dict(item.get("provenance", {})) for item in evidence
+            )[: context.max_rows],
+            metadata={"variant_id": variant_id, "channel": self.channel},
+        )
+
+
+class EvidenceProvenanceOperator:
+    name = "query_evidence_provenance"
+
+    def __init__(self, tool: Any) -> None:
+        self.tool = tool
+
+    def execute(self, step: KGQueryStep, context: KGQueryContext) -> EvidencePack:
+        evidence_id = str(step.arguments["evidence_id"])
+        result = self.tool.evidence_provenance(evidence_id, round_id=context.round_id)
+        facts = ({key: value for key, value in result.items() if key != "tool"},)
+        return EvidencePack(
+            query_id=str(result["query_id"]),
+            operator=self.name,
+            as_of_round=context.round_id,
+            facts=facts,
+            provenance=(dict(result.get("provenance", {})),) if result.get("found") else (),
+            caveats=tuple(str(item) for item in result.get("warnings", ())),
+            metadata={"evidence_id": evidence_id, "found": bool(result.get("found"))},
+        )
+
+
+class LocalKnowledgeQueryOperator:
+    """Retrieve policy-filtered local documents through the project-owned source."""
+
+    name = "query_local_knowledge"
+
+    def __init__(self, knowledge_engine: Any) -> None:
+        self.knowledge_engine = knowledge_engine
+
+    def execute(self, step: KGQueryStep, context: KGQueryContext) -> EvidencePack:
+        query = str(step.arguments.get("query", "")).strip()
+        if not query:
+            raise ValueError("query_local_knowledge requires a non-empty query")
+        anchors = tuple(str(item) for item in step.arguments.get("anchors", ()))
+        raw_knowledge_types = step.arguments.get("knowledge_types", ())
+        if isinstance(raw_knowledge_types, str):
+            raw_knowledge_types = (raw_knowledge_types,)
+        knowledge_types = tuple(str(item) for item in raw_knowledge_types)
+        requested = int(step.arguments.get("limit", context.max_rows))
+        result, evidence = self.knowledge_engine.retrieve_local_knowledge(
+            query=query,
+            intent=step.intent.value,
+            round_id=context.round_id,
+            anchors=anchors,
+            top_k=min(requested, context.max_rows),
+            knowledge_types=knowledge_types,
+            stage=True,
+        )
+        evidence_payload = tuple(asdict(item) for item in evidence[: context.max_rows])
+        facts = tuple(
+            {
+                "fact_type": "local_knowledge_claim",
+                "claim_id": item.claim_id,
+                "statement": item.statement,
+                "polarity": item.polarity,
+                "applicability": item.applicability,
+                "confidence": item.confidence,
+                "evidence_chunk_ids": item.evidence_chunk_ids,
+            }
+            for item in result.claims[: context.max_rows]
+        )
+        return EvidencePack(
+            query_id=result.query_id,
+            operator=self.name,
+            as_of_round=context.round_id,
+            facts=facts,
+            evidence=evidence_payload,
+            caveats=result.warnings[: context.max_rows],
+            provenance=tuple(
+                {
+                    "evidence_id": item.evidence_id,
+                    "source_id": item.source_id,
+                    **item.provenance,
+                }
+                for item in evidence[: context.max_rows]
+            ),
+            metadata={
+                "sanitized_query": result.sanitized_query,
+                "policy_decision": result.policy_decision,
+                "index_manifest_hash": result.index_manifest_hash,
+                "knowledge_types": list(knowledge_types),
+                "staged_for_round_commit": True,
+            },
+        )
+
+
+class StructuredClaimQueryOperator:
+    """Read round-visible claims from the existing structured KG projection."""
+
+    name = "query_structured_claims"
+
+    def __init__(self, knowledge_engine: Any) -> None:
+        self.knowledge_engine = knowledge_engine
+
+    def execute(self, step: KGQueryStep, context: KGQueryContext) -> EvidencePack:
+        query = str(step.arguments.get("query", "")).strip()
+        requested = int(step.arguments.get("limit", context.max_rows))
+        claims = self.knowledge_engine.query_structured_claims(
+            query=query,
+            round_id=context.round_id,
+            limit=min(requested, context.max_rows),
+        )
+        query_id = _stable_query_id(
+            self.name, tuple(str(item["entity_id"]) for item in claims)
+        )
+        evidence_ids = tuple(
+            str(evidence_id)
+            for claim in claims
+            for evidence_id in claim.get("evidence_ids", ())
+        )
+        return EvidencePack(
+            query_id=query_id,
+            operator=self.name,
+            as_of_round=context.round_id,
+            facts=claims,
+            supporting_paths=tuple(
+                {
+                    "claim_id": item["entity_id"],
+                    "relation_ids": item.get("supporting_relation_ids", ()),
+                    "evidence_ids": item.get("evidence_ids", ()),
+                }
+                for item in claims
+            ),
+            provenance=tuple(
+                {
+                    "claim_id": item["entity_id"],
+                    "source_ids": item.get("source_ids", ()),
+                    "source_group": item.get("source_group"),
+                    "valid_from_round": item.get("valid_from_round"),
+                }
+                for item in claims
+            ),
+            metadata={"query": query, "evidence_ids": evidence_ids},
         )
 
 

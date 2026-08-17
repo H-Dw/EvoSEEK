@@ -6,6 +6,7 @@ from .adapters import (
     CampaignObservationAdapter,
     InferenceKnowledgeAdapter,
     KnowledgeAdapter,
+    LocalRAGKnowledgeAdapter,
     StaticKnowledgeAdapter,
     ValidationKnowledgeAdapter,
 )
@@ -51,6 +52,7 @@ __all__ = [
     "KnowledgeLayer",
     "KnowledgeNormalizer",
     "KnowledgeValidator",
+    "LocalRAGKnowledgeAdapter",
     "Modality",
     "ProvenanceAwareFusion",
     "RelationRecord",

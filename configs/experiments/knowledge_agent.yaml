@@ -25,6 +25,7 @@ generation:
   uncertainty_beta: 0.75
   predictor_weight: 0.0
   gp_length_scale: 1.0
+  hypothesis_recency_decay: 0.85
 validation:
   enabled: true
   predictor_models: []
@@ -41,7 +42,10 @@ output:
   top_k: 16
 kg_interaction:
   enabled: true
-  enabled_operators: [hypothesis_context, explain_variant, compare_variants]
+  enabled_operators: [hypothesis_context, explain_variant, compare_variants,
+    query_physchem_delta, query_evolutionary_profile, query_structure_environment,
+    query_assay_association, query_evidence_provenance, query_local_knowledge,
+    query_structured_claims]
   max_tool_calls: 3
   max_rows: 12
   use_counterevidence: true

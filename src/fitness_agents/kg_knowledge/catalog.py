@@ -80,6 +80,18 @@ DEFAULT_ENTITY_SPECS = (
         "Claim", KnowledgeLayer.LITERATURE, "P2", 4, 3, "literature", "带限定条件的文献主张"
     ),
     EntitySpec(
+        "Document", KnowledgeLayer.LITERATURE, "P1", 5, 1, "literature", "本地知识库文档"
+    ),
+    EntitySpec(
+        "DocumentChunk", KnowledgeLayer.LITERATURE, "P1", 5, 1, "literature", "可回链的文档片段"
+    ),
+    EntitySpec(
+        "Concept", KnowledgeLayer.FUNCTIONAL, "P2", 4, 2, "literature", "通用机制或性质概念"
+    ),
+    EntitySpec(
+        "OtherProtein", KnowledgeLayer.LITERATURE, "P2", 3, 2, "literature", "非目标蛋白类比实体"
+    ),
+    EntitySpec(
         "Artifact", KnowledgeLayer.PROVENANCE, "P2", 4, 2, "artifacts", "大对象、坐标或向量引用"
     ),
 )
@@ -97,6 +109,7 @@ DEFAULT_RELATION_SPECS = (
     RelationSpec("PREDICTS", "Prediction", "Variant", KnowledgeLayer.MODEL, "P1"),
     RelationSpec("GENERATED_BY", "Prediction", "ModelRun", KnowledgeLayer.MODEL, "P1"),
     RelationSpec("ABOUT", "Evidence", "Variant", KnowledgeLayer.AGENT, "P1"),
+    RelationSpec("CITES_EVIDENCE", "Hypothesis", "Evidence", KnowledgeLayer.AGENT, "P1"),
     RelationSpec("SUPPORTED_BY", "Hypothesis", "Evidence", KnowledgeLayer.AGENT, "P1"),
     RelationSpec("CONTRADICTED_BY", "Hypothesis", "Evidence", KnowledgeLayer.AGENT, "P1"),
     RelationSpec("VALIDATES", "WetValidation", "Variant", KnowledgeLayer.EXPERIMENTAL, "P1"),
@@ -117,6 +130,19 @@ DEFAULT_RELATION_SPECS = (
         "P1",
     ),
     RelationSpec("DERIVED_FROM", "Evidence", "Artifact", KnowledgeLayer.PROVENANCE, "P2"),
+    RelationSpec("HAS_CHUNK", "Document", "DocumentChunk", KnowledgeLayer.LITERATURE, "P1"),
+    RelationSpec("ASSERTS", "DocumentChunk", "Claim", KnowledgeLayer.LITERATURE, "P1"),
+    RelationSpec(
+        "SUPPORTED_BY_SOURCE", "Claim", "Evidence", KnowledgeLayer.LITERATURE, "P1"
+    ),
+    RelationSpec(
+        "DERIVED_FROM", "Evidence", "DocumentChunk", KnowledgeLayer.PROVENANCE, "P1"
+    ),
+    RelationSpec("MENTIONS", "DocumentChunk", "Concept", KnowledgeLayer.LITERATURE, "P2"),
+    RelationSpec("MENTIONS", "DocumentChunk", "OtherProtein", KnowledgeLayer.LITERATURE, "P2"),
+    RelationSpec("CONTRADICTS_CLAIM", "Claim", "Claim", KnowledgeLayer.LITERATURE, "P2"),
+    RelationSpec("APPLIES_TO", "Claim", "Concept", KnowledgeLayer.LITERATURE, "P2"),
+    RelationSpec("APPLIES_TO", "Claim", "OtherProtein", KnowledgeLayer.LITERATURE, "P2"),
     RelationSpec("ANNOTATED_WITH", "Protein", "OntologyTerm", KnowledgeLayer.FUNCTIONAL, "P2"),
 )
 

@@ -16,11 +16,15 @@ from .controller import EvidenceSufficiencyPolicy, KGInteractionController
 from .operators import (
     CallableQueryOperator,
     CompareVariantsOperator,
+    EvidenceProvenanceOperator,
     ExplainVariantOperator,
+    FeatureEvidenceOperator,
     HypothesisContextOperator,
+    LocalKnowledgeQueryOperator,
     QueryOperator,
+    StructuredClaimQueryOperator,
 )
-from .sdk_tools import KGToolSession
+from .tool_runtime import RoundScopedToolExecutor
 from .writeback import (
     InMemoryChangeWriter,
     ProposalGateway,
@@ -32,8 +36,10 @@ __all__ = [
     "ChangeOperation",
     "CompareVariantsOperator",
     "EvidencePack",
+    "EvidenceProvenanceOperator",
     "EvidenceSufficiencyPolicy",
     "ExplainVariantOperator",
+    "FeatureEvidenceOperator",
     "HypothesisContextOperator",
     "InMemoryChangeWriter",
     "InteractionAblationConfig",
@@ -43,10 +49,12 @@ __all__ = [
     "KGQueryContext",
     "KGQueryPlan",
     "KGQueryStep",
-    "KGToolSession",
     "KGUpdateResult",
+    "LocalKnowledgeQueryOperator",
     "ProposalGateway",
     "QueryIntent",
     "QueryOperator",
+    "RoundScopedToolExecutor",
+    "StructuredClaimQueryOperator",
     "TrustBoundaryValidator",
 ]

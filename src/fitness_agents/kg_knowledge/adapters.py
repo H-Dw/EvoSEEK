@@ -12,6 +12,8 @@ from fitness_agents.contracts.schemas import (
     ValidationRecord,
     Variant,
 )
+from fitness_agents.local_knowledge.contracts import RetrievalResult
+from fitness_agents.local_knowledge.leakage import TargetLeakageGuard
 from fitness_agents.mutation.notation import InvalidMutationNotation, parse_mutation_notation
 
 from .schema import (
@@ -442,27 +444,51 @@ class InferenceKnowledgeAdapter:
                     "channel": item.channel,
                     "statement": item.statement,
                     "score": item.score,
+                    "calibrated_score": item.calibrated_score,
+                    "calibrated": item.calibrated,
+                    "contributes_to_selection": item.contributes_to_selection,
                     "evidence_type": item.evidence_type,
+                    "quality_status": item.quality_status,
+                    "applicability": item.applicability,
+                    "uncertainty": item.uncertainty,
+                    "raw_features": item.raw_features,
+                    "warnings": item.warnings,
+                    "provenance": item.provenance,
                     "round_id": item.round_id,
+                    "claim_id": item.claim_id,
+                    "polarity": item.polarity,
+                    "source_group": item.source_group,
+                    "artifact_uri": item.artifact_uri,
+                    "artifact_span": item.artifact_span,
                 },
                 (item.source_id,),
-                item.channel,
+                item.source_group if item.source_group != "unknown" else item.channel,
                 item.confidence,
-                valid_from_round=item.round_id,
+                valid_from_round=(
+                    item.valid_from_round
+                    if item.valid_from_round is not None
+                    else item.round_id
+                ),
+                valid_to_round=item.valid_to_round,
             )
-            relations.append(
-                _relation(
-                    self.name,
-                    entity_id,
-                    "ABOUT",
-                    f"variant:{item.variant_id}",
-                    KnowledgeLayer.AGENT,
-                    modality=Modality.TEXT,
-                    source_id=item.source_id,
-                    source_group=item.channel,
-                    valid_from_round=item.round_id,
+            if not item.variant_id.startswith("context:"):
+                relations.append(
+                    _relation(
+                        self.name,
+                        entity_id,
+                        "ABOUT",
+                        f"variant:{item.variant_id}",
+                        KnowledgeLayer.AGENT,
+                        modality=Modality.TEXT,
+                        source_id=item.source_id,
+                        source_group=(
+                            item.source_group
+                            if item.source_group != "unknown"
+                            else item.channel
+                        ),
+                        valid_from_round=item.round_id,
+                    )
                 )
-            )
 
         for hypothesis in hypotheses:
             entity_id = f"hypothesis:{hypothesis.hypothesis_id}"
@@ -486,7 +512,15 @@ class InferenceKnowledgeAdapter:
                 if evidence_id not in evidence_lookup:
                     continue
                 evidence = evidence_lookup[evidence_id]
-                predicate = "SUPPORTED_BY" if evidence.score >= 0 else "CONTRADICTED_BY"
+                predicate = (
+                    "SUPPORTED_BY"
+                    if evidence.contributes_to_selection and evidence.score >= 0
+                    else (
+                        "CONTRADICTED_BY"
+                        if evidence.contributes_to_selection and evidence.score < 0
+                        else "CITES_EVIDENCE"
+                    )
+                )
                 relations.append(
                     RelationRecord(
                         relation_id=stable_record_id(
@@ -504,6 +538,218 @@ class InferenceKnowledgeAdapter:
                         valid_from_round=context.round_id,
                     )
                 )
+        return KnowledgeBatch(self.name, tuple(entities.values()), tuple(relations))
+
+
+class LocalRAGKnowledgeAdapter:
+    """Materialize only policy-approved, current-round local retrieval results."""
+
+    name = "local_rag"
+
+    def __init__(self, guard: TargetLeakageGuard | None = None) -> None:
+        self.guard = guard
+
+    def extract(self, context: BuildContext) -> KnowledgeBatch:
+        results = tuple(context.resources.get("local_retrieval_results", ()))
+        if not all(isinstance(item, RetrievalResult) for item in results):
+            raise TypeError(
+                "resources['local_retrieval_results'] must contain RetrievalResult records"
+            )
+        entities: dict[str, EntityRecord] = {}
+        relations: list[RelationRecord] = []
+        for result in results:
+            if result.round_id != context.round_id:
+                raise ValueError(
+                    f"Local retrieval {result.query_id} belongs to round {result.round_id}, "
+                    f"not {context.round_id}"
+                )
+            if not bool(result.policy_decision.get("allowed", False)):
+                continue
+            chunks = {item.chunk_id: item for item in result.chunks}
+            for chunk in result.chunks:
+                if (
+                    self.guard is not None
+                    and self.guard.enabled
+                    and self.guard.config.block_target_entities
+                ):
+                    matched = self.guard.validate_result(
+                        text=chunk.text, path=chunk.artifact_uri
+                    )
+                    if matched:
+                        raise ValueError(
+                            f"Target leakage guard rejected KG chunk {chunk.chunk_id}: {matched}"
+                        )
+                source_id = f"localdoc:{chunk.document_id}:{chunk.chunk_id}"
+                document_metadata = chunk.provenance.get("metadata", {})
+                if not isinstance(document_metadata, dict):
+                    document_metadata = {}
+                entities[chunk.document_id] = EntityRecord(
+                    entity_id=chunk.document_id,
+                    entity_type="Document",
+                    layer=KnowledgeLayer.LITERATURE,
+                    modalities=frozenset({Modality.TEXT}),
+                    properties={
+                        "artifact_uri": chunk.artifact_uri,
+                        "file_hash": chunk.provenance.get("file_hash"),
+                        "knowledge_type": chunk.knowledge_type,
+                        "metadata": document_metadata,
+                        "index_manifest_hash": result.index_manifest_hash,
+                    },
+                    source_ids=(source_id,),
+                    source_group=chunk.source_group,
+                    confidence=1.0,
+                    valid_from_round=result.round_id,
+                )
+                entities[chunk.chunk_id] = EntityRecord(
+                    entity_id=chunk.chunk_id,
+                    entity_type="DocumentChunk",
+                    layer=KnowledgeLayer.LITERATURE,
+                    modalities=frozenset({Modality.TEXT, Modality.EMBEDDING}),
+                    properties={
+                        "text": chunk.text,
+                        "artifact_uri": chunk.artifact_uri,
+                        "section_path": chunk.section_path,
+                        "start_offset": chunk.start_offset,
+                        "end_offset": chunk.end_offset,
+                        "knowledge_type": chunk.knowledge_type,
+                        "document_metadata": document_metadata,
+                        "scores": chunk.scores,
+                        "query_id": result.query_id,
+                        "policy_decision": result.policy_decision,
+                    },
+                    source_ids=(source_id,),
+                    source_group=chunk.source_group,
+                    confidence=min(
+                        1.0, max(0.05, float(chunk.scores.get("rrf", 0.0)) * 60.0)
+                    ),
+                    valid_from_round=result.round_id,
+                )
+                relations.append(
+                    _relation(
+                        self.name,
+                        chunk.document_id,
+                        "HAS_CHUNK",
+                        chunk.chunk_id,
+                        KnowledgeLayer.LITERATURE,
+                        modality=Modality.TEXT,
+                        source_id=source_id,
+                        source_group=chunk.source_group,
+                        context_id=result.query_id,
+                        valid_from_round=result.round_id,
+                    )
+                )
+            for claim in result.claims:
+                supporting_chunks = [
+                    chunks[item] for item in claim.evidence_chunk_ids if item in chunks
+                ]
+                if not supporting_chunks:
+                    continue
+                if (
+                    self.guard is not None
+                    and self.guard.enabled
+                    and self.guard.config.block_target_entities
+                ):
+                    matched = self.guard.matches(text=claim.statement)
+                    if matched:
+                        raise ValueError(
+                            f"Target leakage guard rejected KG claim {claim.claim_id}: {matched}"
+                        )
+                source_ids = tuple(
+                    f"localdoc:{item.document_id}:{item.chunk_id}"
+                    for item in supporting_chunks
+                )
+                source_group = supporting_chunks[0].source_group
+                knowledge_types = sorted(
+                    {item.knowledge_type for item in supporting_chunks}
+                )
+                entities[claim.claim_id] = EntityRecord(
+                    entity_id=claim.claim_id,
+                    entity_type="Claim",
+                    layer=KnowledgeLayer.LITERATURE,
+                    modalities=frozenset({Modality.TEXT}),
+                    properties={
+                        "statement": claim.statement,
+                        "subject": claim.subject,
+                        "predicate": claim.predicate,
+                        "object": claim.object,
+                        "polarity": claim.polarity,
+                        "applicability": claim.applicability,
+                        "knowledge_types": knowledge_types,
+                        "extraction_version": claim.extraction_version,
+                    },
+                    source_ids=source_ids,
+                    source_group=source_group,
+                    confidence=claim.confidence,
+                    valid_from_round=result.round_id,
+                )
+                evidence_id = f"ev:local_rag:{supporting_chunks[0].chunk_id.split(':', 1)[-1]}"
+                evidence_entity_id = f"evidence:{evidence_id}"
+                entities[evidence_entity_id] = EntityRecord(
+                    entity_id=evidence_entity_id,
+                    entity_type="Evidence",
+                    layer=KnowledgeLayer.AGENT,
+                    modalities=frozenset({Modality.TEXT}),
+                    properties={
+                        "channel": "local_rag",
+                        "statement": claim.statement,
+                        "claim_id": claim.claim_id,
+                        "knowledge_types": knowledge_types,
+                        "contributes_to_selection": False,
+                        "round_id": result.round_id,
+                    },
+                    source_ids=source_ids,
+                    source_group=source_group,
+                    confidence=claim.confidence,
+                    valid_from_round=result.round_id,
+                )
+                relations.append(
+                    RelationRecord(
+                        relation_id=stable_record_id(
+                            "rel", self.name, claim.claim_id, evidence_entity_id, result.query_id
+                        ),
+                        subject_id=claim.claim_id,
+                        predicate="SUPPORTED_BY_SOURCE",
+                        object_id=evidence_entity_id,
+                        layer=KnowledgeLayer.LITERATURE,
+                        modalities=frozenset({Modality.TEXT}),
+                        source_ids=source_ids,
+                        evidence_ids=(evidence_id,),
+                        source_group=source_group,
+                        confidence=claim.confidence,
+                        context_id=result.query_id,
+                        valid_from_round=result.round_id,
+                    )
+                )
+                for chunk in supporting_chunks:
+                    source_id = f"localdoc:{chunk.document_id}:{chunk.chunk_id}"
+                    relations.append(
+                        _relation(
+                            self.name,
+                            chunk.chunk_id,
+                            "ASSERTS",
+                            claim.claim_id,
+                            KnowledgeLayer.LITERATURE,
+                            modality=Modality.TEXT,
+                            source_id=source_id,
+                            source_group=chunk.source_group,
+                            context_id=result.query_id,
+                            valid_from_round=result.round_id,
+                        )
+                    )
+                    relations.append(
+                        _relation(
+                            self.name,
+                            evidence_entity_id,
+                            "DERIVED_FROM",
+                            chunk.chunk_id,
+                            KnowledgeLayer.PROVENANCE,
+                            modality=Modality.TEXT,
+                            source_id=source_id,
+                            source_group=chunk.source_group,
+                            context_id=result.query_id,
+                            valid_from_round=result.round_id,
+                        )
+                    )
         return KnowledgeBatch(self.name, tuple(entities.values()), tuple(relations))
 
 
