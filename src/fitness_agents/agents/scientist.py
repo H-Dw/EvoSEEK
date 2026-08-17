@@ -4,6 +4,7 @@ from collections.abc import Sequence
 from dataclasses import asdict
 from typing import Any
 
+from fitness_agents.contracts.agent_io import AgentTraceContext, ScientistContextInput
 from fitness_agents.contracts.interfaces import KnowledgeGraphTool, LLMClient
 from fitness_agents.contracts.schemas import (
     CampaignState,
@@ -13,6 +14,7 @@ from fitness_agents.contracts.schemas import (
     Prediction,
     Variant,
 )
+from fitness_agents.protein_features import ProteinTaskContext
 
 from .llm import HYPOTHESIS_SCHEMA
 
@@ -45,15 +47,19 @@ class ScientistAgent:
         self,
         client: LLMClient,
         *,
+        task_context: ProteinTaskContext,
+        objective: str,
         knowledge_graph: KnowledgeGraphTool | None = None,
     ) -> None:
         self.client = client
+        self.task_context = task_context
+        self.objective = objective
         self.knowledge_graph = knowledge_graph
         self.last_knowledge_query_id: str | None = None
         self.last_knowledge_query_ids: tuple[str, ...] = ()
 
-    @staticmethod
     def sanitized_context(
+        self,
         state: CampaignState,
         observed_variants: Sequence[Variant],
         observations: Sequence[FitnessObservation],
@@ -64,7 +70,12 @@ class ScientistAgent:
             "mode": state.mode,
             "round_id": state.round_id,
             "expected_hypothesis_id": f"hyp:{state.run_id}:r{state.round_id}",
-            "task": "maximize GB1 IgG-binding fitness over sites 39,40,41,54",
+            "task": self.task_context.task_description(self.objective),
+            "protein_id": self.task_context.protein_id,
+            "objective": self.objective,
+            "mutable_positions": self.task_context.mutable_positions,
+            "wild_type_sites": self.task_context.wild_type_code,
+            "protein_context_id": self.task_context.context_id,
             "visible_observations": [
                 {
                     "variant_id": observation.variant_id,
@@ -103,10 +114,7 @@ class ScientistAgent:
         observations: Sequence[FitnessObservation],
         evidence: Sequence[Evidence],
         kg_interaction: Any | None = None,
-        kg_tool_session: Any | None = None,
     ) -> Hypothesis:
-        if kg_interaction is not None and kg_tool_session is not None:
-            raise ValueError("Use either a precomputed KG interaction or an SDK KG session")
         context = self.sanitized_context(state, observed_variants, observations)
         if kg_interaction is not None:
             interaction_payload = asdict(kg_interaction)
@@ -118,9 +126,6 @@ class ScientistAgent:
             self.last_knowledge_query_id = (
                 self.last_knowledge_query_ids[-1] if self.last_knowledge_query_ids else None
             )
-        elif kg_tool_session is not None:
-            self.last_knowledge_query_id = None
-            self.last_knowledge_query_ids = ()
         elif self.knowledge_graph is not None:
             graph_context = self.knowledge_graph.hypothesis_context(round_id=state.round_id)
             assert_sanitized(graph_context, "context.knowledge_graph")
@@ -130,26 +135,22 @@ class ScientistAgent:
         else:
             self.last_knowledge_query_id = None
             self.last_knowledge_query_ids = ()
-        hypothesis = self.client.generate_hypothesis(
-            sanitized_context=context,
+        validated_context = ScientistContextInput.model_validate(context)
+        trace_context = AgentTraceContext(
+            run_id=state.run_id,
+            round_id=state.round_id,
+            variant_id=None,
+            role="scientist",
+            request_id=f"scientist:{state.run_id}:r{state.round_id}",
+            schema_name="HypothesisOutput",
+            tool_query_ids=self.last_knowledge_query_ids,
+        )
+        return self.client.generate_hypothesis(
+            sanitized_context=validated_context,
             evidence=evidence,
             output_schema=HYPOTHESIS_SCHEMA,
-            kg_tool_session=kg_tool_session,
-            trace_context={
-                "run_id": state.run_id,
-                "round_id": state.round_id,
-                "variant_id": None,
-                "role": "scientist",
-            },
+            trace_context=trace_context.model_dump(mode="json"),
         )
-        if kg_tool_session is not None:
-            self.last_knowledge_query_ids = kg_tool_session.query_ids
-            self.last_knowledge_query_id = (
-                self.last_knowledge_query_ids[-1]
-                if self.last_knowledge_query_ids
-                else None
-            )
-        return hypothesis
 
     def inspect_variant(self, variant_id: str, *, round_id: int) -> dict[str, Any]:
         """Expose the same safe KG interface to future critic/designer agent steps."""

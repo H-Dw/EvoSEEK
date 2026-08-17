@@ -1,3 +1,5 @@
+"""Round-scoped native KG tool executor guarded by KGInteractionController."""
+
 from __future__ import annotations
 
 from dataclasses import asdict
@@ -16,8 +18,8 @@ from .contracts import (
 from .controller import KGInteractionController
 
 
-class KGToolSession:
-    """Round-scoped SDK facade; every query still passes through KGInteractionController."""
+class RoundScopedToolExecutor:
+    """The only native path from a cognitive tool call to a KG operator."""
 
     def __init__(
         self,
@@ -47,15 +49,12 @@ class KGToolSession:
         return max(0, self.max_tool_calls - self._call_attempts)
 
     def call(
-        self,
-        operator: str,
-        intent: QueryIntent,
-        arguments: dict[str, Any],
+        self, operator: str, intent: QueryIntent, arguments: dict[str, Any]
     ) -> dict[str, Any]:
         if self.remaining_calls < 1:
             raise RuntimeError("KG query budget exhausted for this round")
         self._call_attempts += 1
-        step_id = f"sdk_tool_{self._call_attempts:02d}"
+        step_id = f"tool_{self._call_attempts:02d}"
         try:
             result = self.controller.execute(
                 KGQueryPlan(
@@ -81,8 +80,8 @@ class KGToolSession:
             variant_ids.append(str(arguments["variant_id"]))
         variant_ids.extend(str(item) for item in arguments.get("variant_ids", ()))
         report_event(
-            "sdk_kg_tool_completed",
-            message=f"SDK KG tool {operator} completed",
+            "kg_tool_completed",
+            message=f"KG tool {operator} completed",
             run_id=self.context.run_id,
             round_id=self.context.round_id,
             variant_ids=variant_ids,

@@ -11,6 +11,9 @@ from fitness_agents.agents.llm import (
     load_scientist_profile,
 )
 from fitness_agents.agents.output_contracts import HypothesisOutput
+from fitness_agents.agents.rethink import NativeReThinkClient
+from fitness_agents.agents.transports import OpenAICompatibleChatTransport
+from fitness_agents.contracts.agent_io import ReThinkContextInput
 
 
 class _SequenceClient:
@@ -66,10 +69,18 @@ def _client(remote: _SequenceClient) -> OpenAICompatibleLLMClient:
 def _context() -> dict:
     return {
         "run_id": "run",
+        "mode": "knowledge_agent",
         "round_id": 1,
         "expected_hypothesis_id": "hyp:run:r1",
+        "task": "maximize visible fitness",
+        "protein_id": "GB1",
+        "objective": "maximize",
+        "mutable_positions": [39, 40, 41, 54],
+        "wild_type_sites": "VDGV",
+        "protein_context_id": "ctx:test",
         "visible_observations": [],
         "previous_hypothesis_id": None,
+        "previous_hypothesis_assessment": None,
     }
 
 
@@ -104,14 +115,12 @@ def test_exhausted_missing_key_is_validation_error_not_key_error() -> None:
     assert isinstance(captured.value.__cause__, ValidationError)
 
 
-def test_hypothesis_output_schema_has_fixed_site_keys() -> None:
+def test_hypothesis_output_schema_accepts_task_scoped_dynamic_site_keys() -> None:
     schema = HypothesisOutput.model_json_schema()
-    preferred_ref = schema["properties"]["preferred_residues"]["$ref"]
-    preferred_name = preferred_ref.rsplit("/", 1)[-1]
-    site_schema = schema["$defs"][preferred_name]
+    site_schema = schema["properties"]["preferred_residues"]
 
-    assert site_schema["additionalProperties"] is False
-    assert set(site_schema["required"]) == {"39", "40", "41", "54"}
+    assert site_schema["type"] == "object"
+    assert site_schema["additionalProperties"]["type"] == "array"
 
 
 def test_scientist_profile_defines_output_and_authority_boundaries() -> None:
@@ -121,3 +130,48 @@ def test_scientist_profile_defines_output_and_authority_boundaries() -> None:
     assert "oracle" in profile
     assert "final-test" in profile
     assert "batch submission" in profile
+
+
+def _reflection(variant_id: str) -> dict:
+    return {
+        "variant_id": variant_id,
+        "verdict": "support",
+        "summary": "Wet evidence supports the round-specific reason.",
+        "positive_findings": ["Wet validation exceeded the baseline."],
+        "negative_findings": [],
+        "revised_reason": "Keep the reason bounded to this round.",
+        "next_round_advice": "Test matched alternatives.",
+    }
+
+
+def test_rethink_coverage_mismatch_retries_inside_structured_boundary() -> None:
+    remote = _SequenceClient(
+        [
+            {"reflections": [_reflection("v1")]},
+            {"reflections": [_reflection("v1"), _reflection("v2")]},
+        ]
+    )
+    client = NativeReThinkClient.__new__(NativeReThinkClient)
+    client.model = "unit-test-model"
+    client.temperature = 0.0
+    client.max_tokens = 1024
+    client.reasoning_effort = None
+    client.thinking = None
+    client.profile_name = "scientific_v1"
+    client.profile = "Return exact candidate coverage."
+    client.profile_sha256 = "test-profile"
+    client.client = remote
+    client.transport = OpenAICompatibleChatTransport(remote)
+    context = ReThinkContextInput.model_validate(
+        {
+            "run_id": "run",
+            "round_id": 1,
+            "visible_baseline": 0.0,
+            "candidates": [{"variant_id": "v1"}, {"variant_id": "v2"}],
+        }
+    )
+
+    reflections = client.reflect_round(context=context)
+
+    assert remote.calls == 2
+    assert {item.variant_id for item in reflections} == {"v1", "v2"}

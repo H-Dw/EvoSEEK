@@ -6,6 +6,7 @@ from typing import Any, Protocol
 
 import numpy as np
 
+from .agent_io import ReThinkContextInput, ScientistContextInput
 from .schemas import (
     ApprovedBatch,
     CampaignState,
@@ -79,11 +80,19 @@ class KnowledgeGraphTool(Protocol):
 
     def explain_variant(self, variant_id: str, *, round_id: int) -> dict[str, Any]: ...
 
+    def feature_evidence(
+        self, variant_id: str, *, channel: str, round_id: int
+    ) -> dict[str, Any]: ...
+
+    def evidence_provenance(self, evidence_id: str, *, round_id: int) -> dict[str, Any]: ...
+
 
 class ReThinkClient(Protocol):
     provider_name: str
 
-    def reflect_round(self, *, context: dict[str, Any]) -> tuple[ReThinkReflection, ...]: ...
+    def reflect_round(
+        self, *, context: ReThinkContextInput
+    ) -> tuple[ReThinkReflection, ...]: ...
 
 
 class AcquisitionPolicy(Protocol):
@@ -128,10 +137,9 @@ class LLMClient(Protocol):
     def generate_hypothesis(
         self,
         *,
-        sanitized_context: dict[str, Any],
+        sanitized_context: ScientistContextInput,
         evidence: Sequence[Evidence],
         output_schema: dict[str, Any],
-        kg_tool_session: Any | None = None,
         trace_context: dict[str, Any] | None = None,
     ) -> Hypothesis: ...
 

@@ -16,6 +16,8 @@ from typing import Any
 
 from fitness_agents.utils.progress import TimedHeartbeat, report_event
 
+from .transports import ChatTransport
+
 DEEPSEEK_DEFAULT_BASE_URL = "https://api.deepseek.com"
 DEEPSEEK_DEFAULT_MODEL = "deepseek-v4-flash"
 
@@ -192,7 +194,8 @@ def _safe_validation_detail(error: Exception) -> str:
 
 def complete_json(
     *,
-    client: Any,
+    client: Any | None,
+    transport: ChatTransport | None = None,
     model: str,
     messages: list[dict[str, str]],
     schema: dict[str, Any] | None = None,
@@ -202,6 +205,7 @@ def complete_json(
     thinking: str | None = None,
     retries: int = 2,
     validator: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+    trace_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Request and validate JSON, retrying syntax and domain-contract failures together."""
 
@@ -212,7 +216,10 @@ def complete_json(
     token_budget = max_tokens or int(os.environ.get("FITNESS_AGENTS_LLM_MAX_TOKENS", "16384"))
     effort = reasoning_effort or os.environ.get("FITNESS_AGENTS_LLM_REASONING_EFFORT")
     thinking_mode = thinking or os.environ.get("FITNESS_AGENTS_LLM_THINKING")
-    client_base = str(getattr(client, "base_url", "") or "")
+    if transport is None and client is None:
+        raise ValueError("A chat transport or compatible client is required")
+    connection = transport if transport is not None else client
+    client_base = str(getattr(connection, "base_url", "") or "")
     deepseek = uses_deepseek(model, client_base) or uses_deepseek(
         model, os.environ.get("OPENAI_BASE_URL") or os.environ.get("FITNESS_AGENTS_LLM_BASE_URL")
     )
@@ -223,6 +230,7 @@ def complete_json(
     last_error: Exception | None = None
     current_thinking = thinking_mode
     current_messages = list(messages)
+    trace_fields = dict(trace_context or {})
     for attempt in range(retries + 1):
         kwargs: dict[str, Any] = {
             "model": model,
@@ -246,11 +254,16 @@ def complete_json(
             attempt=attempt,
             thinking=current_thinking,
             max_tokens=token_budget,
+            **trace_fields,
         )
         started = time.perf_counter()
         try:
             with TimedHeartbeat(f"LLM {model} attempt {attempt + 1}"):
-                response = client.chat.completions.create(**kwargs)
+                response = (
+                    transport.create_chat_completion(**kwargs)
+                    if transport is not None
+                    else client.chat.completions.create(**kwargs)
+                )
             message = response.choices[0].message
             content = _message_content(message)
             if not content:
@@ -267,6 +280,7 @@ def complete_json(
                 latency_s=round(time.perf_counter() - started, 3),
                 finish_reason=getattr(response.choices[0], "finish_reason", None),
                 **_usage_payload(response),
+                **trace_fields,
             )
             return payload
         except Exception as error:  # noqa: BLE001 - retry JSON/thinking failures
@@ -279,6 +293,7 @@ def complete_json(
                 thinking=current_thinking,
                 error_type=type(error).__name__,
                 latency_s=round(time.perf_counter() - started, 3),
+                **trace_fields,
             )
             if deepseek and current_thinking == "enabled":
                 current_thinking = "disabled"
@@ -301,5 +316,6 @@ def complete_json(
         message=f"LLM request {model} failed",
         model=model,
         error_type=type(last_error).__name__ if last_error is not None else "RuntimeError",
+        **trace_fields,
     )
     raise RuntimeError("Remote LLM JSON completion failed") from last_error

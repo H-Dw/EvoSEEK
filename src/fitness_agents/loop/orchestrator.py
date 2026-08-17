@@ -10,11 +10,12 @@ from typing import Any
 import numpy as np
 
 from fitness_agents.acquisition import create_policy
+from fitness_agents.agents.client_registry import create_role_client_bundle
 from fitness_agents.agents.critic import CriticAgent, OpenAICriticClient, RuleBasedCriticClient
-from fitness_agents.agents.llm import create_llm_client
 from fitness_agents.agents.rethink import create_rethink_client
 from fitness_agents.agents.scientist import ScientistAgent
 from fitness_agents.config import ExperimentConfig
+from fitness_agents.contracts.agent_io import ReThinkContextInput
 from fitness_agents.contracts.schemas import (
     CampaignPhase,
     CampaignState,
@@ -37,20 +38,24 @@ from fitness_agents.evaluation.hypotheses import (
 from fitness_agents.evaluation.metrics import loop_round_metrics, prediction_metrics
 from fitness_agents.kg_interaction import (
     CompareVariantsOperator,
+    EvidenceProvenanceOperator,
     ExplainVariantOperator,
+    FeatureEvidenceOperator,
     HypothesisContextOperator,
     InteractionAblationConfig,
     KGInteractionController,
     KGQueryContext,
     KGQueryPlan,
     KGQueryStep,
-    KGToolSession,
+    LocalKnowledgeQueryOperator,
     QueryIntent,
+    StructuredClaimQueryOperator,
 )
 from fitness_agents.knowledge import KnowledgeEngine
 from fitness_agents.models import create_predictor
 from fitness_agents.mutation import AgentUncertaintySelector, create_candidate_generator
 from fitness_agents.plugin_registry import PluginRegistry
+from fitness_agents.protein_features import ProteinTaskContext
 from fitness_agents.reporting import write_campaign_outputs
 from fitness_agents.utils import JsonArtifactWriter, bind_progress, reset_progress, seed_everything
 from fitness_agents.validation.batch import ApprovalGateway, BatchHardValidator, build_draft_batch
@@ -66,11 +71,30 @@ def _descending_ranks(values: dict[str, float]) -> dict[str, int]:
 
 def _flatten_evidence(evidence: dict[str, list[Any]], limit: int = 120) -> list[Any]:
     entries = [item for bundle in evidence.values() for item in bundle]
-    return sorted(
+    ranked = sorted(
         entries,
-        key=lambda item: (item.confidence * abs(item.score), item.evidence_id),
+        key=lambda item: (
+            item.quality_status == "unavailable",
+            bool(item.contributes_to_selection),
+            item.confidence * abs(item.score),
+            item.evidence_id,
+        ),
         reverse=True,
-    )[:limit]
+    )
+    by_channel: dict[str, list[Any]] = {}
+    for item in ranked:
+        by_channel.setdefault(item.channel, []).append(item)
+    balanced: list[Any] = []
+    depth = 0
+    channels = sorted(by_channel)
+    while len(balanced) < limit and any(depth < len(by_channel[name]) for name in channels):
+        for channel in channels:
+            if depth < len(by_channel[channel]):
+                balanced.append(by_channel[channel][depth])
+                if len(balanced) == limit:
+                    break
+        depth += 1
+    return balanced
 
 
 def _shuffle_prediction_scores(
@@ -186,6 +210,7 @@ class CampaignRunner:
         self.approval_gateway = ApprovalGateway()
         self.backend = ApprovalEnforcingBackend(raw_backend, self.approval_gateway)
         self.predictor_factory = predictor_factory
+        self.task_context = ProteinTaskContext.from_task(config.task)
         self.knowledge = KnowledgeEngine(
             config.knowledge,
             graph_path=self.writer.run_dir / "knowledge_graph.sqlite",
@@ -193,28 +218,40 @@ class CampaignRunner:
             protein_id=config.task.protein_id,
             validation_config=config.validation,
             structured_graph_path=self.writer.run_dir / "structured_kg.sqlite",
+            task_context=self.task_context,
+            protein_name=config.task.protein_name,
+            protein_aliases=config.task.protein_aliases,
+            protein_accessions=config.task.protein_accessions,
+            local_knowledge_enabled=config.knowledge_enabled,
+        )
+        self._scientist_local_context_allowed = bool(
+            config.knowledge.local_knowledge.allow_remote_context
+            or config.llm.provider == "mock"
+        )
+        self._critic_local_context_allowed = bool(
+            config.knowledge.local_knowledge.allow_remote_context
+            or config.critic.mode != "remote"
         )
         graph_tool = (
             self.knowledge.agent_tool()
             if config.knowledge_enabled and config.knowledge.kg and not config.evidence_deletion
             else None
         )
+        role_clients = create_role_client_bundle(
+            self.config.llm.provider,
+            profile=self.config.llm.profile,
+            model=self.config.llm.model,
+            base_url=self.config.llm.base_url,
+            api_key=self.config.llm.api_key,
+            temperature=self.config.llm.temperature,
+            max_tokens=self.config.llm.max_tokens,
+            reasoning_effort=self.config.llm.reasoning_effort,
+            thinking=self.config.llm.thinking,
+        )
         self.agent = agent or ScientistAgent(
-            create_llm_client(
-                self.config.llm.provider,
-                runtime=self.config.llm.runtime,
-                profile=self.config.llm.profile,
-                model=self.config.llm.model,
-                base_url=self.config.llm.base_url,
-                api_key=self.config.llm.api_key,
-                temperature=self.config.llm.temperature,
-                max_tokens=self.config.llm.max_tokens,
-                reasoning_effort=self.config.llm.reasoning_effort,
-                thinking=self.config.llm.thinking,
-                sdk_tracing_enabled=self.config.llm.sdk_tracing_enabled,
-                sdk_max_turns=self.config.llm.sdk_max_turns,
-                sdk_model_retries=self.config.llm.sdk_model_retries,
-            ),
+            role_clients.scientist,
+            task_context=self.task_context,
+            objective=config.task.objective,
             knowledge_graph=graph_tool,
         )
         self.kg_interaction = None
@@ -223,6 +260,39 @@ class CampaignRunner:
             operators.register("hypothesis_context", HypothesisContextOperator(graph_tool))
             operators.register("explain_variant", ExplainVariantOperator(graph_tool))
             operators.register("compare_variants", CompareVariantsOperator(graph_tool))
+            operators.register(
+                "query_physchem_delta",
+                FeatureEvidenceOperator("query_physchem_delta", "physchem", graph_tool),
+            )
+            operators.register(
+                "query_evolutionary_profile",
+                FeatureEvidenceOperator(
+                    "query_evolutionary_profile", "conservation", graph_tool
+                ),
+            )
+            operators.register(
+                "query_structure_environment",
+                FeatureEvidenceOperator(
+                    "query_structure_environment", "structure", graph_tool
+                ),
+            )
+            operators.register(
+                "query_assay_association",
+                FeatureEvidenceOperator("query_assay_association", "kg", graph_tool),
+            )
+            operators.register(
+                "query_evidence_provenance", EvidenceProvenanceOperator(graph_tool)
+            )
+            if (
+                self.knowledge.local_knowledge is not None
+                and self._scientist_local_context_allowed
+            ):
+                operators.register(
+                    "query_local_knowledge", LocalKnowledgeQueryOperator(self.knowledge)
+                )
+                operators.register(
+                    "query_structured_claims", StructuredClaimQueryOperator(self.knowledge)
+                )
             self.kg_interaction = KGInteractionController(
                 operators,
                 config=InteractionAblationConfig(
@@ -233,20 +303,7 @@ class CampaignRunner:
                     read_only=True,
                 ),
             )
-        self.rethink_client = create_rethink_client(
-            self.config.llm.provider,
-            runtime=self.config.llm.runtime,
-            model=self.config.llm.model,
-            base_url=self.config.llm.base_url,
-            api_key=self.config.llm.api_key,
-            temperature=self.config.llm.temperature,
-            max_tokens=self.config.llm.max_tokens,
-            reasoning_effort=self.config.llm.reasoning_effort,
-            thinking=self.config.llm.thinking,
-            sdk_tracing_enabled=self.config.llm.sdk_tracing_enabled,
-            sdk_max_turns=self.config.llm.sdk_max_turns,
-            sdk_model_retries=self.config.llm.sdk_model_retries,
-        )
+        self.rethink_client = role_clients.rethink
         if critic_agent is None:
             rule_critic = RuleBasedCriticClient()
             if config.critic.mode == "remote" and config.critic.enabled:
@@ -278,8 +335,14 @@ class CampaignRunner:
         )
         self.hypothesis_evaluator = DeterministicHypothesisEvaluator()
         self._progress_token = bind_progress(self.writer)
-        self.generator = create_candidate_generator(config.mode)
-        self.agent_selector = AgentUncertaintySelector(config.generation)
+        self.generator = create_candidate_generator(
+            config.mode,
+            position_to_index=self.task_context.position_to_variant_index,
+        )
+        self.agent_selector = AgentUncertaintySelector(
+            config.generation,
+            position_to_index=self.task_context.position_to_variant_index,
+        )
         knowledge_weight = config.knowledge.soft_weight if config.knowledge_enabled else 0.0
         self.policy = create_policy(
             config.acquisition,
@@ -325,6 +388,31 @@ class CampaignRunner:
                 {"limit": self.config.kg_interaction.max_rows},
             )
         ]
+        if (
+            self.knowledge.local_knowledge is not None
+            and self._scientist_local_context_allowed
+        ):
+            steps.append(
+                KGQueryStep(
+                    "local_knowledge",
+                    "query_local_knowledge",
+                    QueryIntent.SUPPORT,
+                    {
+                        "query": (
+                            "general protein structure stability binding mutation "
+                            "physicochemical epistasis knowledge"
+                        ),
+                        "anchors": [
+                            "protein structure and stability",
+                            "binding interface mutation effects",
+                            "physicochemical substitution mechanisms",
+                            "epistasis and residue interactions",
+                        ],
+                        "limit": self.config.kg_interaction.max_rows,
+                    },
+                    ("context",),
+                )
+            )
         if representative_ids:
             steps.append(
                 KGQueryStep(
@@ -345,6 +433,7 @@ class CampaignRunner:
                     ("context",),
                 )
             )
+        steps = steps[: self.config.kg_interaction.max_tool_calls]
         return self.kg_interaction.execute(
             KGQueryPlan(
                 plan_id=f"kgplan:{self.run_id}:r{round_id}",
@@ -358,27 +447,6 @@ class CampaignRunner:
                 allowed_variant_ids=frozenset(item.variant_id for item in observed_variants),
                 max_rows=self.config.kg_interaction.max_rows,
             ),
-        )
-
-    def _new_sdk_kg_tool_session(
-        self, *, round_id: int, observed_variants: list[Any]
-    ) -> KGToolSession | None:
-        if (
-            self.config.mode not in {"llm_agent", "knowledge_agent"}
-            or self.kg_interaction is None
-            or not getattr(self.agent.client, "supports_kg_tools", False)
-        ):
-            return None
-        return KGToolSession(
-            self.kg_interaction,
-            KGQueryContext(
-                run_id=self.run_id,
-                round_id=round_id,
-                allowed_variant_ids=frozenset(item.variant_id for item in observed_variants),
-                max_rows=self.config.kg_interaction.max_rows,
-            ),
-            plan_id=f"kgplan:{self.run_id}:r{round_id}:sdk",
-            max_tool_calls=self.config.kg_interaction.max_tool_calls,
         )
 
     def _record_kg_interaction(self, *, round_id: int, interaction_result: Any) -> None:
@@ -413,10 +481,50 @@ class CampaignRunner:
                 "structure": self.config.knowledge.structure,
                 "kg": self.config.knowledge.kg,
             },
+            "protein_context": {
+                "context_id": self.task_context.context_id,
+                "protein_id": self.task_context.protein_id,
+                "sequence_mode": self.task_context.sequence_mode,
+                "numbering_scheme": self.task_context.numbering_scheme,
+                "mutable_positions": list(self.task_context.mutable_positions),
+                "wild_type_sites": self.task_context.wild_type_code,
+                "structure_resource_ids": [
+                    item.resource_id for item in self.task_context.structure_resources
+                ],
+            },
+            "knowledge_runtime": {
+                "fusion_mode": self.config.knowledge.fusion_mode,
+                "legacy_mode": self.config.knowledge.legacy_mode,
+                "parameter_set_id": self.config.knowledge.parameter_set_id,
+                "provider_status": self.knowledge.provider_status,
+                "providers": self.knowledge.provider_configs,
+                "parameters": self.config.knowledge.parameters,
+                "local_knowledge": {
+                    "enabled": self.knowledge.local_knowledge is not None,
+                    "index_path": (
+                        str(self.config.knowledge.local_knowledge.index_path)
+                        if self.config.knowledge.local_knowledge.index_path is not None
+                        else None
+                    ),
+                    "retrieval_mode": self.config.knowledge.local_knowledge.retrieval.mode,
+                    "dense_enabled": (
+                        self.config.knowledge.local_knowledge.retrieval.dense_enabled
+                    ),
+                    "leakage_guard_enabled": (
+                        self.config.knowledge.local_knowledge.leakage_guard.enabled
+                    ),
+                    "allow_remote_context": (
+                        self.config.knowledge.local_knowledge.allow_remote_context
+                    ),
+                    "scientist_context_allowed": self._scientist_local_context_allowed,
+                    "critic_context_allowed": self._critic_local_context_allowed,
+                    "build_report": self.knowledge.local_knowledge_build_report,
+                },
+            },
             "llm_provider": self.config.llm.provider,
             "llm": {
                 "provider": self.config.llm.provider,
-                "runtime": self.config.llm.runtime,
+                "runtime": "native_chat_completions",
                 "profile": self.config.llm.profile,
                 "profile_sha256": getattr(
                     self.agent.client, "profile_sha256", None
@@ -427,8 +535,7 @@ class CampaignRunner:
                 "max_tokens": self.config.llm.max_tokens,
                 "reasoning_effort": self.config.llm.reasoning_effort,
                 "thinking": self.config.llm.thinking,
-                "sdk_tracing_enabled": self.config.llm.sdk_tracing_enabled,
-                "sdk_trace_role": "observability_only",
+                "trace_role": "observability_only",
                 "scientific_state_source": "wet_dry_kg_artifact",
                 "api_key_ref": self.config.llm.api_key
                 if isinstance(self.config.llm.api_key, str)
@@ -462,6 +569,9 @@ class CampaignRunner:
                 "uncertainty_beta": self.config.generation.uncertainty_beta,
                 "predictor_weight": self.config.generation.predictor_weight,
                 "gp_length_scale": self.config.generation.gp_length_scale,
+                "hypothesis_recency_decay": (
+                    self.config.generation.hypothesis_recency_decay
+                ),
             },
             "validation": {
                 "enabled": self.config.validation.enabled,
@@ -581,6 +691,15 @@ class CampaignRunner:
         round_metrics: list[dict[str, float]] = []
         rounds_aborted = 0
         self.writer.write_json("config.json", self._config_record())
+        self.writer.write_json(
+            "knowledge/manifest.json",
+            {
+                "protein_context": self._config_record()["protein_context"],
+                **self._config_record()["knowledge_runtime"],
+                "scientific_state_source": "wet_dry_kg_artifact",
+                "phase6_status": "future_todo_expensive_adapters_disabled",
+            },
+        )
         self.writer.event(
             "campaign_started",
             {
@@ -638,6 +757,7 @@ class CampaignRunner:
                 )
 
             evidence: dict[str, list[Any]] = {}
+            local_evidence: tuple[Any, ...] = ()
             if self.config.knowledge_enabled:
                 seen_ids: set[str] = set()
                 evidence_targets: list[Any] = []
@@ -664,10 +784,78 @@ class CampaignRunner:
                     self.knowledge.graph.add_evidence(
                         [item for bundle in evidence.values() for item in bundle]
                     )
+                    all_evidence = [item for bundle in evidence.values() for item in bundle]
+                    self.writer.write_json(
+                        f"round_{round_id:02d}/evidence_contract.json",
+                        {
+                            "provider_status": self.knowledge.provider_status,
+                            "parameter_set_id": self.config.knowledge.parameter_set_id,
+                            "variant_count": len(evidence),
+                            "evidence_count": len(all_evidence),
+                            "channel_counts": {
+                                channel: sum(item.channel == channel for item in all_evidence)
+                                for channel in sorted({item.channel for item in all_evidence})
+                            },
+                            "quality_counts": {
+                                status: sum(item.quality_status == status for item in all_evidence)
+                                for status in sorted(
+                                    {item.quality_status for item in all_evidence}
+                                )
+                            },
+                            "calibrated_count": sum(item.calibrated for item in all_evidence),
+                            "selection_eligible_count": sum(
+                                item.contributes_to_selection for item in all_evidence
+                            ),
+                            "calibration_models": {
+                                item.channel: item.provenance["calibration"]
+                                for item in all_evidence
+                                if item.calibrated and "calibration" in item.provenance
+                            },
+                        },
+                    )
+                    self.writer.write_json(
+                        f"round_{round_id:02d}/parameter_snapshot.json",
+                        {
+                            "parameter_set_id": self.config.knowledge.parameter_set_id,
+                            "parameters": self.config.knowledge.parameters,
+                            "boundary": "round_start_after_previous_wet_reveal",
+                            "round_id": round_id,
+                            "visible_observation_count": len(self.state.observed),
+                            "automatic_parameter_update_applied": False,
+                        },
+                    )
                 self._progress(
                     "evidence_completed",
                     f"round {round_id}/{self.config.rounds} evidence ready",
                     n_candidates=len(evidence_targets),
+                )
+
+            if self.knowledge.local_knowledge is not None:
+                local_result, local_evidence = self.knowledge.prefetch_local_knowledge(
+                    round_id=round_id,
+                    objective=self.config.task.objective,
+                    assay_conditions=self.config.task.assay_conditions,
+                    anchors=tuple(sorted(self.knowledge.providers)),
+                )
+                self.writer.write_json(
+                    f"round_{round_id:02d}/local_rag_retrieval.json",
+                    local_result,
+                )
+                self.writer.write_json(
+                    f"round_{round_id:02d}/local_rag_evidence.json",
+                    local_evidence,
+                )
+                self.writer.event(
+                    "local_knowledge_retrieved",
+                    {
+                        "round_id": round_id,
+                        "query_id": local_result.query_id if local_result else None,
+                        "chunk_count": len(local_result.chunks) if local_result else 0,
+                        "evidence_count": len(local_evidence),
+                        "policy_decision": (
+                            local_result.policy_decision if local_result else None
+                        ),
+                    },
                 )
 
             structured_variants = list(
@@ -678,7 +866,12 @@ class CampaignRunner:
                 round_id=round_id,
                 variants=structured_variants,
                 observations=self.state.observed,
-                evidence=_flatten_evidence(evidence, limit=max(len(structured_variants) * 4, 120)),
+                evidence=[
+                    *local_evidence,
+                    *_flatten_evidence(
+                        evidence, limit=max(len(structured_variants) * 4, 120)
+                    ),
+                ],
                 hypotheses=self.state.hypotheses,
             )
             self.writer.write_json(
@@ -687,6 +880,7 @@ class CampaignRunner:
                     "report": structured_result.report,
                     "entity_count": len(structured_result.snapshot.entities),
                     "relation_count": len(structured_result.snapshot.relations),
+                    "snapshot_id": self.knowledge.structured_sink.last_snapshot_id,
                 },
             )
             self.writer.event(
@@ -698,16 +892,9 @@ class CampaignRunner:
                     "relation_count": len(structured_result.snapshot.relations),
                 },
             )
-            kg_tool_session = self._new_sdk_kg_tool_session(
-                round_id=round_id, observed_variants=observed_variants
-            )
-            interaction_result = (
-                None
-                if kg_tool_session is not None
-                else self._run_kg_interaction(
-                    round_id=round_id,
-                    observed_variants=observed_variants,
-                )
+            interaction_result = self._run_kg_interaction(
+                round_id=round_id,
+                observed_variants=observed_variants,
             )
             if interaction_result is not None:
                 self._record_kg_interaction(
@@ -722,21 +909,16 @@ class CampaignRunner:
                     phase=CampaignPhase.LLM_HYPOTHESIS,
                     model=self.config.llm.model or self.config.llm.provider,
                 )
-                try:
-                    hypothesis = self.agent.propose_hypothesis(
-                        self.state,
-                        observed_variants,
-                        self.state.observed,
-                        _flatten_evidence(evidence),
-                        kg_interaction=interaction_result,
-                        kg_tool_session=kg_tool_session,
-                    )
-                finally:
-                    if kg_tool_session is not None:
-                        interaction_result = kg_tool_session.result()
-                        self._record_kg_interaction(
-                            round_id=round_id, interaction_result=interaction_result
-                        )
+                hypothesis = self.agent.propose_hypothesis(
+                    self.state,
+                    observed_variants,
+                    self.state.observed,
+                    [
+                        *(local_evidence if self._scientist_local_context_allowed else ()),
+                        *_flatten_evidence(evidence),
+                    ],
+                    kg_interaction=interaction_result,
+                )
                 self.state.hypotheses.append(hypothesis)
                 self.knowledge.graph.add_hypothesis(
                     hypothesis.hypothesis_id,
@@ -908,6 +1090,14 @@ class CampaignRunner:
                     ),
                 },
             )
+            if evidence:
+                self.writer.write_json(
+                    f"round_{round_id:02d}/selected_evidence.json",
+                    {
+                        variant_id: evidence.get(variant_id, [])
+                        for variant_id in selected_ids
+                    },
+                )
 
             validation_prediction_sets: list[list[Prediction]] = []
             validation_predictors: list[Any] = []
@@ -1208,6 +1398,9 @@ class CampaignRunner:
                     pending_ids=set(),
                     allowed_ids={item.variant_id for item in remaining},
                     expected_batch_size=expected_batch_size,
+                    context_evidence=(
+                        local_evidence if self._critic_local_context_allowed else ()
+                    ),
                     on_attempt=record_review_attempt,
                     on_attempt_start=record_review_start,
                 )
@@ -1452,7 +1645,7 @@ class CampaignRunner:
                 for variant_id in selected_ids:
                     if variant_id in mapping:
                         dry_by_variant[variant_id].append(mapping[variant_id])
-            rethink_context = {
+            rethink_context = ReThinkContextInput.model_validate({
                 "run_id": self.run_id,
                 "round_id": round_id,
                 "visible_baseline": pre_round_visible_baseline,
@@ -1476,7 +1669,7 @@ class CampaignRunner:
                     }
                     for variant_id in selected_ids
                 ],
-            }
+            })
             reflections = ()
             if self.config.validation.rethink_enabled:
                 try:
@@ -1654,9 +1847,9 @@ class CampaignRunner:
                     for prediction in predictions
                 ],
                 evidence=_flatten_evidence(
-                    evidence,
-                    limit=max(len(evidence) * 4, 120),
-                ),
+                    evidence, limit=max(len(evidence) * 4, 120)
+                )
+                + list(self.knowledge.local_evidence(round_id=round_id)),
                 hypotheses=self.state.hypotheses,
             )
             self.writer.write_json(
@@ -1665,6 +1858,7 @@ class CampaignRunner:
                     "report": post_structured_result.report,
                     "entity_count": len(post_structured_result.snapshot.entities),
                     "relation_count": len(post_structured_result.snapshot.relations),
+                    "snapshot_id": self.knowledge.structured_sink.last_snapshot_id,
                     "validation_record_count": len(self.validation_records),
                 },
             )

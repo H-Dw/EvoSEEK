@@ -1,17 +1,21 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import Any
 
 from fitness_agents.agents.remote_llm import (
-    complete_json,
     create_openai_client,
     resolve_base_url,
     resolve_model,
 )
+from fitness_agents.contracts.agent_io import AgentTraceContext, ReThinkContextInput
 from fitness_agents.contracts.schemas import ReThinkReflection
 
 from .output_contracts import ReThinkOutput, validate_rethink_payload
+from .profile_loader import load_role_profile
+from .structured_completion import complete_structured
+from .transports import OpenAICompatibleChatTransport
 
 RETHINK_SCHEMA: dict[str, Any] = ReThinkOutput.model_json_schema()
 
@@ -31,7 +35,8 @@ class MockReThinkClient:
 
     provider_name = "mock_rethink"
 
-    def reflect_round(self, *, context: dict[str, Any]) -> tuple[ReThinkReflection, ...]:
+    def reflect_round(self, *, context: ReThinkContextInput) -> tuple[ReThinkReflection, ...]:
+        context = ReThinkContextInput.model_validate(context).model_dump(mode="json")
         baseline = float(context.get("visible_baseline", 0.0))
         items: list[dict[str, Any]] = []
         for item in context.get("candidates", ()):
@@ -85,7 +90,7 @@ class MockReThinkClient:
         )
 
 
-class OpenAICompatibleReThinkClient:
+class NativeReThinkClient:
     provider_name = "openai_compatible_rethink"
 
     def __init__(
@@ -99,49 +104,78 @@ class OpenAICompatibleReThinkClient:
         reasoning_effort: str | None = None,
         thinking: str | None = None,
         api_key: str | None = None,
+        profile: str = "scientific_v1",
     ) -> None:
         self.model = resolve_model(model, provider=provider)
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.reasoning_effort = reasoning_effort
         self.thinking = thinking
+        role_profile = load_role_profile("rethink", profile)
+        self.profile_name = profile
+        self.profile = role_profile.instructions
+        self.profile_sha256 = role_profile.sha256
         self.client = create_openai_client(api_key=api_key, base_url=base_url, provider=provider)
+        self.transport = OpenAICompatibleChatTransport(self.client)
 
-    def reflect_round(self, *, context: dict[str, Any]) -> tuple[ReThinkReflection, ...]:
-        payload = complete_json(
+    def reflect_round(self, *, context: ReThinkContextInput) -> tuple[ReThinkReflection, ...]:
+        validated_context = ReThinkContextInput.model_validate(context)
+        trace_context = AgentTraceContext(
+            run_id=validated_context.run_id,
+            round_id=validated_context.round_id,
+            role="rethink",
+            request_id=(
+                f"rethink:{validated_context.run_id}:r{validated_context.round_id}"
+            ),
+        )
+        output = complete_structured(
             client=self.client,
+            transport=self.transport,
             model=self.model,
             messages=[
                 {
                     "role": "system",
                     "content": (
-                        "You are the ReThink Agent in an iterative protein-design campaign. "
-                        "For every candidate, assess whether the original recommendation reason "
-                        "is supported, contradicted, mixed, or inconclusive using supplied wet and "
-                        "dry validation. Wet measurements are authoritative; dry model values are "
-                        "lower-fidelity evidence. Do not invent measurements. Return JSON matching "
+                        self.profile + "\nReturn JSON matching "
                         + json.dumps(RETHINK_SCHEMA, ensure_ascii=False)
                     ),
                 },
-                {"role": "user", "content": json.dumps(context, ensure_ascii=False)},
+                {"role": "user", "content": validated_context.model_dump_json()},
             ],
-            schema=RETHINK_SCHEMA,
+            output_type=ReThinkOutput,
             temperature=self.temperature,
             max_tokens=self.max_tokens,
             reasoning_effort=self.reasoning_effort,
             thinking=self.thinking,
-            validator=validate_rethink_payload,
+            contextual_validator=lambda value: validate_rethink_payload(
+                value, expected_variant_ids=validated_context.expected_variant_ids
+            ),
+            trace_context={
+                **trace_context.model_dump(mode="json"),
+                "profile": self.profile_name,
+                "profile_sha256": self.profile_sha256,
+                "schema_name": "ReThinkOutput",
+                "context_sha256": hashlib.sha256(
+                    validated_context.model_dump_json().encode()
+                ).hexdigest(),
+            },
         )
         return _parse_reflections(
-            payload,
-            run_id=str(context["run_id"]),
-            round_id=int(context["round_id"]),
+            output.model_dump(mode="json"),
+            run_id=validated_context.run_id,
+            round_id=validated_context.round_id,
             provider=self.provider_name,
         )
 
 
+OpenAICompatibleReThinkClient = NativeReThinkClient
+
+
 def create_rethink_client(provider: str, **kwargs: Any):
-    runtime = str(kwargs.pop("runtime", "chat_completions"))
+    if "runtime" in kwargs:
+        runtime = str(kwargs.pop("runtime"))
+        if runtime != "chat_completions":
+            raise ValueError(f"Removed Agents SDK runtime is not supported: {runtime!r}")
     if provider == "mock":
         return MockReThinkClient()
     if provider in {"openai", "openai_compatible", "deepseek"}:
@@ -151,14 +185,5 @@ def create_rethink_client(provider: str, **kwargs: Any):
                 "base_url", resolve_base_url(kwargs.get("base_url"), provider="deepseek")
             )
             kwargs.setdefault("model", resolve_model(kwargs.get("model"), provider="deepseek"))
-        if runtime == "agents_sdk":
-            from .sdk_agents import AgentsSDKReThinkClient
-
-            return AgentsSDKReThinkClient(**kwargs)
-        if runtime != "chat_completions":
-            raise ValueError(f"Unknown LLM runtime {runtime!r}")
-        kwargs.pop("sdk_tracing_enabled", None)
-        kwargs.pop("sdk_max_turns", None)
-        kwargs.pop("sdk_model_retries", None)
-        return OpenAICompatibleReThinkClient(**kwargs)
+        return NativeReThinkClient(**kwargs)
     raise ValueError(f"Unknown ReThink provider {provider!r}")

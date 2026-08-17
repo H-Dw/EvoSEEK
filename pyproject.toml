@@ -21,7 +21,8 @@ dependencies = [
 
 [project.optional-dependencies]
 llm = ["openai>=1.40,<4"]
-agents-sdk = ["openai-agents>=0.21,<0.22"]
+rag = ["sentence-transformers>=3,<6"]
+rag-docs = ["docling>=2,<3"]
 kermut = [
   "torch>=2.2,<3",
   "gpytorch>=1.11,<2",
@@ -31,7 +32,6 @@ dev = [
   "pytest>=8,<9",
   "pytest-cov>=5,<7",
   "ruff>=0.6,<1",
-  "openai-agents>=0.21,<0.22",
 ]
 
 [project.scripts]
@@ -50,7 +50,10 @@ where = ["src"]
   "critic_profiles/scientific_v1/*.yaml",
   "critic_profiles/scientific_v1/*.json",
   "critic_profiles/scientific_v1/*.jsonl",
-  "scientist_profiles/scientific_v1/*.md",
+  "profiles/scientist/scientific_v1/*.md",
+  "profiles/scientist/scientific_v1/*.yaml",
+  "profiles/rethink/scientific_v1/*.md",
+  "profiles/rethink/scientific_v1/*.yaml",
 ]
 
 [tool.pytest.ini_options]
