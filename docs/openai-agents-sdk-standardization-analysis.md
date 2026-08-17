@@ -156,4 +156,7 @@ SDK 的最大价值在 Scientist/ReThink 这类“模型 + 受限只读工具 + 
 4. [Guardrails](https://openai.github.io/openai-agents-python/guardrails/)：input/output/tool guardrail 的执行边界及 handoff/hosted tool 限制。
 5. [Agent orchestration](https://openai.github.io/openai-agents-python/multi_agent/)：manager-style orchestration 与 handoff 选择。
 6. [Tracing](https://openai.github.io/openai-agents-python/tracing/)：trace/span 与自定义 processor。
+> **状态：已废弃（2026-08-17）。** 本文记录历史 SDK pilot 分析，不代表当前实现。
+> 当前系统已采用零 Agents SDK 的项目原生 Client 架构；以
+> `docs/deepseek-contract-first-agent-refactor-plan.md` 及代码为准。
 

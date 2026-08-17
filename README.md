@@ -608,9 +608,9 @@ ALDE 的离散 batch acquisition/UQ 分层、FLIP 的 GB1 数据语义、BioDesi
 
 ## Test Command
 ```bash
-nohup .venv/bin/python scripts/run_sdk_baselines.py \
+nohup .venv/bin/python scripts/run_agent_baselines.py \
   --preset al96 \
   --folds 0,1,2 \
-  --seed 42 \
+  --seeds 42 \
   --modes random,fitness_direct,llm_agent,knowledge_agent > benchmark_comp.log 2>&1 &
 ```

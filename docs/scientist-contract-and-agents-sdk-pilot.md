@@ -191,3 +191,6 @@ python -m pip install -r requirements/agents-sdk.txt
 - [Trace grading](https://developers.openai.com/api/docs/guides/trace-grading)
 - [DeepSeek JSON Output](https://api-docs.deepseek.com/guides/json_mode/)
 - [DeepSeek Tool Calls and strict beta](https://api-docs.deepseek.com/guides/tool_calls)
+> **状态：历史记录（2026-08-17）。** 文中的 Agents SDK pilot 已从生产代码、配置和依赖中删除。
+> 当前实现使用原生 Chat Completions Client、Pydantic contextual validation 和受控 KG 工具合同；
+> 参见 `docs/deepseek-contract-first-agent-refactor-plan.md`。
