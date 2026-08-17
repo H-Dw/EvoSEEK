@@ -3,9 +3,133 @@ conservation: true
 structure: true
 kg: true
 soft_weight: 0.20
+legacy_mode: false
+legacy_contributes_to_selection: false
+fusion_mode: independent_features
+parameter_set_id: gb1-knowledge:v2
+local_knowledge:
+  enabled: true
+  index_path: artifacts/local_knowledge/gb1.sqlite
+  allow_remote_context: false
+  roots:
+    - path: resources/local_knowledge/directed_evolution
+      include: ["**/*.md"]
+      exclude: ["**/~$*", "**/.git/**", "**/artifacts/**"]
+  ingestion:
+    parser: auto
+    chunk_tokens: 480
+    chunk_overlap: 64
+    max_file_mb: 50
+    follow_symlinks: false
+    extract_archives: false
+  retrieval:
+    mode: lexical
+    lexical_backend: sqlite_fts5
+    dense_enabled: false
+    allow_model_download: false
+    fusion: rrf
+    top_k: 8
+    token_budget: 5000
+  kg_update:
+    enabled: true
+    materialization: retrieved_only
+    source_group: directed_evolution_library
+    max_claims_per_round: 32
+    contributes_to_selection: false
+  leakage_guard:
+    enabled: true
+    mode: generalize_and_filter
+    derive_protected_terms_from_task: true
+    protected_aliases: []
+    protected_accessions: []
+    strict_aliases_required: true
+    quarantine_target_documents: true
+    block_target_entities: true
+providers:
+  physchem:
+    kind: aaindex_delta
+    resource_path: configs/resources/aaindex_minimal.yaml
+    contributes_to_selection: true
+    calibration: visible_linear
+    minimum_calibration_samples: 8
+    missing_policy: fail
+  conservation:
+    kind: msa_profile
+    contributes_to_selection: false
+    calibration: none
+    missing_policy: unavailable
+    options:
+      identity_threshold: 0.8
+      pseudocount: 0.5
+      minimum_neff: 16.0
+      minimum_sequence_coverage: 0.7
+      maximum_sequence_gap_fraction: 0.5
+  structure:
+    kind: static_structure
+    contributes_to_selection: false
+    calibration: none
+    missing_policy: unavailable
+    options:
+      contact_cutoff_angstrom: 5.0
+      interface_cutoff_angstrom: 5.0
+      hbond_cutoff_angstrom: 3.5
+      salt_bridge_cutoff_angstrom: 4.0
+      sasa_probe_radius_angstrom: 1.4
+      sasa_sphere_points: 96
+      dense_contact_count: 12
+      clash_distance_fraction: 0.75
+      disulfide_sg_cutoff_angstrom: 2.3
+  kg:
+    kind: observation_association
+    contributes_to_selection: true
+    calibration: none
+parameters:
+  kg.shrinkage_pseudocount:
+    value: 3.0
+    category: scientific
+    status: expert_prior
+    learnable: true
+    bounds: [0.1, 100.0]
+    transform: log
+    update_policy: round_boundary_only
+    min_evidence: 32
+    source: project_prior_pending_calibration
+    version: gb1-knowledge:v2
+  kg.confidence_base:
+    value: 0.25
+    category: policy
+    status: expert_prior
+    learnable: true
+    bounds: [0.0, 1.0]
+    transform: logit
+    update_policy: round_boundary_only
+    min_evidence: 32
+    source: project_prior_pending_calibration
+    version: gb1-knowledge:v2
+  kg.support_gain:
+    value: 0.03
+    category: policy
+    status: expert_prior
+    learnable: true
+    bounds: [0.0001, 0.5]
+    transform: log
+    update_policy: round_boundary_only
+    min_evidence: 32
+    source: project_prior_pending_calibration
+    version: gb1-knowledge:v2
+  kg.confidence_cap:
+    value: 0.85
+    category: policy
+    status: expert_prior
+    learnable: true
+    bounds: [0.01, 0.999]
+    transform: logit
+    update_policy: round_boundary_only
+    min_evidence: 32
+    source: project_prior_pending_calibration
+    version: gb1-knowledge:v2
 site_profiles:
   "39": {wild_type: V, tolerated: [V, F, W, Y, L, I, M], structure_risk: 0.20}
   "40": {wild_type: D, tolerated: [D, E, N, Q, H, W], structure_risk: 0.35}
   "41": {wild_type: G, tolerated: [G, A, S, C, T], structure_risk: 0.75}
   "54": {wild_type: V, tolerated: [V, I, L, M, A, F], structure_risk: 0.30}
-

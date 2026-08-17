@@ -1,0 +1,22 @@
+physchem: true
+conservation: true
+structure: true
+kg: true
+mode: knowledge_agent
+knowledge:
+  legacy_mode: true
+  legacy_contributes_to_selection: true
+  fusion_mode: legacy_weighted_average
+  providers:
+    physchem:
+      kind: legacy_physchem
+      contributes_to_selection: true
+    conservation:
+      kind: legacy_site_profile
+      contributes_to_selection: true
+    structure:
+      kind: legacy_site_risk
+      contributes_to_selection: true
+    kg:
+      kind: observation_association
+      contributes_to_selection: true

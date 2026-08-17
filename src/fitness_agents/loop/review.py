@@ -74,6 +74,7 @@ class BoundedReviewLoop:
         pending_ids: set[str],
         allowed_ids: set[str],
         expected_batch_size: int,
+        context_evidence: Sequence[Evidence] = (),
         on_attempt: Callable[[DraftBatch, ConflictReport, CritiqueDecision], Any] | None = None,
         on_attempt_start: Callable[[DraftBatch, ConflictReport], Any] | None = None,
     ) -> ReviewLoopResult:
@@ -100,6 +101,7 @@ class BoundedReviewLoop:
                 predictions=predictions,
                 evidence=evidence,
                 conflict_report=report,
+                context_evidence=context_evidence,
             )
             attempts.append(decision)
             if on_attempt is not None:

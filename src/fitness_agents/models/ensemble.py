@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -53,6 +54,7 @@ class OneHotHeterogeneousEnsemble:
         self._models: _FittedModels | None = None
         self._calibration_radius = 0.0
         self._train_codes: list[str] = []
+        self._reference_code: str | None = None
 
     @staticmethod
     def _align_targets(
@@ -109,6 +111,10 @@ class OneHotHeterogeneousEnsemble:
                 gp.fit(x_train, y_train)
         self._models = _FittedModels(ridge=ridge_models, extra_trees=forest, gaussian_process=gp)
         self._train_codes = [variant.variant for variant in variants]
+        self._reference_code = "".join(
+            min(Counter(column).items(), key=lambda item: (-item[1], item[0]))[0]
+            for column in zip(*self._train_codes, strict=True)
+        )
 
         self._calibration_radius = 0.0
         if validation_variants and validation_observations:
@@ -148,8 +154,10 @@ class OneHotHeterogeneousEnsemble:
             return []
         calibrated_sigma = max(self._calibration_radius / 1.645, 1e-8)
         predictions: list[Prediction] = []
+        if self._reference_code is None:
+            raise RuntimeError("Predictor reference is unavailable before fitting")
         max_train_depth = max(
-            sum(a != b for a, b in zip(code, "VDGV", strict=True)) for code in self._train_codes
+            hamming_distance(code, self._reference_code) for code in self._train_codes
         )
         batch_size = 8192
         n_batches = (len(variants) + batch_size - 1) // batch_size

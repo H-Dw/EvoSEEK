@@ -5,19 +5,25 @@ from collections.abc import Callable, Sequence
 from fitness_agents.contracts.schemas import CampaignState, Evidence, Hypothesis, Variant
 
 
-def _hypothesis_matches(variant: Variant, hypothesis: Hypothesis | None) -> int:
+def _hypothesis_matches(
+    variant: Variant,
+    hypothesis: Hypothesis | None,
+    position_to_index: dict[int, int],
+) -> int:
     if hypothesis is None:
         return 0
-    index_by_position = {39: 0, 40: 1, 41: 2, 54: 3}
     return sum(
-        variant.variant[index_by_position[position]] in residues
+        variant.variant[position_to_index[position]] in residues
         for position, residues in hypothesis.preferred_residues.items()
-        if position in index_by_position
+        if position in position_to_index
     )
 
 
 class EnumeratingCandidateGenerator:
     name = "enumerating"
+
+    def __init__(self, position_to_index: dict[int, int] | None = None) -> None:
+        self.position_to_index = dict(position_to_index or {})
 
     def generate(
         self,
@@ -36,6 +42,9 @@ class EnumeratingCandidateGenerator:
 class HypothesisCandidateGenerator:
     name = "hypothesis_filtered"
 
+    def __init__(self, position_to_index: dict[int, int] | None = None) -> None:
+        self.position_to_index = dict(position_to_index or {})
+
     def generate(
         self,
         candidates: Sequence[Variant],
@@ -46,7 +55,10 @@ class HypothesisCandidateGenerator:
     ) -> list[Variant]:
         ranked = sorted(
             candidates,
-            key=lambda item: (_hypothesis_matches(item, hypothesis), item.variant_id),
+            key=lambda item: (
+                _hypothesis_matches(item, hypothesis, self.position_to_index),
+                item.variant_id,
+            ),
             reverse=True,
         )
         if limit <= 0:
@@ -56,6 +68,9 @@ class HypothesisCandidateGenerator:
 
 class KnowledgeCandidateGenerator:
     name = "knowledge_filtered"
+
+    def __init__(self, position_to_index: dict[int, int] | None = None) -> None:
+        self.position_to_index = dict(position_to_index or {})
 
     def generate(
         self,
@@ -71,7 +86,11 @@ class KnowledgeCandidateGenerator:
                 candidates = evidenced
 
         def evidence_score(item: Variant) -> float:
-            bundle = evidence.get(item.variant_id, [])
+            bundle = [
+                entry
+                for entry in evidence.get(item.variant_id, [])
+                if entry.contributes_to_selection
+            ]
             if not bundle:
                 return 0.0
             denominator = sum(max(entry.confidence, 1e-6) for entry in bundle)
@@ -80,7 +99,7 @@ class KnowledgeCandidateGenerator:
         ranked = sorted(
             candidates,
             key=lambda item: (
-                _hypothesis_matches(item, hypothesis),
+                _hypothesis_matches(item, hypothesis, self.position_to_index),
                 evidence_score(item),
                 item.variant_id,
             ),
@@ -105,9 +124,11 @@ def register_candidate_generator(mode: str, factory: Callable[[], object]) -> No
     CANDIDATE_GENERATORS[mode] = factory
 
 
-def create_candidate_generator(mode: str):
+def create_candidate_generator(
+    mode: str, *, position_to_index: dict[int, int] | None = None
+):
     try:
-        return CANDIDATE_GENERATORS[mode]()
+        return CANDIDATE_GENERATORS[mode](position_to_index)
     except KeyError as error:
         raise ValueError(
             f"Unknown experiment mode {mode!r}; available={sorted(CANDIDATE_GENERATORS)}"

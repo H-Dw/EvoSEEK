@@ -24,20 +24,23 @@ class ObservationKnowledgeGraph:
     round, and source; predictions and evidence retain their model/source provenance.
     """
 
-    _WT_CODE = "VDGV"
-    _POSITIONS = (39, 40, 41, 54)
-
     def __init__(
         self,
         path: str | Path,
         *,
         assay_id: str,
-        recency_decay: float = 0.85,
+        recency_decay: float,
+        wild_type_code: str,
+        mutable_positions: Sequence[int],
     ) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.assay_id = assay_id
         self.recency_decay = recency_decay
+        self.wild_type_code = str(wild_type_code)
+        self.mutable_positions = tuple(int(item) for item in mutable_positions)
+        if len(self.wild_type_code) != len(self.mutable_positions):
+            raise ValueError("wild_type_code and mutable_positions must have equal length")
         self.connection = sqlite3.connect(self.path)
         self.connection.execute("PRAGMA foreign_keys = ON")
         self.connection.executescript(
@@ -91,6 +94,15 @@ class ObservationKnowledgeGraph:
                 confidence REAL NOT NULL,
                 round_id INTEGER NOT NULL,
                 evidence_type TEXT NOT NULL,
+                raw_features_json TEXT NOT NULL DEFAULT '{}',
+                quality_status TEXT NOT NULL DEFAULT 'ok',
+                applicability TEXT NOT NULL DEFAULT 'unknown',
+                uncertainty REAL,
+                calibrated_score REAL,
+                calibrated INTEGER NOT NULL DEFAULT 0,
+                contributes_to_selection INTEGER NOT NULL DEFAULT 1,
+                warnings_json TEXT NOT NULL DEFAULT '[]',
+                provenance_json TEXT NOT NULL DEFAULT '{}',
                 FOREIGN KEY (variant_id) REFERENCES variants(variant_id)
             );
             CREATE TABLE IF NOT EXISTS hypotheses (
@@ -138,6 +150,7 @@ class ObservationKnowledgeGraph:
             """
         )
         self._migrate_legacy_variants_table()
+        self._migrate_legacy_evidence_table()
         self.connection.commit()
 
     def _migrate_legacy_variants_table(self) -> None:
@@ -153,6 +166,25 @@ class ObservationKnowledgeGraph:
         for column, definition in additions.items():
             if column not in existing:
                 self.connection.execute(f"ALTER TABLE variants ADD COLUMN {column} {definition}")
+
+    def _migrate_legacy_evidence_table(self) -> None:
+        existing = {
+            str(row[1]) for row in self.connection.execute("PRAGMA table_info(evidence)").fetchall()
+        }
+        additions = {
+            "raw_features_json": "TEXT NOT NULL DEFAULT '{}'",
+            "quality_status": "TEXT NOT NULL DEFAULT 'ok'",
+            "applicability": "TEXT NOT NULL DEFAULT 'unknown'",
+            "uncertainty": "REAL",
+            "calibrated_score": "REAL",
+            "calibrated": "INTEGER NOT NULL DEFAULT 0",
+            "contributes_to_selection": "INTEGER NOT NULL DEFAULT 1",
+            "warnings_json": "TEXT NOT NULL DEFAULT '[]'",
+            "provenance_json": "TEXT NOT NULL DEFAULT '{}'",
+        }
+        for column, definition in additions.items():
+            if column not in existing:
+                self.connection.execute(f"ALTER TABLE evidence ADD COLUMN {column} {definition}")
 
     def add_variants(self, variants: Sequence[Variant]) -> None:
         with self.connection:
@@ -179,7 +211,7 @@ class ObservationKnowledgeGraph:
                     ),
                 )
                 for index, (wt, mutant) in enumerate(
-                    zip(self._WT_CODE, variant.variant, strict=True)
+                    zip(self.wild_type_code, variant.variant, strict=True)
                 ):
                     if wt == mutant:
                         continue
@@ -189,7 +221,7 @@ class ObservationKnowledgeGraph:
                             (variant_id, position, wt_aa, mutant_aa)
                         VALUES (?, ?, ?, ?)
                         """,
-                        (variant.variant_id, self._POSITIONS[index], wt, mutant),
+                        (variant.variant_id, self.mutable_positions[index], wt, mutant),
                     )
 
     def add_observations(
@@ -272,8 +304,10 @@ class ObservationKnowledgeGraph:
                     """
                     INSERT OR REPLACE INTO evidence
                         (evidence_id, variant_id, channel, statement, score, source_id,
-                         confidence, round_id, evidence_type)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         confidence, round_id, evidence_type, raw_features_json,
+                         quality_status, applicability, uncertainty, calibrated_score,
+                         calibrated, contributes_to_selection, warnings_json, provenance_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         item.evidence_id,
@@ -285,6 +319,15 @@ class ObservationKnowledgeGraph:
                         item.confidence,
                         item.round_id,
                         item.evidence_type,
+                        json.dumps(item.raw_features, sort_keys=True),
+                        item.quality_status,
+                        item.applicability,
+                        item.uncertainty,
+                        item.calibrated_score,
+                        int(item.calibrated),
+                        int(item.contributes_to_selection),
+                        json.dumps(item.warnings),
+                        json.dumps(item.provenance, sort_keys=True),
                     ),
                 )
 
@@ -541,7 +584,10 @@ class ObservationKnowledgeGraph:
         for row in prediction_rows:
             evidence_rows = self.connection.execute(
                 """
-                SELECT evidence_id, channel, statement, score, source_id, confidence, evidence_type
+                SELECT evidence_id, channel, statement, score, source_id, confidence,
+                       evidence_type, raw_features_json, quality_status, applicability,
+                       uncertainty, calibrated_score, calibrated,
+                       contributes_to_selection, warnings_json, provenance_json
                 FROM evidence
                 WHERE variant_id = ? AND round_id = ?
                 ORDER BY confidence * ABS(score) DESC, evidence_id
@@ -572,6 +618,15 @@ class ObservationKnowledgeGraph:
                             "source_id": ev[4],
                             "confidence": float(ev[5]),
                             "evidence_type": ev[6],
+                            "raw_features": json.loads(ev[7]),
+                            "quality_status": ev[8],
+                            "applicability": ev[9],
+                            "uncertainty": ev[10],
+                            "calibrated_score": ev[11],
+                            "calibrated": bool(ev[12]),
+                            "contributes_to_selection": bool(ev[13]),
+                            "warnings": json.loads(ev[14]),
+                            "provenance": json.loads(ev[15]),
                         }
                         for ev in evidence_rows
                     ],
@@ -600,7 +655,9 @@ class ObservationKnowledgeGraph:
         evidence_preview_rows = self.connection.execute(
             """
             SELECT evidence_id, variant_id, channel, statement, score, source_id,
-                   confidence, evidence_type
+                   confidence, evidence_type, raw_features_json, quality_status,
+                   applicability, uncertainty, calibrated_score, calibrated,
+                   contributes_to_selection, warnings_json, provenance_json
             FROM evidence
             WHERE round_id = ?
             ORDER BY confidence * ABS(score) DESC, evidence_id
@@ -618,6 +675,15 @@ class ObservationKnowledgeGraph:
                 "source_id": row[5],
                 "confidence": float(row[6]),
                 "evidence_type": row[7],
+                "raw_features": json.loads(row[8]),
+                "quality_status": row[9],
+                "applicability": row[10],
+                "uncertainty": row[11],
+                "calibrated_score": row[12],
+                "calibrated": bool(row[13]),
+                "contributes_to_selection": bool(row[14]),
+                "warnings": json.loads(row[15]),
+                "provenance": json.loads(row[16]),
                 "source_type": "computed_evidence",
             }
             for row in evidence_preview_rows
@@ -664,7 +730,9 @@ class ObservationKnowledgeGraph:
         evidence = self.connection.execute(
             """
             SELECT evidence_id, round_id, channel, statement, score, source_id,
-                   confidence, evidence_type
+                   confidence, evidence_type, raw_features_json, quality_status,
+                   applicability, uncertainty, calibrated_score, calibrated,
+                   contributes_to_selection, warnings_json, provenance_json
             FROM evidence WHERE variant_id = ? AND round_id <= ?
             ORDER BY round_id DESC, confidence * ABS(score) DESC, evidence_id
             """,
@@ -720,6 +788,15 @@ class ObservationKnowledgeGraph:
                     "source_id": row[5],
                     "confidence": float(row[6]),
                     "evidence_type": row[7],
+                    "raw_features": json.loads(row[8]),
+                    "quality_status": row[9],
+                    "applicability": row[10],
+                    "uncertainty": row[11],
+                    "calibrated_score": row[12],
+                    "calibrated": bool(row[13]),
+                    "contributes_to_selection": bool(row[14]),
+                    "warnings": json.loads(row[15]),
+                    "provenance": json.loads(row[16]),
                 }
                 for row in evidence
             ],

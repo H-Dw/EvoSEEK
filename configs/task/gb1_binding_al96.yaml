@@ -1,8 +1,14 @@
 task_id: gb1_binding_al96
 protein_id: GB1
+protein_name: immunoglobulin-binding domain B1 of protein G
+protein_aliases: [GB1, protein G B1 domain]
+protein_accessions: []
 assay_id: GB1_IgG_binding_Wu2016
 wild_type_sites: VDGV
 mutable_positions: [39, 40, 41, 54]
+reference_sequence: MTYKLILNGKTLKGETTTEAVDAATAEKVFKQYANDNGVDGEWTYDDATKTFTVTE
+sequence_position_offset: 1
+numbering_scheme: GB1_domain_1_based
 objective: maximize
 split_root: data/processed/splits/GB1/al96_closed_loop/GB1-AL96-5CV-v1
 fold_index: 0
@@ -10,4 +16,3 @@ expected_split_strategy: al96_closed_loop
 expected_protocol_version: GB1-AL96-5CV-v1
 sequence_column: variant
 fitness_column: target
-

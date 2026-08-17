@@ -1,0 +1,99 @@
+source_id: aaindex_curated_minimal:v1
+description: >-
+  Minimal source-backed residue descriptor table. Hydropathy is Kyte-Doolittle;
+  volume is an approximate side-chain volume table. Values remain separate named
+  features and are not a fitness model.
+properties:
+  residue_mass:
+    accession: EXPASY_AVERAGE_RESIDUE_MASS
+    description: Average residue mass in a peptide chain, daltons
+    values:
+      A: 71.0788
+      C: 103.1388
+      D: 115.0886
+      E: 129.1155
+      F: 147.1766
+      G: 57.0519
+      H: 137.1411
+      I: 113.1594
+      K: 128.1741
+      L: 113.1594
+      M: 131.1926
+      N: 114.1038
+      P: 97.1167
+      Q: 128.1307
+      R: 156.1875
+      S: 87.0782
+      T: 101.1051
+      V: 99.1326
+      W: 186.2132
+      Y: 163.1760
+  hydropathy:
+    accession: KYTJ820101
+    values:
+      A: 1.8
+      C: 2.5
+      D: -3.5
+      E: -3.5
+      F: 2.8
+      G: -0.4
+      H: -3.2
+      I: 4.5
+      K: -3.9
+      L: 3.8
+      M: 1.9
+      N: -3.5
+      P: -1.6
+      Q: -3.5
+      R: -4.5
+      S: -0.8
+      T: -0.7
+      V: 4.2
+      W: -0.9
+      Y: -1.3
+  side_chain_volume:
+    accession: PROJECT_APPROX_SIDE_CHAIN_VOLUME_V1
+    values:
+      A: 88.6
+      C: 108.5
+      D: 111.1
+      E: 138.4
+      F: 189.9
+      G: 60.1
+      H: 153.2
+      I: 166.7
+      K: 168.6
+      L: 166.7
+      M: 162.9
+      N: 114.1
+      P: 112.7
+      Q: 143.8
+      R: 173.4
+      S: 89.0
+      T: 116.1
+      V: 140.0
+      W: 227.8
+      Y: 193.6
+  nominal_charge:
+    accession: PROJECT_NOMINAL_CHARGE_V1
+    values:
+      A: 0.0
+      C: 0.0
+      D: -1.0
+      E: -1.0
+      F: 0.0
+      G: 0.0
+      H: 0.1
+      I: 0.0
+      K: 1.0
+      L: 0.0
+      M: 0.0
+      N: 0.0
+      P: 0.0
+      Q: 0.0
+      R: 1.0
+      S: 0.0
+      T: 0.0
+      V: 0.0
+      W: 0.0
+      Y: 0.0

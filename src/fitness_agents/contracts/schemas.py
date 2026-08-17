@@ -127,6 +127,36 @@ class Evidence:
     confidence: float
     round_id: int
     evidence_type: str = "computed"
+    raw_features: dict[str, Any] = field(default_factory=dict)
+    quality_status: str = "ok"
+    applicability: str = "unknown"
+    uncertainty: float | None = None
+    calibrated_score: float | None = None
+    calibrated: bool = False
+    contributes_to_selection: bool = True
+    warnings: tuple[str, ...] = ()
+    provenance: dict[str, Any] = field(default_factory=dict)
+    claim_id: str | None = None
+    polarity: str = "neutral"
+    source_group: str = "unknown"
+    artifact_uri: str | None = None
+    artifact_span: tuple[int, int] | None = None
+    valid_from_round: int | None = None
+    valid_to_round: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.polarity not in {"support", "contradict", "neutral", "unknown"}:
+            raise ValueError("Evidence polarity is invalid")
+        if self.artifact_span is not None:
+            start, end = self.artifact_span
+            if start < 0 or end < start:
+                raise ValueError("Evidence artifact_span is invalid")
+        if (
+            self.valid_from_round is not None
+            and self.valid_to_round is not None
+            and self.valid_to_round < self.valid_from_round
+        ):
+            raise ValueError("Evidence valid_to_round precedes valid_from_round")
 
 
 @dataclass(frozen=True)

@@ -13,27 +13,32 @@ from fitness_agents.contracts.schemas import (
     Variant,
 )
 
-_POSITION_INDEX = {39: 0, 40: 1, 41: 2, 54: 3}
 
-
-def _hypothesis_score(variant: Variant, hypothesis: Hypothesis | None) -> float:
+def _hypothesis_score(
+    variant: Variant,
+    hypothesis: Hypothesis | None,
+    position_to_index: Mapping[int, int],
+) -> float:
     if hypothesis is None or not hypothesis.preferred_residues:
         return 0.0
     matches = 0
     tested = 0
     for position, residues in hypothesis.preferred_residues.items():
-        if position not in _POSITION_INDEX or not residues:
+        if position not in position_to_index or not residues:
             continue
         tested += 1
-        matches += variant.variant[_POSITION_INDEX[position]] in residues
+        matches += variant.variant[position_to_index[position]] in residues
     return float(matches / tested) if tested else 0.0
 
 
 def _evidence_score(items: Sequence[Evidence]) -> float:
     if not items:
         return 0.0
-    weights = np.asarray([max(float(item.confidence), 1e-8) for item in items])
-    values = np.asarray([float(item.score) for item in items])
+    selectable = [item for item in items if item.contributes_to_selection]
+    if not selectable:
+        return 0.0
+    weights = np.asarray([max(float(item.confidence), 1e-8) for item in selectable])
+    values = np.asarray([float(item.score) for item in selectable])
     return float(np.average(values, weights=weights))
 
 
@@ -75,8 +80,14 @@ class AgentUncertaintySelector:
 
     model_version = "kg-llm-agent-uq-v1"
 
-    def __init__(self, config: GenerationConfig) -> None:
+    def __init__(
+        self,
+        config: GenerationConfig,
+        *,
+        position_to_index: Mapping[int, int] | None = None,
+    ) -> None:
         self.config = config
+        self.position_to_index = dict(position_to_index or {})
 
     def _coverage_uncertainty(
         self,
@@ -123,11 +134,16 @@ class AgentUncertaintySelector:
         output: list[DesignScore] = []
         for variant in candidates:
             hypothesis_values = [
-                _hypothesis_score(variant, item) for item in active_hypotheses
+                _hypothesis_score(variant, item, self.position_to_index)
+                for item in active_hypotheses
             ]
             if hypothesis_values:
                 recency_weights = np.asarray(
-                    [0.85 ** (len(hypothesis_values) - index - 1) for index in range(len(hypothesis_values))]
+                    [
+                        self.config.hypothesis_recency_decay
+                        ** (len(hypothesis_values) - index - 1)
+                        for index in range(len(hypothesis_values))
+                    ]
                 )
                 hypothesis_value = float(
                     np.average(hypothesis_values, weights=recency_weights)

@@ -1,0 +1,5 @@
+physchem: false
+conservation: true
+structure: false
+kg: false
+mode: knowledge_agent

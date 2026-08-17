@@ -7,7 +7,13 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from fitness_agents.config import ExperimentConfig, KnowledgeConfig, ModelConfig, TaskConfig
+from fitness_agents.config import (
+    ExperimentConfig,
+    KnowledgeConfig,
+    LearnableParameterSpec,
+    ModelConfig,
+    TaskConfig,
+)
 from fitness_agents.data.gb1 import canonical_mutation_notation, variant_id
 
 
@@ -76,7 +82,13 @@ def experiment_config(synthetic_benchmark: dict[str, Path]) -> ExperimentConfig:
             40: {"wild_type": "D", "tolerated": ["D", "W"], "structure_risk": 0.3},
             41: {"wild_type": "G", "tolerated": ["G", "A"], "structure_risk": 0.7},
             54: {"wild_type": "V", "tolerated": ["V", "L"], "structure_risk": 0.3},
-        }
+        },
+        parameters={
+            "kg.shrinkage_pseudocount": LearnableParameterSpec(value=3.0),
+            "kg.confidence_base": LearnableParameterSpec(value=0.25),
+            "kg.support_gain": LearnableParameterSpec(value=0.03),
+            "kg.confidence_cap": LearnableParameterSpec(value=0.85),
+        },
     )
     return ExperimentConfig(
         mode="knowledge_agent",
@@ -102,4 +114,3 @@ def config_factory(experiment_config: ExperimentConfig):
         return replace(experiment_config, **changes)
 
     return factory
-
