@@ -690,11 +690,55 @@ ALDE 的离散 batch acquisition/UQ 分层、FLIP 的 GB1 数据语义、BioDesi
 - 正式结论应使用 paired seeds、bootstrap 置信区间和多重比较校正。
 
 
-## Test Command
+## 15. RAG/KG/三通道/主动学习路线验证
+
+路线矩阵位于 `configs/experiments/gb1_reasoning_routes.matrix.yaml`，公共实验参数位于
+`configs/experiments/gb1_reasoning_routes_base.yaml`。矩阵固定使用五折中的前三折
+`[0, 1, 2]`，并行进程数默认是 2。所有路线共享同一 fold manifest、seed、候选预算、
+Scientist LLM 和本地规则 Critic，避免把资源差异误当成路线差异。
+
+| route ID | RAG | physchem | conservation | structure | 主动学习 | 测试目标 |
+|---|:---:|:---:|:---:|:---:|:---:|---|
+| `rag_kg_none` | ✓ |  |  |  |  | RAG 检索和 observation-KG 能进入 LLM，上述三类 feature evidence 均不出现 |
+| `rag_kg_all` | ✓ | ✓ | ✓ | ✓ |  | 三类 provider 均 ready、联合 tool 被调用、evidence/KG/RAG 进入 LLM 上下文 |
+| `rag_kg_physchem` | ✓ | ✓ |  |  |  | 只出现理化 evidence，排除 MSA 与结构 evidence |
+| `rag_kg_physchem_structure` | ✓ | ✓ |  | ✓ |  | 理化与坐标结构联合出现，MSA evidence 缺席 |
+| `rag_kg_physchem_conservation` | ✓ | ✓ | ✓ |  |  | 理化与 A3M 单位点保守性联合出现，结构 evidence 缺席 |
+| `kg_all` |  | ✓ | ✓ | ✓ |  | 在没有本地文档 RAG 时验证 KG 与三通道到 LLM 的路径 |
+| `kg_none` |  |  |  |  |  | 纯 observation-centric KG 到 LLM 的对照路线 |
+| `rag_kg_all_active_learning` | ✓ | ✓ | ✓ | ✓ | ✓ | 除完整 evidence 路径外，验证 posterior 与 acquisition 产物及 selection driver |
+
+首次运行前先按第 2.1 节生成 `GB1-AL96-5CV-v1`。检查 24 个任务及有效配置而不调用 LLM：
+
 ```bash
-nohup .venv/bin/python scripts/run_agent_baselines.py \
-  --preset al96 \
-  --folds 0,1,2 \
-  --seeds 42 \
-  --modes random,fitness_direct,llm_agent,knowledge_agent > benchmark_comp.log 2>&1 &
+python scripts/run_reasoning_routes.py --dry-run
 ```
+
+执行全部 8 条路线 × 前 3 折；`--max-parallel` 可覆盖默认值 2：
+
+```bash
+python scripts/run_reasoning_routes.py --max-parallel 2
+```
+
+只验证一条或若干路线：
+
+```bash
+python scripts/run_reasoning_routes.py \
+  --routes rag_kg_all,kg_all,rag_kg_all_active_learning \
+  --folds 0,1,2 \
+  --max-parallel 2
+```
+
+Windows PowerShell 使用仓库虚拟环境时，将上面的 `python` 换为
+`.venv\Scripts\python.exe`。DeepSeek key 只通过 `DEEPSEEK_API_KEY` 环境变量提供。
+
+调度器不仅检查进程退出码，还逐折审计：effective config、provider ready/disabled 状态、
+`evidence_contract.json` 的通道集合、`structured_kg.sqlite`、`kg_interaction.json`、RAG 产物、
+LLM hypothesis、主动学习 posterior/acquisition，以及 `kg_truncation_audit.json` 中对
+`MutationEffectEstimate`、关系类型和已启用 feature 关系的关键词查询。汇总写入
+`route_validation.json`；其中 `any_max_rows_truncation` 显式报告 `max_rows` 截断，而不是静默忽略。
+
+该测试能证明“组件执行、evidence 生成、KG 注入、上下文交付和选择器切换”。它不能单凭一次
+trace 证明 LLM 在语义上依赖某条 evidence，也不能证明某路线提高 fitness。后者应在相同 fold/seed
+上增加 evidence 删除或置换干预、多个 seed 和置信区间；三通道与未校准 RAG evidence 默认不直接
+升级为测量或 fitness 选择证据。
