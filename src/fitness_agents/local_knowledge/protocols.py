@@ -20,12 +20,19 @@ class ParserBackend(Protocol):
 class EmbeddingBackend(Protocol):
     name: str
     dimension: int
+    max_input_tokens: int
+    fingerprint: dict[str, object]
 
-    def encode(self, texts: Sequence[str]) -> np.ndarray: ...
+    def encode_documents(self, texts: Sequence[str]) -> np.ndarray: ...
+
+    def encode_queries(self, texts: Sequence[str]) -> np.ndarray: ...
+
+    def count_tokens(self, text: str, *, query: bool = False) -> int: ...
 
 
 class RerankerBackend(Protocol):
     name: str
+    score_kind: str
 
     def score(self, query: str, texts: Sequence[str]) -> np.ndarray: ...
 

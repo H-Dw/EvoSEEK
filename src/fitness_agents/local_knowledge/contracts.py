@@ -88,6 +88,9 @@ class KnowledgeClaim:
     applicability: dict[str, Any]
     confidence: float
     evidence_chunk_ids: tuple[str, ...]
+    claim_kind: str = "retrieved_context"
+    citation_support: tuple[dict[str, Any], ...] = ()
+    selection_eligible: bool = False
     extraction_version: str = "retrieval-only:v1"
 
     def __post_init__(self) -> None:

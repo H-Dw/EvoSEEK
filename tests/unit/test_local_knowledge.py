@@ -25,6 +25,8 @@ def _config(
     return LocalKnowledgeConfig(
         enabled=True,
         index_path=index_path,
+        corpus_index_path=index_path,
+        retrieval_overlay_path=index_path.with_name(f"{index_path.stem}-overlay.sqlite"),
         roots=(
             LocalKnowledgeRootConfig(
                 path=root,
@@ -83,7 +85,7 @@ def test_local_index_is_incremental_and_retrieval_is_traceable(tmp_path: Path) -
     assert evidence[0].artifact_span is not None
     assert evidence[0].provenance["index_manifest_hash"] == first.manifest_hash
 
-    connection = sqlite3.connect(index_path)
+    connection = sqlite3.connect(index_path.with_name("index-overlay.sqlite"))
     try:
         event = connection.execute(
             "SELECT original_query_hash, sanitized_query, result_chunk_ids_json "
@@ -196,7 +198,7 @@ def test_target_leakage_guard_quarantines_and_generalizes(tmp_path: Path) -> Non
             round_id=1,
             anchors=("protein structure and stability", "hydrophobic packing"),
         )
-        stats = knowledge.index.stats()
+        stats = knowledge.overlay.stats()
     finally:
         knowledge.close()
 
@@ -207,19 +209,19 @@ def test_target_leakage_guard_quarantines_and_generalizes(tmp_path: Path) -> Non
     assert result.chunks
     assert all(Path(item.artifact_uri).name == generic.name for item in result.chunks)
     assert all("GB1" not in item.text for item in result.chunks)
-    connection = sqlite3.connect(index_path)
+    connection = sqlite3.connect(index_path.with_name("guarded-overlay.sqlite"))
     try:
         stored_query = connection.execute(
             "SELECT sanitized_query FROM retrieval_events WHERE query_id = ?",
             (result.query_id,),
         ).fetchone()[0]
-        searchable_target_rows = connection.execute(
-            "SELECT COUNT(*) FROM chunks_fts WHERE chunks_fts MATCH 'GB1'"
+        blocked_target_rows = connection.execute(
+            "SELECT COUNT(*) FROM document_policy WHERE allowed = 0"
         ).fetchone()[0]
     finally:
         connection.close()
     assert "gb1" not in stored_query.casefold()
-    assert searchable_target_rows == 0
+    assert blocked_target_rows == 1
 
 
 def test_dense_mode_requires_explicit_local_model_path() -> None:

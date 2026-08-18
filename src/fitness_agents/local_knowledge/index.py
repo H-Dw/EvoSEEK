@@ -15,9 +15,11 @@ from .chunking import CHUNKER_VERSION, chunk_document
 from .contracts import DocumentChunk, IndexBuildReport
 from .leakage import TargetLeakageGuard
 from .parsers import AutoLocalParser, discover_local_files
+from .prompt_safety import instruction_like_markers
 from .protocols import EmbeddingBackend
 
-INDEX_SCHEMA_VERSION = "local-knowledge-index:v2"
+INDEX_SCHEMA_VERSION = "local-knowledge-index:v4"
+FTS_TABLE = "chunks_fts_en_v4"
 
 
 def _json(value: Any) -> str:
@@ -25,6 +27,8 @@ def _json(value: Any) -> str:
 
 
 class SQLiteLocalKnowledgeIndex:
+    """Task-independent corpus, lexical index, and dense vectors."""
+
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -32,7 +36,7 @@ class SQLiteLocalKnowledgeIndex:
         self.connection.row_factory = sqlite3.Row
         try:
             self.connection.executescript(
-                """
+                f"""
                 CREATE TABLE IF NOT EXISTS index_metadata (
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
@@ -44,9 +48,7 @@ class SQLiteLocalKnowledgeIndex:
                     mime_type TEXT NOT NULL,
                     title TEXT NOT NULL,
                     knowledge_type TEXT NOT NULL DEFAULT 'unclassified',
-                    metadata_json TEXT NOT NULL,
-                    quarantined INTEGER NOT NULL DEFAULT 0,
-                    quarantine_reasons_json TEXT NOT NULL DEFAULT '[]'
+                    metadata_json TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS chunks (
                     chunk_id TEXT PRIMARY KEY,
@@ -72,34 +74,21 @@ class SQLiteLocalKnowledgeIndex:
                     vector BLOB NOT NULL,
                     FOREIGN KEY(chunk_id) REFERENCES chunks(chunk_id)
                 );
-                CREATE TABLE IF NOT EXISTS retrieval_events (
-                    query_id TEXT PRIMARY KEY,
-                    round_id INTEGER NOT NULL,
-                    original_query_hash TEXT NOT NULL,
-                    sanitized_query TEXT NOT NULL,
-                    policy_json TEXT NOT NULL,
-                    result_chunk_ids_json TEXT NOT NULL,
-                    manifest_hash TEXT NOT NULL
-                );
-                CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
+                CREATE VIRTUAL TABLE IF NOT EXISTS {FTS_TABLE} USING fts5(
                     chunk_id UNINDEXED,
                     text,
                     artifact_uri UNINDEXED,
-                    tokenize='unicode61'
+                    tokenize='porter unicode61'
                 );
                 """
             )
         except sqlite3.OperationalError as error:
             raise RuntimeError("SQLite FTS5 is required for local knowledge retrieval") from error
         self._ensure_column(
-            "documents",
-            "knowledge_type",
-            "TEXT NOT NULL DEFAULT 'unclassified'",
+            "documents", "knowledge_type", "TEXT NOT NULL DEFAULT 'unclassified'"
         )
         self._ensure_column(
-            "chunks",
-            "knowledge_type",
-            "TEXT NOT NULL DEFAULT 'unclassified'",
+            "chunks", "knowledge_type", "TEXT NOT NULL DEFAULT 'unclassified'"
         )
         self.connection.commit()
 
@@ -114,18 +103,52 @@ class SQLiteLocalKnowledgeIndex:
 
     @property
     def manifest_hash(self) -> str:
-        row = self.connection.execute(
-            "SELECT value FROM index_metadata WHERE key = 'manifest_hash'"
-        ).fetchone()
-        return str(row[0]) if row else "unbuilt"
+        return self._metadata("manifest_hash") or "unbuilt"
+
+    def _build_fingerprint(
+        self,
+        config: LocalKnowledgeConfig,
+        parser: AutoLocalParser,
+        embedding_backend: EmbeddingBackend | None,
+        *,
+        preserved_embedding_fingerprint: dict[str, Any] | None = None,
+    ) -> str:
+        payload = {
+            "schema_version": INDEX_SCHEMA_VERSION,
+            "chunker_version": CHUNKER_VERSION,
+            "parser": parser.name,
+            "chunk_tokens": config.ingestion.chunk_tokens,
+            "chunk_overlap": config.ingestion.chunk_overlap,
+            "required_language": config.ingestion.required_language,
+            "instruction_content_policy": config.retrieval.instruction_content_policy,
+            "embedding": (
+                getattr(embedding_backend, "fingerprint", None)
+                if embedding_backend is not None
+                else preserved_embedding_fingerprint
+            ),
+        }
+        return hashlib.sha256(_json(payload).encode("utf-8")).hexdigest()
+
+    def _embedding_index_is_complete(self, backend: EmbeddingBackend | None) -> bool:
+        if backend is None:
+            return True
+        chunks = int(self.connection.execute("SELECT COUNT(*) FROM chunks").fetchone()[0])
+        rows = int(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM embeddings WHERE backend_name = ? AND dimension = ?",
+                (backend.name, backend.dimension),
+            ).fetchone()[0]
+        )
+        return chunks == rows
 
     def build(
         self,
         config: LocalKnowledgeConfig,
         *,
-        guard: TargetLeakageGuard,
+        guard: TargetLeakageGuard | None = None,
         embedding_backend: EmbeddingBackend | None = None,
     ) -> IndexBuildReport:
+        del guard  # Task policy belongs in SQLiteRetrievalOverlay, never in the corpus index.
         parser = AutoLocalParser(
             rich_document_backend=config.ingestion.rich_document_backend
         )
@@ -138,93 +161,89 @@ class SQLiteLocalKnowledgeIndex:
         }
         current_paths = {str(path) for path in files}
         removed = sorted(set(existing).difference(current_paths))
+        current_manifest_raw = self._metadata("manifest")
+        current_manifest = (
+            json.loads(current_manifest_raw) if current_manifest_raw is not None else {}
+        )
+        preserved_embedding = (
+            current_manifest.get("embedding")
+            if embedding_backend is None and current_manifest.get("embedding")
+            else None
+        )
+        build_fingerprint = self._build_fingerprint(
+            config,
+            parser,
+            embedding_backend,
+            preserved_embedding_fingerprint=preserved_embedding,
+        )
+        if preserved_embedding is not None:
+            changed_paths = [
+                str(path)
+                for path in files
+                if str(path) not in existing
+                or hashlib.sha256(path.read_bytes()).hexdigest() != existing[str(path)][1]
+            ]
+            if removed or changed_paths or self._metadata("build_fingerprint") != build_fingerprint:
+                raise RuntimeError(
+                    "Refusing to modify a dense corpus without its embedding backend; "
+                    "rebuild with the pinned model so vectors remain complete"
+                )
+        rebuild_all = (
+            self._metadata("build_fingerprint") != build_fingerprint
+            or not self._embedding_index_is_complete(embedding_backend)
+        )
         indexed_documents = 0
         indexed_chunks = 0
         unchanged_documents = 0
-        quarantined_documents = 0
         warnings: list[str] = []
         manifest_entries: list[dict[str, Any]] = []
 
         with self.connection:
             for path_text in removed:
-                document_id = existing[path_text][0]
-                chunk_ids = [
-                    str(row[0])
-                    for row in self.connection.execute(
-                        "SELECT chunk_id FROM chunks WHERE document_id = ?", (document_id,)
-                    )
-                ]
-                for chunk_id in chunk_ids:
-                    self.connection.execute("DELETE FROM chunks_fts WHERE chunk_id = ?", (chunk_id,))
-                self.connection.execute("DELETE FROM embeddings WHERE chunk_id IN (SELECT chunk_id FROM chunks WHERE document_id = ?)", (document_id,))
-                self.connection.execute("DELETE FROM chunks WHERE document_id = ?", (document_id,))
-                self.connection.execute("DELETE FROM documents WHERE document_id = ?", (document_id,))
+                self._delete_document(existing[path_text][0])
 
             for path in files:
                 if path.stat().st_size > config.ingestion.max_file_mb * 1024 * 1024:
-                    warnings.append(f"file_too_large:{path}")
-                    continue
+                    raise ValueError(f"Local knowledge file exceeds max_file_mb: {path}")
                 if not parser.supports(path):
                     warnings.append(f"unsupported_file:{path}")
                     continue
-                try:
-                    document = parser.parse(path)
-                except (OSError, TypeError, UnicodeError, ValueError, RuntimeError) as error:
-                    warnings.append(f"parse_failed:{path}:{type(error).__name__}")
-                    continue
-                quarantine_reasons = guard.matches(text=document.text, path=document.path)
-                quarantined = bool(
-                    guard.enabled
-                    and config.leakage_guard.quarantine_target_documents
-                    and quarantine_reasons
-                )
+                document = parser.parse(path)
+                required_language = config.ingestion.required_language
+                if required_language is not None:
+                    actual_language = str(document.metadata.get("language", "")).casefold()
+                    if actual_language.split("-", 1)[0] != required_language:
+                        raise ValueError(
+                            f"Local knowledge file must declare language={required_language}: {path}"
+                        )
+                markers = instruction_like_markers(document.text)
+                if markers and config.retrieval.instruction_content_policy == "reject":
+                    raise ValueError(
+                        f"Instruction-like content rejected in local knowledge file {path}: {markers}"
+                    )
                 manifest_entries.append(
                     {
                         "path": str(path),
                         "file_hash": document.file_hash,
                         "document_id": document.document_id,
                         "knowledge_type": document.knowledge_type,
-                        "quarantined": quarantined,
+                        "record_type": document.metadata.get("record_type", "document"),
                     }
                 )
                 previous = existing.get(str(path))
-                policy_changed = (
-                    self._metadata("protected_terms_hash") != guard.protected_terms_hash
-                    or self._metadata("schema_version") != INDEX_SCHEMA_VERSION
-                )
-                if previous == (document.document_id, document.file_hash) and not policy_changed:
+                if (
+                    not rebuild_all
+                    and previous == (document.document_id, document.file_hash)
+                ):
                     unchanged_documents += 1
-                    quarantined_documents += int(quarantined)
                     continue
                 if previous is not None:
-                    old_document_id = previous[0]
-                    old_chunk_ids = [
-                        str(row[0])
-                        for row in self.connection.execute(
-                            "SELECT chunk_id FROM chunks WHERE document_id = ?",
-                            (old_document_id,),
-                        )
-                    ]
-                    for chunk_id in old_chunk_ids:
-                        self.connection.execute(
-                            "DELETE FROM chunks_fts WHERE chunk_id = ?", (chunk_id,)
-                        )
-                    self.connection.execute(
-                        "DELETE FROM embeddings WHERE chunk_id IN "
-                        "(SELECT chunk_id FROM chunks WHERE document_id = ?)",
-                        (old_document_id,),
-                    )
-                    self.connection.execute(
-                        "DELETE FROM chunks WHERE document_id = ?", (old_document_id,)
-                    )
-                    self.connection.execute(
-                        "DELETE FROM documents WHERE document_id = ?", (old_document_id,)
-                    )
+                    self._delete_document(previous[0])
                 self.connection.execute(
                     "INSERT INTO documents("
                     "document_id, path, file_hash, mime_type, title, knowledge_type, "
-                    "metadata_json, quarantined, quarantine_reasons_json"
-                    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "metadata_json"
+                    ") VALUES (?, ?, ?, ?, ?, ?, ?)",
                     (
                         document.document_id,
                         str(document.path),
@@ -233,25 +252,30 @@ class SQLiteLocalKnowledgeIndex:
                         document.title,
                         document.knowledge_type,
                         _json(document.metadata),
-                        int(quarantined),
-                        _json(quarantine_reasons),
                     ),
                 )
                 indexed_documents += 1
-                if quarantined:
-                    quarantined_documents += 1
-                    continue
                 chunks = chunk_document(
                     document,
                     chunk_tokens=config.ingestion.chunk_tokens,
                     chunk_overlap=config.ingestion.chunk_overlap,
                     source_group=config.kg_update.source_group,
+                    token_counter=(
+                        (lambda text: embedding_backend.count_tokens(text, query=False))
+                        if embedding_backend is not None
+                        else None
+                    ),
+                    max_input_tokens=(
+                        embedding_backend.max_input_tokens
+                        if embedding_backend is not None
+                        else None
+                    ),
                 )
                 for chunk in chunks:
                     self._insert_chunk(chunk)
                 indexed_chunks += len(chunks)
                 if embedding_backend is not None and chunks:
-                    vectors = embedding_backend.encode([item.text for item in chunks])
+                    vectors = embedding_backend.encode_documents([item.text for item in chunks])
                     if vectors.shape != (len(chunks), embedding_backend.dimension):
                         raise RuntimeError("Embedding backend returned an unexpected matrix shape")
                     for chunk, vector in zip(chunks, vectors, strict=True):
@@ -265,13 +289,26 @@ class SQLiteLocalKnowledgeIndex:
                             ),
                         )
 
+            embedding_count = int(
+                self.connection.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
+            )
+            chunk_count = int(self.connection.execute("SELECT COUNT(*) FROM chunks").fetchone()[0])
+            if embedding_backend is not None and embedding_count != chunk_count:
+                raise RuntimeError(
+                    f"Dense index is incomplete: {embedding_count} embeddings for {chunk_count} chunks"
+                )
             manifest_payload = {
                 "schema_version": INDEX_SCHEMA_VERSION,
                 "chunker_version": CHUNKER_VERSION,
                 "parser": parser.name,
-                "embedding_backend": getattr(embedding_backend, "name", None),
-                "embedding_dimension": getattr(embedding_backend, "dimension", None),
-                "protected_terms_hash": guard.protected_terms_hash,
+                "build_fingerprint": build_fingerprint,
+                "embedding": (
+                    getattr(embedding_backend, "fingerprint", None)
+                    if embedding_backend is not None
+                    else preserved_embedding
+                ),
+                "actual_chunk_count": chunk_count,
+                "actual_embedding_count": embedding_count,
                 "documents": sorted(manifest_entries, key=lambda item: item["path"]),
             }
             manifest_hash = hashlib.sha256(
@@ -280,7 +317,7 @@ class SQLiteLocalKnowledgeIndex:
             for key, value in (
                 ("manifest_hash", manifest_hash),
                 ("manifest", _json(manifest_payload)),
-                ("protected_terms_hash", guard.protected_terms_hash),
+                ("build_fingerprint", build_fingerprint),
                 ("schema_version", INDEX_SCHEMA_VERSION),
             ):
                 self.connection.execute(
@@ -293,9 +330,28 @@ class SQLiteLocalKnowledgeIndex:
             indexed_chunks=indexed_chunks,
             unchanged_documents=unchanged_documents,
             removed_documents=len(removed),
-            quarantined_documents=quarantined_documents,
+            quarantined_documents=0,
             warnings=tuple(warnings),
         )
+
+    def _delete_document(self, document_id: str) -> None:
+        chunk_ids = [
+            str(row[0])
+            for row in self.connection.execute(
+                "SELECT chunk_id FROM chunks WHERE document_id = ?", (document_id,)
+            )
+        ]
+        for chunk_id in chunk_ids:
+            self.connection.execute(
+                f"DELETE FROM {FTS_TABLE} WHERE chunk_id = ?", (chunk_id,)
+            )
+        self.connection.execute(
+            "DELETE FROM embeddings WHERE chunk_id IN "
+            "(SELECT chunk_id FROM chunks WHERE document_id = ?)",
+            (document_id,),
+        )
+        self.connection.execute("DELETE FROM chunks WHERE document_id = ?", (document_id,))
+        self.connection.execute("DELETE FROM documents WHERE document_id = ?", (document_id,))
 
     def _metadata(self, key: str) -> str | None:
         row = self.connection.execute(
@@ -325,13 +381,13 @@ class SQLiteLocalKnowledgeIndex:
             ),
         )
         self.connection.execute(
-            "INSERT INTO chunks_fts(chunk_id, text, artifact_uri) VALUES (?, ?, ?)",
+            f"INSERT INTO {FTS_TABLE}(chunk_id, text, artifact_uri) VALUES (?, ?, ?)",
             (chunk.chunk_id, chunk.text, chunk.artifact_uri),
         )
 
     @staticmethod
     def _fts_query(query: str) -> str:
-        tokens = re.findall(r"[A-Za-z0-9_]+|[\u3400-\u9fff]+", query.casefold())
+        tokens = re.findall(r"[A-Za-z0-9_]+", query.casefold())
         return " OR ".join(f'"{item.replace(chr(34), "")}"' for item in tokens[:32])
 
     def lexical_search(
@@ -352,9 +408,9 @@ class SQLiteLocalKnowledgeIndex:
             parameters.extend(knowledge_types)
         parameters.append(limit)
         rows = self.connection.execute(
-            "SELECT chunks_fts.chunk_id, bm25(chunks_fts) AS rank FROM chunks_fts "
-            "JOIN chunks ON chunks.chunk_id = chunks_fts.chunk_id "
-            f"WHERE chunks_fts MATCH ?{filter_sql} ORDER BY rank LIMIT ?",
+            f"SELECT {FTS_TABLE}.chunk_id, bm25({FTS_TABLE}) AS rank FROM {FTS_TABLE} "
+            f"JOIN chunks ON chunks.chunk_id = {FTS_TABLE}.chunk_id "
+            f"WHERE {FTS_TABLE} MATCH ?{filter_sql} ORDER BY rank LIMIT ?",
             tuple(parameters),
         ).fetchall()
         return tuple((str(row["chunk_id"]), float(row["rank"])) for row in rows)
@@ -366,8 +422,12 @@ class SQLiteLocalKnowledgeIndex:
         limit: int,
         embedding_backend: EmbeddingBackend,
         knowledge_types: tuple[str, ...] = (),
+        minimum_similarity: float = -1.0,
+        max_exact_chunks: int = 50000,
     ) -> tuple[tuple[str, float], ...]:
-        query_vector = np.asarray(embedding_backend.encode([query])[0], dtype=np.float32)
+        query_vector = np.asarray(
+            embedding_backend.encode_queries([query])[0], dtype=np.float32
+        )
         filter_sql = ""
         parameters: list[Any] = [embedding_backend.name]
         if knowledge_types:
@@ -380,15 +440,32 @@ class SQLiteLocalKnowledgeIndex:
             f"WHERE embeddings.backend_name = ?{filter_sql}",
             tuple(parameters),
         ).fetchall()
-        scores = []
-        for row in rows:
-            if int(row["dimension"]) != len(query_vector):
-                continue
-            vector = np.frombuffer(row["vector"], dtype=np.float32)
-            denominator = float(np.linalg.norm(query_vector) * np.linalg.norm(vector))
-            score = float(np.dot(query_vector, vector) / denominator) if denominator else 0.0
-            scores.append((str(row["chunk_id"]), score))
-        return tuple(sorted(scores, key=lambda item: (-item[1], item[0]))[:limit])
+        if len(rows) > max_exact_chunks:
+            raise RuntimeError(
+                f"numpy_exact dense search received {len(rows)} chunks, exceeding "
+                f"max_exact_dense_chunks={max_exact_chunks}; use an ANN/vector backend"
+            )
+        valid_rows = [row for row in rows if int(row["dimension"]) == len(query_vector)]
+        if not valid_rows:
+            return ()
+        matrix = np.vstack(
+            [np.frombuffer(row["vector"], dtype=np.float32) for row in valid_rows]
+        )
+        query_norm = float(np.linalg.norm(query_vector))
+        row_norms = np.linalg.norm(matrix, axis=1)
+        denominators = row_norms * query_norm
+        scores = np.divide(
+            matrix @ query_vector,
+            denominators,
+            out=np.zeros(len(valid_rows), dtype=np.float32),
+            where=denominators != 0,
+        )
+        ranked = [
+            (str(row["chunk_id"]), float(score))
+            for row, score in zip(valid_rows, scores, strict=True)
+            if float(score) >= minimum_similarity
+        ]
+        return tuple(sorted(ranked, key=lambda item: (-item[1], item[0]))[:limit])
 
     def get_chunks(self, chunk_ids: tuple[str, ...]) -> dict[str, dict[str, Any]]:
         if not chunk_ids:
@@ -415,42 +492,39 @@ class SQLiteLocalKnowledgeIndex:
             for row in rows
         }
 
-    def record_retrieval(
-        self,
-        *,
-        query_id: str,
-        round_id: int,
-        original_query_hash: str,
-        sanitized_query: str,
-        policy: dict[str, Any],
-        result_chunk_ids: tuple[str, ...],
-    ) -> None:
-        with self.connection:
-            self.connection.execute(
-                "INSERT OR REPLACE INTO retrieval_events VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (
-                    query_id,
-                    round_id,
-                    original_query_hash,
-                    sanitized_query,
-                    _json(policy),
-                    _json(result_chunk_ids),
-                    self.manifest_hash,
-                ),
-            )
+    def document_policy_inputs(self) -> tuple[dict[str, str], ...]:
+        rows = self.connection.execute(
+            "SELECT documents.document_id, documents.path, "
+            "COALESCE(GROUP_CONCAT(chunks.text, '\n'), '') AS text "
+            "FROM documents LEFT JOIN chunks ON chunks.document_id = documents.document_id "
+            "GROUP BY documents.document_id, documents.path ORDER BY documents.path"
+        ).fetchall()
+        return tuple(
+            {
+                "document_id": str(row["document_id"]),
+                "path": str(row["path"]),
+                "text": str(row["text"]),
+            }
+            for row in rows
+        )
 
     def stats(self) -> dict[str, Any]:
-        counts = {}
-        for table in ("documents", "chunks", "embeddings", "retrieval_events"):
-            counts[table] = int(
-                self.connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-            )
-        counts["quarantined_documents"] = int(
-            self.connection.execute(
-                "SELECT COUNT(*) FROM documents WHERE quarantined = 1"
-            ).fetchone()[0]
-        )
+        counts = {
+            table: int(self.connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+            for table in ("documents", "chunks", "embeddings")
+        }
         counts["manifest_hash"] = self.manifest_hash
+        raw_manifest = self._metadata("manifest")
+        manifest = json.loads(raw_manifest) if raw_manifest is not None else {}
+        counts["schema_version"] = manifest.get("schema_version", "unbuilt")
+        counts["chunker_version"] = manifest.get("chunker_version")
+        counts["embedding_fingerprint"] = manifest.get("embedding")
+        counts["manifest_counts_match"] = bool(
+            manifest
+            and int(manifest.get("actual_chunk_count", -1)) == counts["chunks"]
+            and int(manifest.get("actual_embedding_count", -1))
+            == counts["embeddings"]
+        )
         counts["knowledge_types"] = {
             str(row["knowledge_type"]): int(row["count"])
             for row in self.connection.execute(

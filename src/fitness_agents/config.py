@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import yaml
 
@@ -188,6 +189,7 @@ class LocalKnowledgeIngestionConfig:
     max_file_mb: int = 50
     follow_symlinks: bool = False
     extract_archives: bool = False
+    required_language: str | None = None
 
     def __post_init__(self) -> None:
         if self.parser != "auto":
@@ -200,6 +202,160 @@ class LocalKnowledgeIngestionConfig:
             raise ValueError("local knowledge max_file_mb must be positive")
         if self.extract_archives:
             raise ValueError("Archive extraction is not supported by the offline knowledge loader")
+        if self.required_language is not None:
+            language = str(self.required_language).strip().casefold()
+            if language not in {"en"}:
+                raise ValueError("local knowledge required_language currently supports only 'en'")
+            object.__setattr__(self, "required_language", language)
+
+
+def _validate_api_endpoint(endpoint: str, *, label: str) -> None:
+    parsed = urlparse(endpoint)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError(f"{label} must be an absolute HTTP(S) URL")
+    if parsed.scheme == "http" and parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
+        raise ValueError(f"{label} must use HTTPS except for a local inference server")
+
+
+def _validate_api_endpoint_path(endpoint: str, *, expected: str, label: str) -> None:
+    path = urlparse(endpoint).path.rstrip("/")
+    if path != expected:
+        raise ValueError(f"{label} must use the full provider endpoint path {expected!r}")
+
+
+@dataclass(frozen=True)
+class EmbeddingAPIConfig:
+    """Provider-neutral remote embedding configuration.
+
+    ``provider`` selects the wire protocol; ``model_family`` records the model's
+    semantic contract.  Keeping those fields separate lets BGE, E5, and open-weight
+    Qwen models run behind any compatible TEI/OpenAI-style deployment.
+    """
+
+    provider: str
+    endpoint: str
+    api_key: str
+    model: str
+    model_family: str
+    model_revision: str
+    dimension: int
+    max_input_tokens: int
+    batch_size: int = 10
+    timeout_seconds: float = 30.0
+    max_retries: int = 3
+    query_task: str | None = None
+    document_task: str | None = None
+    query_instruction: str | None = None
+    document_instruction: str | None = None
+    query_prefix: str = ""
+    document_prefix: str = ""
+    tokenizer_model_path: Path | None = None
+    tokenizer_model_id: str | None = None
+    tokenizer_revision: str | None = None
+    normalize_embeddings: bool = True
+    schema_version: str = "embedding-api:v1"
+
+    def __post_init__(self) -> None:
+        if self.schema_version != "embedding-api:v1":
+            raise ValueError("Unsupported embedding API schema_version")
+        if self.provider not in {"dashscope", "jina", "openai_compatible", "tei"}:
+            raise ValueError(f"Unsupported embedding API provider: {self.provider}")
+        if self.model_family not in {"qwen", "bge", "jina", "e5", "custom"}:
+            raise ValueError(f"Unsupported embedding model_family: {self.model_family}")
+        _validate_api_endpoint(self.endpoint, label="embedding API endpoint")
+        if self.provider == "dashscope":
+            _validate_api_endpoint_path(
+                self.endpoint,
+                expected="/api/v1/services/embeddings/text-embedding/text-embedding",
+                label="DashScope text embedding endpoint",
+            )
+        if not self.api_key.strip():
+            raise ValueError("embedding API api_key must not be empty")
+        if not self.model.strip() or not self.model_revision.strip():
+            raise ValueError("embedding API model and model_revision are required")
+        if self.dimension < 1 or self.max_input_tokens < 1 or self.batch_size < 1:
+            raise ValueError(
+                "embedding API dimension, max_input_tokens, and batch_size must be positive"
+            )
+        if self.timeout_seconds <= 0 or not 0 <= self.max_retries <= 10:
+            raise ValueError(
+                "embedding API timeout must be positive and max_retries must be in [0, 10]"
+            )
+        if not self.normalize_embeddings:
+            raise ValueError("Remote RAG embeddings must be normalized for cosine retrieval")
+        if self.provider != "dashscope" and (
+            self.query_instruction is not None or self.document_instruction is not None
+        ):
+            raise ValueError(
+                "Only the DashScope embedding protocol accepts instruction fields; "
+                "use provider task fields or explicit prefixes for other protocols"
+            )
+        if self.provider in {"openai_compatible", "tei"} and (
+            self.query_task is not None or self.document_task is not None
+        ):
+            raise ValueError(
+                "OpenAI-compatible/TEI embedding payloads do not accept task fields; "
+                "use query_prefix/document_prefix"
+            )
+        if self.tokenizer_model_path is not None:
+            raw_path = str(self.tokenizer_model_path)
+            if "://" in raw_path:
+                raise ValueError("embedding tokenizer_model_path must be a local path")
+            object.__setattr__(self, "tokenizer_model_path", Path(self.tokenizer_model_path))
+
+
+@dataclass(frozen=True)
+class RerankerAPIConfig:
+    provider: str
+    endpoint: str
+    api_key: str
+    model: str
+    model_family: str
+    model_revision: str
+    max_input_tokens: int
+    max_documents: int = 64
+    timeout_seconds: float = 30.0
+    max_retries: int = 3
+    instruction: str | None = None
+    tokenizer_model_path: Path | None = None
+    tokenizer_model_id: str | None = None
+    tokenizer_revision: str | None = None
+    score_kind: str = "probability"
+    schema_version: str = "reranker-api:v1"
+
+    def __post_init__(self) -> None:
+        if self.schema_version != "reranker-api:v1":
+            raise ValueError("Unsupported reranker API schema_version")
+        if self.provider not in {"dashscope", "jina", "tei"}:
+            raise ValueError(f"Unsupported reranker API provider: {self.provider}")
+        if self.model_family not in {"qwen", "bge", "jina", "custom"}:
+            raise ValueError(f"Unsupported reranker model_family: {self.model_family}")
+        _validate_api_endpoint(self.endpoint, label="reranker API endpoint")
+        if self.provider == "dashscope" and self.model == "qwen3-rerank":
+            _validate_api_endpoint_path(
+                self.endpoint,
+                expected="/compatible-api/v1/reranks",
+                label="DashScope qwen3-rerank endpoint",
+            )
+        if not self.api_key.strip():
+            raise ValueError("reranker API api_key must not be empty")
+        if not self.model.strip() or not self.model_revision.strip():
+            raise ValueError("reranker API model and model_revision are required")
+        if self.max_input_tokens < 1 or self.max_documents < 1:
+            raise ValueError("reranker API max_input_tokens and max_documents must be positive")
+        if self.timeout_seconds <= 0 or not 0 <= self.max_retries <= 10:
+            raise ValueError(
+                "reranker API timeout must be positive and max_retries must be in [0, 10]"
+            )
+        if self.score_kind not in {"probability", "raw_logit"}:
+            raise ValueError("reranker API score_kind must be probability or raw_logit")
+        if self.provider != "dashscope" and self.instruction is not None:
+            raise ValueError("Only the DashScope reranker protocol accepts an instruction field")
+        if self.tokenizer_model_path is not None:
+            raw_path = str(self.tokenizer_model_path)
+            if "://" in raw_path:
+                raise ValueError("reranker tokenizer_model_path must be a local path")
+            object.__setattr__(self, "tokenizer_model_path", Path(self.tokenizer_model_path))
 
 
 @dataclass(frozen=True)
@@ -207,7 +363,9 @@ class LocalKnowledgeRetrievalConfig:
     mode: str = "lexical"
     lexical_backend: str = "sqlite_fts5"
     dense_enabled: bool = False
+    embedding_backend: str = "local"
     embedding_model_path: Path | None = None
+    embedding_api_config: EmbeddingAPIConfig | dict[str, Any] | None = None
     allow_model_download: bool = False
     fusion: str = "rrf"
     top_k: int = 8
@@ -216,36 +374,109 @@ class LocalKnowledgeRetrievalConfig:
     token_budget: int = 5000
     max_chunks_per_document: int = 3
     reranker_model_path: Path | None = None
+    reranker_backend: str = "auto"
+    reranker_api_config: RerankerAPIConfig | dict[str, Any] | None = None
+    reranker_model_id: str | None = None
+    reranker_model_revision: str | None = None
+    embedding_model_id: str | None = None
+    embedding_model_revision: str | None = None
+    embedding_query_prefix: str = ""
+    embedding_document_prefix: str = ""
+    query_language: str = "en"
+    strict_query_language: bool = False
+    minimum_dense_similarity: float = 0.35
+    require_dense_match_for_hybrid: bool = True
+    minimum_reranker_score: float | None = None
+    instruction_content_policy: str = "reject"
+    dense_search_backend: str = "numpy_exact"
+    max_exact_dense_chunks: int = 50000
 
     def __post_init__(self) -> None:
+        if isinstance(self.embedding_api_config, dict):
+            object.__setattr__(
+                self,
+                "embedding_api_config",
+                EmbeddingAPIConfig(**dict(self.embedding_api_config)),
+            )
+        if isinstance(self.reranker_api_config, dict):
+            object.__setattr__(
+                self,
+                "reranker_api_config",
+                RerankerAPIConfig(**dict(self.reranker_api_config)),
+            )
         for value in (self.embedding_model_path, self.reranker_model_path):
             if value is not None and (
-                "://" in str(value)
-                or str(value).casefold().startswith(("http:", "https:"))
+                "://" in str(value) or str(value).casefold().startswith(("http:", "https:"))
             ):
                 raise ValueError("Local knowledge model paths must not be URLs")
         if self.embedding_model_path is not None:
             object.__setattr__(self, "embedding_model_path", Path(self.embedding_model_path))
         if self.reranker_model_path is not None:
             object.__setattr__(self, "reranker_model_path", Path(self.reranker_model_path))
+        if self.embedding_backend not in {"local", "api"}:
+            raise ValueError("embedding_backend must be local or api")
+        resolved_reranker_backend = self.reranker_backend
+        if resolved_reranker_backend == "auto":
+            if self.reranker_api_config is not None:
+                resolved_reranker_backend = "api"
+            elif self.reranker_model_path is not None:
+                resolved_reranker_backend = "local"
+            else:
+                resolved_reranker_backend = "none"
+            object.__setattr__(self, "reranker_backend", resolved_reranker_backend)
+        if resolved_reranker_backend not in {"none", "local", "api"}:
+            raise ValueError("reranker_backend must be none, local, api, or auto")
         if self.mode not in {"lexical", "dense", "hybrid"}:
             raise ValueError("local knowledge retrieval mode must be lexical, dense, or hybrid")
         if self.lexical_backend != "sqlite_fts5":
             raise ValueError("Only sqlite_fts5 lexical retrieval is supported")
         if self.fusion != "rrf":
             raise ValueError("Only reciprocal-rank fusion is supported")
+        if self.query_language != "en":
+            raise ValueError("local knowledge query_language currently supports only 'en'")
+        if not -1.0 <= self.minimum_dense_similarity <= 1.0:
+            raise ValueError("minimum_dense_similarity must be in [-1, 1]")
+        if self.instruction_content_policy not in {"reject", "warn"}:
+            raise ValueError("instruction_content_policy must be reject or warn")
+        if self.dense_search_backend != "numpy_exact":
+            raise ValueError("Only numpy_exact dense search is currently supported")
         if self.allow_model_download:
             raise ValueError("Local knowledge models must not be downloaded at campaign runtime")
         if self.mode in {"dense", "hybrid"} and not self.dense_enabled:
             raise ValueError(f"retrieval mode {self.mode!r} requires dense_enabled=true")
-        if self.dense_enabled and self.embedding_model_path is None:
-            raise ValueError("dense local retrieval requires embedding_model_path")
+        if self.dense_enabled and self.embedding_backend == "local":
+            if self.embedding_model_path is None:
+                raise ValueError("dense local retrieval requires embedding_model_path")
+            if self.embedding_api_config is not None:
+                raise ValueError(
+                    "local embedding_backend cannot also configure embedding_api_config"
+                )
+        if self.dense_enabled and self.embedding_backend == "api":
+            if not isinstance(self.embedding_api_config, EmbeddingAPIConfig):
+                raise ValueError("dense API retrieval requires embedding_api_config")
+            if self.embedding_model_path is not None:
+                raise ValueError("API embedding_backend cannot also configure embedding_model_path")
+        if resolved_reranker_backend == "local":
+            if self.reranker_model_path is None:
+                raise ValueError("local reranker_backend requires reranker_model_path")
+            if self.reranker_api_config is not None:
+                raise ValueError("local reranker_backend cannot also configure reranker_api_config")
+        if resolved_reranker_backend == "api":
+            if not isinstance(self.reranker_api_config, RerankerAPIConfig):
+                raise ValueError("API reranker_backend requires reranker_api_config")
+            if self.reranker_model_path is not None:
+                raise ValueError("API reranker_backend cannot also configure reranker_model_path")
+        if resolved_reranker_backend == "none" and (
+            self.reranker_model_path is not None or self.reranker_api_config is not None
+        ):
+            raise ValueError("reranker_backend=none cannot include a reranker configuration")
         for name, value in (
             ("top_k", self.top_k),
             ("lexical_candidates", self.lexical_candidates),
             ("dense_candidates", self.dense_candidates),
             ("token_budget", self.token_budget),
             ("max_chunks_per_document", self.max_chunks_per_document),
+            ("max_exact_dense_chunks", self.max_exact_dense_chunks),
         ):
             if value < 1:
                 raise ValueError(f"local knowledge {name} must be positive")
@@ -258,15 +489,29 @@ class LocalKnowledgeKGUpdateConfig:
     source_group: str = "local_documents"
     max_claims_per_round: int = 32
     contributes_to_selection: bool = False
+    selection_mode: str = "context_only"
+    selection_calibration_path: Path | None = None
 
     def __post_init__(self) -> None:
         if self.materialization != "retrieved_only":
             raise ValueError("Only retrieved_only local knowledge materialization is supported")
         if self.max_claims_per_round < 0:
             raise ValueError("max_claims_per_round must be non-negative")
-        if self.contributes_to_selection:
+        if self.selection_mode not in {"context_only", "calibrated_candidate_projection"}:
             raise ValueError(
-                "Local document evidence cannot contribute to selection before calibration"
+                "selection_mode must be context_only or calibrated_candidate_projection"
+            )
+        if self.selection_calibration_path is not None:
+            object.__setattr__(
+                self, "selection_calibration_path", Path(self.selection_calibration_path)
+            )
+        if self.contributes_to_selection and (
+            self.selection_mode != "calibrated_candidate_projection"
+            or self.selection_calibration_path is None
+        ):
+            raise ValueError(
+                "Selection contribution requires calibrated_candidate_projection and "
+                "selection_calibration_path"
             )
 
 
@@ -301,6 +546,8 @@ class LeakageGuardConfig:
 class LocalKnowledgeConfig:
     enabled: bool = False
     index_path: Path | None = None
+    corpus_index_path: Path | None = None
+    retrieval_overlay_path: Path | None = None
     roots: tuple[LocalKnowledgeRootConfig | dict[str, Any], ...] = ()
     ingestion: LocalKnowledgeIngestionConfig | dict[str, Any] = field(
         default_factory=LocalKnowledgeIngestionConfig
@@ -311,18 +558,21 @@ class LocalKnowledgeConfig:
     kg_update: LocalKnowledgeKGUpdateConfig | dict[str, Any] = field(
         default_factory=LocalKnowledgeKGUpdateConfig
     )
-    leakage_guard: LeakageGuardConfig | dict[str, Any] = field(
-        default_factory=LeakageGuardConfig
-    )
+    leakage_guard: LeakageGuardConfig | dict[str, Any] = field(default_factory=LeakageGuardConfig)
     allow_remote_context: bool = False
 
     def __post_init__(self) -> None:
-        if self.index_path is not None:
-            if "://" in str(self.index_path) or str(self.index_path).casefold().startswith(
-                ("http:", "https:")
-            ):
-                raise ValueError("Local knowledge index_path must be a filesystem path")
-            self.index_path = Path(self.index_path)
+        for name in ("index_path", "corpus_index_path", "retrieval_overlay_path"):
+            value = getattr(self, name)
+            if value is None:
+                continue
+            if "://" in str(value) or str(value).casefold().startswith(("http:", "https:")):
+                raise ValueError(f"Local knowledge {name} must be a filesystem path")
+            setattr(self, name, Path(value))
+        if self.corpus_index_path is None and self.index_path is not None:
+            self.corpus_index_path = self.index_path
+        if self.index_path is None and self.corpus_index_path is not None:
+            self.index_path = self.corpus_index_path
         self.roots = tuple(
             item if isinstance(item, LocalKnowledgeRootConfig) else LocalKnowledgeRootConfig(**item)
             for item in self.roots
@@ -351,12 +601,8 @@ class KnowledgeConfig:
     legacy_contributes_to_selection: bool = False
     fusion_mode: str = "independent_features"
     parameter_set_id: str = "knowledge-parameters:v1"
-    providers: dict[str, KnowledgeProviderConfig | dict[str, Any]] = field(
-        default_factory=dict
-    )
-    parameters: dict[str, LearnableParameterSpec | dict[str, Any]] = field(
-        default_factory=dict
-    )
+    providers: dict[str, KnowledgeProviderConfig | dict[str, Any]] = field(default_factory=dict)
+    parameters: dict[str, LearnableParameterSpec | dict[str, Any]] = field(default_factory=dict)
     evidence_heartbeat_interval: int = 256
     local_knowledge: LocalKnowledgeConfig | dict[str, Any] = field(
         default_factory=LocalKnowledgeConfig
@@ -481,8 +727,16 @@ class EvaluationConfig:
         if self.top_k < 1:
             raise ValueError("evaluation.top_k must be positive")
         allowed = {
-            "spearman", "pearson", "mse", "rmse", "ndcg", "top_k_hit",
-            "top_k_recall", "regret_at_k", "interval_90_coverage", "gaussian_nll",
+            "spearman",
+            "pearson",
+            "mse",
+            "rmse",
+            "ndcg",
+            "top_k_hit",
+            "top_k_recall",
+            "regret_at_k",
+            "interval_90_coverage",
+            "gaussian_nll",
         }
         unknown = set(self.metrics).difference(allowed)
         if unknown:
@@ -604,15 +858,101 @@ class ExperimentConfig:
     validation: ValidationConfig = field(default_factory=ValidationConfig)
     evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
-    kg_interaction: KGInteractionRuntimeConfig = field(
-        default_factory=KGInteractionRuntimeConfig
-    )
+    kg_interaction: KGInteractionRuntimeConfig = field(default_factory=KGInteractionRuntimeConfig)
     llm_provider: str = "mock"
     knowledge_enabled: bool = False
     score_shuffle: bool = False
     evidence_deletion: bool = False
     run_label: str = ""
     evidence_prefilter_limit: int = 5000
+
+
+def _resolve_api_tokenizer_path(raw: dict[str, Any], root: Path) -> dict[str, Any]:
+    values = dict(raw)
+    if values.get("tokenizer_model_path"):
+        tokenizer_path = Path(values["tokenizer_model_path"])
+        values["tokenizer_model_path"] = (
+            tokenizer_path if tokenizer_path.is_absolute() else root / tokenizer_path
+        )
+    return values
+
+
+def load_inference_api_item(
+    raw: dict[str, Any],
+    *,
+    expected_kind: str,
+    root: Path,
+) -> dict[str, Any]:
+    """Resolve one typed item from a shared inference API catalog.
+
+    The catalog owns workspace connection data and the secret reference. Each item owns its
+    protocol, operation path, model, and model-specific limits. Item-local keys in ``raw`` are
+    applied last so role settings such as an LLM profile can remain outside the shared catalog.
+    """
+
+    if not raw.get("api_catalog"):
+        return dict(raw)
+    item_name = str(raw.get("item", "")).strip()
+    if not item_name:
+        raise ValueError("api_catalog references require a non-empty item")
+    catalog_path = Path(str(raw["api_catalog"]))
+    catalog = read_yaml(catalog_path if catalog_path.is_absolute() else root / catalog_path, root)
+    if catalog.get("schema_version") != "inference-api-catalog:v1":
+        raise ValueError("Unsupported inference API catalog schema_version")
+    connection = dict(catalog.get("connection", {}) or {})
+    items = dict(catalog.get("items", {}) or {})
+    if item_name not in items or not isinstance(items[item_name], dict):
+        raise ValueError(f"Unknown inference API catalog item {item_name!r}")
+    values = dict(items[item_name])
+    kind = str(values.pop("kind", ""))
+    if kind != expected_kind:
+        raise ValueError(
+            f"Inference API item {item_name!r} has kind {kind!r}, expected {expected_kind!r}"
+        )
+    origin = str(connection.get("origin", "")).rstrip("/")
+    endpoint_path = values.pop("endpoint_path", None)
+    base_url_path = values.pop("base_url_path", None)
+    if endpoint_path is not None:
+        if not origin:
+            raise ValueError("Inference API catalog connection.origin is required")
+        values["endpoint"] = f"{origin}/{str(endpoint_path).lstrip('/')}"
+    if base_url_path is not None:
+        if not origin:
+            raise ValueError("Inference API catalog connection.origin is required")
+        values["base_url"] = f"{origin}/{str(base_url_path).lstrip('/')}"
+    values.setdefault("api_key", connection.get("api_key"))
+    values.update(
+        {
+            key: value
+            for key, value in raw.items()
+            if key not in {"api_catalog", "item"}
+        }
+    )
+    return values
+
+
+def load_embedding_api_config(
+    path: str | Path,
+    *,
+    root: Path | None = None,
+) -> EmbeddingAPIConfig:
+    base = root or project_root()
+    raw = load_inference_api_item(
+        read_yaml(path, base), expected_kind="embedding", root=base
+    )
+    return EmbeddingAPIConfig(**_resolve_api_tokenizer_path(raw, base))
+
+
+def load_reranker_api_config(
+    path: str | Path,
+    *,
+    root: Path | None = None,
+) -> RerankerAPIConfig:
+    base = root or project_root()
+    raw = load_inference_api_item(
+        read_yaml(path, base), expected_kind="reranker", root=base
+    )
+    return RerankerAPIConfig(**_resolve_api_tokenizer_path(raw, base))
 
 
 def load_experiment_config(
@@ -679,9 +1019,10 @@ def load_experiment_config(
         provider_values[str(name)] = KnowledgeProviderConfig(**values)
     knowledge_raw["providers"] = provider_values
     local_raw = dict(knowledge_raw.get("local_knowledge", {}) or {})
-    if local_raw.get("index_path"):
-        index_path = Path(local_raw["index_path"])
-        local_raw["index_path"] = index_path if index_path.is_absolute() else root / index_path
+    for key in ("index_path", "corpus_index_path", "retrieval_overlay_path"):
+        if local_raw.get(key):
+            local_path = Path(local_raw[key])
+            local_raw[key] = local_path if local_path.is_absolute() else root / local_path
     local_roots = []
     for raw_root in local_raw.get("roots", ()) or ():
         root_values = dict(raw_root)
@@ -698,8 +1039,34 @@ def load_experiment_config(
         if retrieval_values.get(key):
             model_path = Path(retrieval_values[key])
             retrieval_values[key] = model_path if model_path.is_absolute() else root / model_path
+    embedding_api_value = retrieval_values.get("embedding_api_config")
+    if isinstance(embedding_api_value, (str, Path)):
+        retrieval_values["embedding_api_config"] = load_embedding_api_config(
+            embedding_api_value, root=root
+        )
+    elif isinstance(embedding_api_value, dict):
+        retrieval_values["embedding_api_config"] = EmbeddingAPIConfig(
+            **_resolve_api_tokenizer_path(embedding_api_value, root)
+        )
+    reranker_api_value = retrieval_values.get("reranker_api_config")
+    if isinstance(reranker_api_value, (str, Path)):
+        retrieval_values["reranker_api_config"] = load_reranker_api_config(
+            reranker_api_value, root=root
+        )
+    elif isinstance(reranker_api_value, dict):
+        retrieval_values["reranker_api_config"] = RerankerAPIConfig(
+            **_resolve_api_tokenizer_path(reranker_api_value, root)
+        )
     if retrieval_values:
         local_raw["retrieval"] = LocalKnowledgeRetrievalConfig(**retrieval_values)
+    kg_update_values = dict(local_raw.get("kg_update", {}) or {})
+    if kg_update_values.get("selection_calibration_path"):
+        calibration_path = Path(kg_update_values["selection_calibration_path"])
+        kg_update_values["selection_calibration_path"] = (
+            calibration_path if calibration_path.is_absolute() else root / calibration_path
+        )
+    if kg_update_values:
+        local_raw["kg_update"] = LocalKnowledgeKGUpdateConfig(**kg_update_values)
     if local_raw:
         knowledge_raw["local_knowledge"] = LocalKnowledgeConfig(**local_raw)
     knowledge = KnowledgeConfig(site_profiles=profiles, **knowledge_raw)
@@ -714,14 +1081,10 @@ def load_experiment_config(
         return tuple(output)
 
     generation_raw = dict(raw.get("generation", {}) or {})
-    generation_raw["predictor_models"] = load_model_entries(
-        generation_raw.get("predictor_models")
-    )
+    generation_raw["predictor_models"] = load_model_entries(generation_raw.get("predictor_models"))
     generation = _dataclass_from_mapping(GenerationConfig, generation_raw)
     validation_raw = dict(raw.get("validation", {}) or {})
-    validation_raw["predictor_models"] = load_model_entries(
-        validation_raw.get("predictor_models")
-    )
+    validation_raw["predictor_models"] = load_model_entries(validation_raw.get("predictor_models"))
     validation = _dataclass_from_mapping(ValidationConfig, validation_raw)
     evaluation_raw = dict(raw.get("evaluation", {}) or {})
     if "metrics" in evaluation_raw:
@@ -736,9 +1099,7 @@ def load_experiment_config(
         interaction_raw["enabled_operators"] = tuple(
             str(item) for item in interaction_raw["enabled_operators"]
         )
-    kg_interaction = _dataclass_from_mapping(
-        KGInteractionRuntimeConfig, interaction_raw
-    )
+    kg_interaction = _dataclass_from_mapping(KGInteractionRuntimeConfig, interaction_raw)
     critic_raw = (
         read_yaml(raw["critic_config"], root)
         if raw.get("critic_config")
@@ -752,6 +1113,7 @@ def load_experiment_config(
         llm_raw.update(raw["llm"])
     if raw.get("llm_provider"):
         llm_raw["provider"] = raw["llm_provider"]
+    llm_raw = load_inference_api_item(llm_raw, expected_kind="llm", root=root)
     removed = sorted(set(llm_raw).intersection(REMOVED_SDK_LLM_KEYS))
     if removed:
         raise ValueError(f"Removed Agents SDK settings are not supported: {removed}")
