@@ -18,6 +18,15 @@ def test_directed_evolution_corpus_flows_from_typed_rag_into_kg(tmp_path) -> Non
     local_config = replace(
         experiment.knowledge.local_knowledge,
         index_path=tmp_path / "directed-evolution.sqlite",
+        corpus_index_path=tmp_path / "directed-evolution.sqlite",
+        retrieval_overlay_path=tmp_path / "gb1-overlay.sqlite",
+        retrieval=replace(
+            experiment.knowledge.local_knowledge.retrieval,
+            mode="lexical",
+            dense_enabled=False,
+            embedding_model_path=None,
+            strict_query_language=True,
+        ),
     )
     knowledge = LocalKnowledgeBase(
         local_config,
@@ -33,13 +42,19 @@ def test_directed_evolution_corpus_flows_from_typed_rag_into_kg(tmp_path) -> Non
         report = knowledge.refresh()
         stats = knowledge.index.stats()
         result = knowledge.retrieve(
-            query="internal stop codon NNK NNS canonical amino acid translation",
+            query="How can reduced codon redundancy lower saturation screening effort?",
             intent="constraint",
             round_id=1,
             knowledge_types=("sequence_safeguards",),
         )
         registry = PluginRegistry("knowledge_adapter")
-        registry.register("local_rag", LocalRAGKnowledgeAdapter(knowledge.guard))
+        registry.register(
+            "local_rag",
+            LocalRAGKnowledgeAdapter(
+                knowledge.guard,
+                publication_catalog=knowledge.publication_catalog,
+            ),
+        )
         built = KnowledgeGraphBuilder(registry, sinks=(sink,), strict=True).build(
             BuildContext(
                 run_id="typed-directed-evolution-corpus",
@@ -48,7 +63,7 @@ def test_directed_evolution_corpus_flows_from_typed_rag_into_kg(tmp_path) -> Non
                 resources={"local_retrieval_results": (result,)},
             )
         )
-        claims = sink.query_claims(query="stop codon", round_id=1, limit=8)
+        claims = sink.query_claims(query="codon redundancy", round_id=1, limit=8)
     finally:
         sink.close()
         knowledge.close()
@@ -82,3 +97,7 @@ def test_directed_evolution_corpus_flows_from_typed_rag_into_kg(tmp_path) -> Non
     }
     assert document_types == {"sequence_safeguards"}
     assert claim_types == {"sequence_safeguards"}
+    entity_types = {item.entity_type for item in built.snapshot.entities}
+    predicates = {item.predicate for item in built.snapshot.relations}
+    assert {"Publication", "CitationSupport"}.issubset(entity_types)
+    assert {"SUPPORTED_BY_CITATION", "CITES_PUBLICATION"}.issubset(predicates)

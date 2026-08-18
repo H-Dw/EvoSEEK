@@ -12,6 +12,7 @@ from fitness_agents.contracts.schemas import (
     ValidationRecord,
     Variant,
 )
+from fitness_agents.local_knowledge.catalog import PublicationCatalog
 from fitness_agents.local_knowledge.contracts import RetrievalResult
 from fitness_agents.local_knowledge.leakage import TargetLeakageGuard
 from fitness_agents.mutation.notation import InvalidMutationNotation, parse_mutation_notation
@@ -546,8 +547,21 @@ class LocalRAGKnowledgeAdapter:
 
     name = "local_rag"
 
-    def __init__(self, guard: TargetLeakageGuard | None = None) -> None:
+    def __init__(
+        self,
+        guard: TargetLeakageGuard | None = None,
+        *,
+        publication_catalog: PublicationCatalog | None = None,
+    ) -> None:
         self.guard = guard
+        self.publication_catalog = publication_catalog or PublicationCatalog({})
+
+    @staticmethod
+    def _chunk_source_id(document_id: str, chunk_id: str) -> str:
+        normalized_document = (
+            document_id if document_id.startswith("localdoc:") else f"localdoc:{document_id}"
+        )
+        return f"{normalized_document}:{chunk_id}"
 
     def extract(self, context: BuildContext) -> KnowledgeBatch:
         results = tuple(context.resources.get("local_retrieval_results", ()))
@@ -579,7 +593,7 @@ class LocalRAGKnowledgeAdapter:
                         raise ValueError(
                             f"Target leakage guard rejected KG chunk {chunk.chunk_id}: {matched}"
                         )
-                source_id = f"localdoc:{chunk.document_id}:{chunk.chunk_id}"
+                source_id = self._chunk_source_id(chunk.document_id, chunk.chunk_id)
                 document_metadata = chunk.provenance.get("metadata", {})
                 if not isinstance(document_metadata, dict):
                     document_metadata = {}
@@ -604,7 +618,11 @@ class LocalRAGKnowledgeAdapter:
                     entity_id=chunk.chunk_id,
                     entity_type="DocumentChunk",
                     layer=KnowledgeLayer.LITERATURE,
-                    modalities=frozenset({Modality.TEXT, Modality.EMBEDDING}),
+                    modalities=frozenset(
+                        {Modality.TEXT, Modality.EMBEDDING}
+                        if "dense" in chunk.scores
+                        else {Modality.TEXT}
+                    ),
                     properties={
                         "text": chunk.text,
                         "artifact_uri": chunk.artifact_uri,
@@ -620,7 +638,11 @@ class LocalRAGKnowledgeAdapter:
                     source_ids=(source_id,),
                     source_group=chunk.source_group,
                     confidence=min(
-                        1.0, max(0.05, float(chunk.scores.get("rrf", 0.0)) * 60.0)
+                        1.0,
+                        max(
+                            0.0,
+                            float(chunk.scores.get("retrieval_confidence", 0.0)),
+                        ),
                     ),
                     valid_from_round=result.round_id,
                 )
@@ -655,7 +677,7 @@ class LocalRAGKnowledgeAdapter:
                             f"Target leakage guard rejected KG claim {claim.claim_id}: {matched}"
                         )
                 source_ids = tuple(
-                    f"localdoc:{item.document_id}:{item.chunk_id}"
+                    self._chunk_source_id(item.document_id, item.chunk_id)
                     for item in supporting_chunks
                 )
                 source_group = supporting_chunks[0].source_group
@@ -675,6 +697,8 @@ class LocalRAGKnowledgeAdapter:
                         "polarity": claim.polarity,
                         "applicability": claim.applicability,
                         "knowledge_types": knowledge_types,
+                        "claim_kind": claim.claim_kind,
+                        "selection_eligible": claim.selection_eligible,
                         "extraction_version": claim.extraction_version,
                     },
                     source_ids=source_ids,
@@ -695,6 +719,7 @@ class LocalRAGKnowledgeAdapter:
                         "claim_id": claim.claim_id,
                         "knowledge_types": knowledge_types,
                         "contributes_to_selection": False,
+                        "selection_projection_required": claim.selection_eligible,
                         "round_id": result.round_id,
                     },
                     source_ids=source_ids,
@@ -720,8 +745,99 @@ class LocalRAGKnowledgeAdapter:
                         valid_from_round=result.round_id,
                     )
                 )
+                for support in claim.citation_support:
+                    publication_id = str(support.get("publication_id", "")).casefold()
+                    publication = self.publication_catalog.require(publication_id)
+                    support_id = str(
+                        support.get("support_id")
+                        or stable_record_id(
+                            "citation-support",
+                            claim.claim_id,
+                            publication_id,
+                            support.get("support_type"),
+                            support.get("locator"),
+                        )
+                    )
+                    entities[publication_id] = EntityRecord(
+                        entity_id=publication_id,
+                        entity_type="Publication",
+                        layer=KnowledgeLayer.LITERATURE,
+                        modalities=frozenset({Modality.TEXT}),
+                        properties={
+                            "title": publication["title"],
+                            "authors": publication["authors"],
+                            "year": publication["year"],
+                            "venue": publication["venue"],
+                            "doi": publication["doi"],
+                            "url": publication["url"],
+                            "publication_type": publication.get("publication_type"),
+                            "verification": publication.get("verification", {}),
+                        },
+                        source_ids=(publication_id,),
+                        source_group="publication_catalog",
+                        confidence=1.0,
+                    )
+                    entities[support_id] = EntityRecord(
+                        entity_id=support_id,
+                        entity_type="CitationSupport",
+                        layer=KnowledgeLayer.PROVENANCE,
+                        modalities=frozenset({Modality.TEXT}),
+                        properties={
+                            "support_type": support.get("support_type"),
+                            "locator": support.get("locator"),
+                            "verified_against_source": bool(
+                                support.get("verified_against_source", False)
+                            ),
+                            "claim_id": claim.claim_id,
+                            "publication_id": publication_id,
+                        },
+                        source_ids=(publication_id, *source_ids),
+                        source_group="citation_support",
+                        confidence=claim.confidence,
+                        valid_from_round=result.round_id,
+                    )
+                    relations.extend(
+                        (
+                            _relation(
+                                self.name,
+                                claim.claim_id,
+                                "SUPPORTED_BY_CITATION",
+                                support_id,
+                                KnowledgeLayer.LITERATURE,
+                                modality=Modality.TEXT,
+                                source_id=publication_id,
+                                source_group="citation_support",
+                                context_id=result.query_id,
+                                valid_from_round=result.round_id,
+                            ),
+                            _relation(
+                                self.name,
+                                support_id,
+                                "CITES_PUBLICATION",
+                                publication_id,
+                                KnowledgeLayer.PROVENANCE,
+                                modality=Modality.TEXT,
+                                source_id=publication_id,
+                                source_group="publication_catalog",
+                                context_id=result.query_id,
+                                valid_from_round=result.round_id,
+                            ),
+                            _relation(
+                                self.name,
+                                support_id,
+                                "DERIVED_FROM",
+                                supporting_chunks[0].chunk_id,
+                                KnowledgeLayer.PROVENANCE,
+                                modality=Modality.TEXT,
+                                source_id=source_ids[0],
+                                source_group=source_group,
+                                context_id=result.query_id,
+                                valid_from_round=result.round_id,
+                            ),
+                        )
+                    )
                 for chunk in supporting_chunks:
-                    source_id = f"localdoc:{chunk.document_id}:{chunk.chunk_id}"
+                    source_id = self._chunk_source_id(chunk.document_id, chunk.chunk_id)
                     relations.append(
                         _relation(
                             self.name,

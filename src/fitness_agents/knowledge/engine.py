@@ -212,9 +212,11 @@ class KnowledgeEngine:
             self.local_knowledge = LocalKnowledgeBase(
                 config.local_knowledge,
                 index_path=(
-                    config.local_knowledge.index_path
+                    config.local_knowledge.corpus_index_path
+                    or config.local_knowledge.index_path
                     or Path(graph_path).with_name("local_knowledge.sqlite")
                 ),
+                overlay_path=config.local_knowledge.retrieval_overlay_path,
                 protein_id=protein_id,
                 protein_name=protein_name,
                 protein_aliases=protein_aliases,
@@ -230,7 +232,11 @@ class KnowledgeEngine:
             and config.local_knowledge.kg_update.enabled
         ):
             adapters.register(
-                "local_rag", LocalRAGKnowledgeAdapter(self.local_knowledge.guard)
+                "local_rag",
+                LocalRAGKnowledgeAdapter(
+                    self.local_knowledge.guard,
+                    publication_catalog=self.local_knowledge.publication_catalog,
+                ),
             )
         adapters.register("validation_records", ValidationKnowledgeAdapter())
         self.structured_builder = KnowledgeGraphBuilder(
@@ -424,6 +430,7 @@ class KnowledgeEngine:
         objective: str,
         assay_conditions: dict[str, Any] | None = None,
         anchors: Sequence[str] = (),
+        candidates: Sequence[Variant] = (),
     ) -> tuple[RetrievalResult | None, tuple[Evidence, ...]]:
         if self.local_knowledge is None:
             return None, ()
@@ -433,7 +440,9 @@ class KnowledgeEngine:
             assay_conditions=assay_conditions,
             anchors=anchors,
         )
-        evidence = self.local_knowledge.evidence_from_result(result)
+        evidence = self.local_knowledge.evidence_from_result(
+            result, candidates=candidates
+        )
         if result.query_id not in {
             item.query_id for item in self._local_retrieval_results[round_id]
         }:

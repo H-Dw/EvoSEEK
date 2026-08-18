@@ -8,12 +8,14 @@ from pydantic import ValidationError
 from fitness_agents.agents.llm import (
     HYPOTHESIS_SCHEMA,
     OpenAICompatibleLLMClient,
+    build_scientist_hypothesis_messages,
     load_scientist_profile,
 )
 from fitness_agents.agents.output_contracts import HypothesisOutput
 from fitness_agents.agents.rethink import NativeReThinkClient
 from fitness_agents.agents.transports import OpenAICompatibleChatTransport
 from fitness_agents.contracts.agent_io import ReThinkContextInput
+from fitness_agents.contracts.schemas import Evidence
 
 
 class _SequenceClient:
@@ -130,6 +132,64 @@ def test_scientist_profile_defines_output_and_authority_boundaries() -> None:
     assert "oracle" in profile
     assert "final-test" in profile
     assert "batch submission" in profile
+
+
+def test_scientist_prompt_keeps_decision_provenance_but_drops_backend_bulk() -> None:
+    context = {
+        **_context(),
+        "kg_interaction": {
+            "plan_id": "p1",
+            "packs": [
+                {
+                    "query_id": "q1",
+                    "operator": "query_local_knowledge",
+                    "as_of_round": 1,
+                    "facts": [],
+                    "evidence": [
+                        {
+                            "evidence_id": "ev:1",
+                            "statement": "Epistasis is background dependent.",
+                            "provenance": {
+                                "artifact_uri": "claim.md",
+                                "embedding_fingerprint": {"large": "x" * 1000},
+                            },
+                        }
+                    ],
+                    "provenance": [],
+                }
+            ],
+        },
+    }
+    evidence = Evidence(
+        evidence_id="ev:1",
+        variant_id="context:protein",
+        channel="local_rag",
+        statement="Epistasis is background dependent.",
+        score=0.0,
+        source_id="localdoc:1",
+        confidence=0.8,
+        round_id=1,
+        provenance={
+            "artifact_uri": "claim.md",
+            "index_manifest_hash": "manifest",
+            "embedding_fingerprint": {"large": "x" * 1000},
+        },
+    )
+
+    messages = build_scientist_hypothesis_messages(
+        profile="scientist profile",
+        sanitized_context=context,
+        evidence=[evidence],
+        output_schema=HYPOTHESIS_SCHEMA,
+    )
+
+    payload = json.loads(messages[1]["content"])
+    assert payload["evidence"][0]["evidence_id"] == "ev:1"
+    assert payload["evidence"][0]["provenance"] == {
+        "artifact_uri": "claim.md",
+        "index_manifest_hash": "manifest",
+    }
+    assert "embedding_fingerprint" not in messages[1]["content"]
 
 
 def _reflection(variant_id: str) -> dict:

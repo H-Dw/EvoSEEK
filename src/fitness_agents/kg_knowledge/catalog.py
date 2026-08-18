@@ -77,6 +77,15 @@ DEFAULT_ENTITY_SPECS = (
     ),
     EntitySpec("Publication", KnowledgeLayer.LITERATURE, "P2", 3, 2, "literature", "来源文献"),
     EntitySpec(
+        "CitationSupport",
+        KnowledgeLayer.PROVENANCE,
+        "P1",
+        5,
+        2,
+        "literature",
+        "Claim-to-publication support assertion with locator and verification status",
+    ),
+    EntitySpec(
         "Claim", KnowledgeLayer.LITERATURE, "P2", 4, 3, "literature", "带限定条件的文献主张"
     ),
     EntitySpec(
@@ -134,6 +143,27 @@ DEFAULT_RELATION_SPECS = (
     RelationSpec("ASSERTS", "DocumentChunk", "Claim", KnowledgeLayer.LITERATURE, "P1"),
     RelationSpec(
         "SUPPORTED_BY_SOURCE", "Claim", "Evidence", KnowledgeLayer.LITERATURE, "P1"
+    ),
+    RelationSpec(
+        "SUPPORTED_BY_CITATION",
+        "Claim",
+        "CitationSupport",
+        KnowledgeLayer.LITERATURE,
+        "P1",
+    ),
+    RelationSpec(
+        "CITES_PUBLICATION",
+        "CitationSupport",
+        "Publication",
+        KnowledgeLayer.PROVENANCE,
+        "P1",
+    ),
+    RelationSpec(
+        "DERIVED_FROM",
+        "CitationSupport",
+        "DocumentChunk",
+        KnowledgeLayer.PROVENANCE,
+        "P1",
     ),
     RelationSpec(
         "DERIVED_FROM", "Evidence", "DocumentChunk", KnowledgeLayer.PROVENANCE, "P1"

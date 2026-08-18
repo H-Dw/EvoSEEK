@@ -1,0 +1,19 @@
+schema_version: local-rag-selection-calibration:v1
+calibration_id: replace-with-campaign-calibration-id
+version: "0.0.0"
+status: draft
+notes: >-
+  This file is intentionally rejected by production code until the rule has been
+  fitted and validated against visible campaign data without hidden-label leakage.
+validation:
+  protocol_id: replace-with-leakage-safe-validation-protocol
+  dataset_manifest_hash: replace-with-visible-data-manifest-hash
+  metrics: {}
+rules:
+  - rule_id: high-order-mutation-penalty
+    claim_id: de:claim:default-high-order-penalty
+    feature: mutation_count
+    operator: greater_than_or_equal
+    value: 4
+    score: -0.15
+    confidence: 0.60

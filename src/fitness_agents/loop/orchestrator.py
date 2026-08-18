@@ -502,19 +502,55 @@ class CampaignRunner:
                 "local_knowledge": {
                     "enabled": self.knowledge.local_knowledge is not None,
                     "index_path": (
-                        str(self.config.knowledge.local_knowledge.index_path)
-                        if self.config.knowledge.local_knowledge.index_path is not None
+                        str(self.config.knowledge.local_knowledge.corpus_index_path)
+                        if self.config.knowledge.local_knowledge.corpus_index_path is not None
+                        else None
+                    ),
+                    "retrieval_overlay_path": (
+                        str(self.config.knowledge.local_knowledge.retrieval_overlay_path)
+                        if self.config.knowledge.local_knowledge.retrieval_overlay_path
+                        is not None
                         else None
                     ),
                     "retrieval_mode": self.config.knowledge.local_knowledge.retrieval.mode,
                     "dense_enabled": (
                         self.config.knowledge.local_knowledge.retrieval.dense_enabled
                     ),
+                    "embedding_model_id": (
+                        self.config.knowledge.local_knowledge.retrieval.embedding_model_id
+                    ),
+                    "embedding_model_revision": (
+                        self.config.knowledge.local_knowledge.retrieval.embedding_model_revision
+                    ),
+                    "embedding_fingerprint": (
+                        self.knowledge.local_knowledge.embedding_backend.fingerprint
+                        if self.knowledge.local_knowledge is not None
+                        and self.knowledge.local_knowledge.embedding_backend is not None
+                        else None
+                    ),
+                    "reranker_fingerprint": (
+                        self.knowledge.local_knowledge.reranker_backend.fingerprint
+                        if self.knowledge.local_knowledge is not None
+                        and self.knowledge.local_knowledge.reranker_backend is not None
+                        else None
+                    ),
                     "leakage_guard_enabled": (
                         self.config.knowledge.local_knowledge.leakage_guard.enabled
                     ),
                     "allow_remote_context": (
                         self.config.knowledge.local_knowledge.allow_remote_context
+                    ),
+                    "contributes_to_selection": (
+                        self.config.knowledge.local_knowledge.kg_update.contributes_to_selection
+                    ),
+                    "selection_mode": (
+                        self.config.knowledge.local_knowledge.kg_update.selection_mode
+                    ),
+                    "selection_calibration_sha256": (
+                        self.knowledge.local_knowledge.selection_projector.sha256
+                        if self.knowledge.local_knowledge is not None
+                        and self.knowledge.local_knowledge.selection_projector is not None
+                        else None
                     ),
                     "scientist_context_allowed": self._scientist_local_context_allowed,
                     "critic_context_allowed": self._critic_local_context_allowed,
@@ -836,7 +872,15 @@ class CampaignRunner:
                     objective=self.config.task.objective,
                     assay_conditions=self.config.task.assay_conditions,
                     anchors=tuple(sorted(self.knowledge.providers)),
+                    candidates=remaining,
                 )
+                selecting_local_evidence = []
+                for item in local_evidence:
+                    if item.contributes_to_selection and item.variant_id in evidence:
+                        evidence[item.variant_id].append(item)
+                        selecting_local_evidence.append(item)
+                if selecting_local_evidence:
+                    self.knowledge.graph.add_evidence(selecting_local_evidence)
                 self.writer.write_json(
                     f"round_{round_id:02d}/local_rag_retrieval.json",
                     local_result,

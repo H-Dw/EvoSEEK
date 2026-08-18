@@ -9,6 +9,7 @@ from pathlib import Path
 from fitness_agents.config import load_experiment_config
 from fitness_agents.local_knowledge import LocalKnowledgeBase
 from fitness_agents.local_knowledge.index import SQLiteLocalKnowledgeIndex
+from fitness_agents.local_knowledge.overlay import SQLiteRetrievalOverlay
 from fitness_agents.loop import run_campaign
 from fitness_agents.protein_features import ProteinTaskContext
 from fitness_agents.utils.progress import add_logging_arguments, configure_from_args
@@ -27,7 +28,7 @@ def _knowledge_command(argv: list[str]) -> None:
     index_path = (
         args.index_path.resolve()
         if args.index_path is not None
-        else local_config.index_path
+        else local_config.corpus_index_path or local_config.index_path
     )
     if index_path is None:
         index_path = (config.output_root / "local_knowledge" / f"{config.task.task_id}.sqlite").resolve()
@@ -36,7 +37,15 @@ def _knowledge_command(argv: list[str]) -> None:
             raise FileNotFoundError(f"Local knowledge index does not exist: {index_path}")
         index = SQLiteLocalKnowledgeIndex(index_path)
         try:
-            print(json.dumps(index.stats(), ensure_ascii=False, indent=2))
+            payload = {"corpus": index.stats()}
+            overlay_path = local_config.retrieval_overlay_path
+            if overlay_path is not None and overlay_path.is_file():
+                overlay = SQLiteRetrievalOverlay(overlay_path)
+                try:
+                    payload["task_overlay"] = overlay.stats()
+                finally:
+                    overlay.close()
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
         finally:
             index.close()
         return
@@ -44,6 +53,7 @@ def _knowledge_command(argv: list[str]) -> None:
     knowledge = LocalKnowledgeBase(
         local_config,
         index_path=index_path,
+        overlay_path=local_config.retrieval_overlay_path,
         protein_id=config.task.protein_id,
         protein_name=config.task.protein_name,
         protein_aliases=config.task.protein_aliases,

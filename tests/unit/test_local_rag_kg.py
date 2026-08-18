@@ -105,6 +105,11 @@ def test_local_retrieval_materializes_round_visible_claim_graph(tmp_path: Path) 
     assert document.properties["metadata"]["citation_keys"] == ["Grantham1974"]
     assert chunk.properties["knowledge_type"] == "amino_acid_properties"
     assert claim.properties["knowledge_types"] == ["amino_acid_properties"]
+    assert all(
+        "localdoc:localdoc:" not in source_id
+        for entity in built.snapshot.entities
+        for source_id in entity.source_ids
+    )
 
 
 class _EngineFacade:
