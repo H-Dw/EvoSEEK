@@ -1,23 +1,25 @@
+# Formal GB1-AL96 closed-loop run.
+# Path: DeepSeek Scientist/Critic/ReThink + Qwen embedding/rerank RAG -> KG ->
+# multi-mutation hypothesis -> Kermut dry validation -> split-oracle wet validation.
 mode: knowledge_agent
 seed: 11
 rounds: 3
 budget_per_round: 32
-# Score/ESM-2 only this many remaining variants per round. 0 = full remaining oracle pool.
 candidate_limit: 64
 acquisition: greedy
 ucb_beta: 1.5
 diversity_lambda: 0.10
 task_config: configs/task/gb1_binding_al96.yaml
 model_config: configs/model/kermut.yaml
-knowledge_config: configs/knowledge/gb1.yaml
+knowledge_config: configs/knowledge/gb1.qwen-api.yaml
 output_root: artifacts/runs
 llm_config: configs/llm/deepseek.yaml
 critic_config: configs/critic/deepseek_remote.yaml
 knowledge_enabled: true
 score_shuffle: false
 evidence_deletion: false
-run_label: GB1-AL96-5CV
-condition: knowledge_agent
+run_label: GB1-AL96-QWEN-RAG
+condition: knowledge_agent_qwen_rag
 generation:
   selection_driver: agent_uq
   use_fitness_predictors: false
@@ -49,7 +51,7 @@ kg_interaction:
     query_physchem_delta, query_evolutionary_profile, query_structure_environment,
     query_assay_association, query_evidence_provenance, query_local_knowledge,
     query_structured_claims]
-  max_tool_calls: 8
+  max_tool_calls: 9
   max_rows: 12
   use_counterevidence: true
   stop_when_sufficient: false

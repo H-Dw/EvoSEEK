@@ -67,6 +67,23 @@ def _knowledge_command(argv: list[str]) -> None:
         knowledge.close()
 
 
+def _apply_local_knowledge_paths(config, *, index_path: Path | None, overlay_path: Path | None):
+    if index_path is None and overlay_path is None:
+        return config
+    local = config.knowledge.local_knowledge
+    updates: dict[str, Path] = {}
+    if index_path is not None:
+        resolved = index_path.resolve()
+        updates["index_path"] = resolved
+        updates["corpus_index_path"] = resolved
+    if overlay_path is not None:
+        updates["retrieval_overlay_path"] = overlay_path.resolve()
+    return replace(
+        config,
+        knowledge=replace(config.knowledge, local_knowledge=replace(local, **updates)),
+    )
+
+
 def main() -> None:
     if len(sys.argv) > 1 and sys.argv[1] == "knowledge":
         _knowledge_command(sys.argv[2:])
@@ -75,21 +92,50 @@ def main() -> None:
     parser.add_argument("config", help="Experiment YAML path")
     parser.add_argument("--seed", type=int)
     parser.add_argument("--fold-index", type=int)
+    parser.add_argument("--rounds", type=int)
+    parser.add_argument("--budget-per-round", type=int)
+    parser.add_argument("--run-label")
+    parser.add_argument("--condition")
     parser.add_argument("--output-root", type=Path)
     parser.add_argument(
         "--output-artifacts",
         help="Comma-separated subset of json,csv,markdown,svg,reasoning",
     )
     parser.add_argument("--output-top-k", type=int)
+    parser.add_argument(
+        "--local-knowledge-index",
+        type=Path,
+        help="Override the local knowledge corpus sqlite path for this job",
+    )
+    parser.add_argument(
+        "--local-knowledge-overlay",
+        type=Path,
+        help="Override the per-task retrieval overlay sqlite path for this job",
+    )
     add_logging_arguments(parser)
     args = parser.parse_args()
     configure_from_args(args)
-    overrides = {"seed": args.seed} if args.seed is not None else None
-    config = load_experiment_config(args.config, overrides=overrides)
+    overrides: dict[str, object] = {}
+    if args.seed is not None:
+        overrides["seed"] = args.seed
+    if args.rounds is not None:
+        overrides["rounds"] = args.rounds
+    if args.budget_per_round is not None:
+        overrides["budget_per_round"] = args.budget_per_round
+    if args.run_label is not None:
+        overrides["run_label"] = args.run_label
+    if args.condition is not None:
+        overrides["condition"] = args.condition
+    config = load_experiment_config(args.config, overrides=overrides or None)
     if args.fold_index is not None:
         config = replace(config, task=replace(config.task, fold_index=args.fold_index))
     if args.output_root is not None:
         config = replace(config, output_root=args.output_root.resolve())
+    config = _apply_local_knowledge_paths(
+        config,
+        index_path=args.local_knowledge_index,
+        overlay_path=args.local_knowledge_overlay,
+    )
     output = config.output
     if args.output_artifacts is not None:
         output = replace(

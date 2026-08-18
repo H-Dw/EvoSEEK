@@ -63,12 +63,13 @@ def resolve_api_key(explicit: str | None = None) -> str:
     key = resolve_secret(
         explicit,
         "FITNESS_AGENTS_LLM_API_KEY",
+        "DASHSCOPE_API_KEY",
         "DEEPSEEK_API_KEY",
         "OPENAI_API_KEY",
     )
     if not key:
         raise RuntimeError(
-            "Set FITNESS_AGENTS_LLM_API_KEY, DEEPSEEK_API_KEY, or OPENAI_API_KEY"
+            "Set FITNESS_AGENTS_LLM_API_KEY, DASHSCOPE_API_KEY, DEEPSEEK_API_KEY, or OPENAI_API_KEY"
         )
     return key
 
@@ -214,18 +215,21 @@ def complete_json(
     del schema
     load_project_env()
     token_budget = max_tokens or int(os.environ.get("FITNESS_AGENTS_LLM_MAX_TOKENS", "16384"))
-    effort = reasoning_effort or os.environ.get("FITNESS_AGENTS_LLM_REASONING_EFFORT")
-    thinking_mode = thinking or os.environ.get("FITNESS_AGENTS_LLM_THINKING")
     if transport is None and client is None:
         raise ValueError("A chat transport or compatible client is required")
     connection = transport if transport is not None else client
     client_base = str(getattr(connection, "base_url", "") or "")
-    deepseek = uses_deepseek(model, client_base) or uses_deepseek(
-        model, os.environ.get("OPENAI_BASE_URL") or os.environ.get("FITNESS_AGENTS_LLM_BASE_URL")
+    env_base = os.environ.get("OPENAI_BASE_URL") or os.environ.get("FITNESS_AGENTS_LLM_BASE_URL")
+    deepseek = uses_deepseek(model, client_base) or (
+        not client_base and uses_deepseek(model, env_base)
     )
+    # DeepSeek-only env defaults must not leak into Qwen/DashScope Chat Completions.
     if deepseek:
-        effort = effort or "high"
-        thinking_mode = thinking_mode or "enabled"
+        effort = reasoning_effort or os.environ.get("FITNESS_AGENTS_LLM_REASONING_EFFORT") or "high"
+        thinking_mode = thinking or os.environ.get("FITNESS_AGENTS_LLM_THINKING") or "enabled"
+    else:
+        effort = reasoning_effort
+        thinking_mode = thinking
 
     last_error: Exception | None = None
     current_thinking = thinking_mode

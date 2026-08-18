@@ -29,6 +29,16 @@ profiles:
     stop_when_sufficient: false
     read_only: true
 
+  feature_channels:
+    enabled_operators: [hypothesis_context, explain_variant, compare_variants,
+      query_physchem_delta, query_evolutionary_profile, query_structure_environment,
+      query_assay_association, query_evidence_provenance, query_local_knowledge,
+      query_structured_claims]
+    max_tool_calls: 8
+    use_counterevidence: true
+    stop_when_sufficient: false
+    read_only: true
+
   proposal_writeback:
     enabled_operators: [hypothesis_context, explain_variant, compare_variants]
     max_tool_calls: 3

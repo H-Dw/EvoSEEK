@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Sequence
 from typing import Annotated, Any, Literal
 
 from pydantic import (
@@ -24,6 +25,36 @@ def _non_empty_text(value: str) -> str:
 NonEmptyText = Annotated[str, AfterValidator(_non_empty_text)]
 CANONICAL_RESIDUES = frozenset("ACDEFGHIKLMNPQRSTVWY")
 _UNSET = object()
+_VARIANT_ID_PREFIX = "sha256:"
+
+
+def visible_evidence_ids(
+    evidence_ids: Sequence[str],
+    allowed_evidence_ids: frozenset[str] | None,
+) -> tuple[str, ...]:
+    """Keep cited evidence IDs that the role can see; drop variant hashes.
+
+    Remote scientists often copy observation `sha256:` identifiers into
+    `evidence_ids`. Those are variant IDs, not evidence IDs, and must not fail
+    the whole hypothesis when the rest of the contract is valid.
+    """
+
+    if allowed_evidence_ids is None:
+        return tuple(evidence_ids)
+    kept: list[str] = []
+    unknown: list[str] = []
+    for item in evidence_ids:
+        if item in allowed_evidence_ids:
+            kept.append(item)
+        elif str(item).startswith(_VARIANT_ID_PREFIX):
+            continue
+        else:
+            unknown.append(item)
+    if unknown:
+        raise ValueError(
+            f"evidence_ids contains identifiers not visible to the role: {sorted(unknown)}"
+        )
+    return tuple(kept)
 
 
 class PreferredResiduesOutput(BaseModel):
@@ -96,10 +127,7 @@ class HypothesisOutput(BaseModel):
             and self.parent_hypothesis_id != expected_parent_hypothesis_id
         ):
             raise ValueError("parent_hypothesis_id must match the current CampaignRunner context")
-        if allowed_evidence_ids is not None:
-            unknown = sorted(set(self.evidence_ids).difference(allowed_evidence_ids))
-            if unknown:
-                raise ValueError(f"evidence_ids contains identifiers not visible to the role: {unknown}")
+        evidence_ids = visible_evidence_ids(self.evidence_ids, allowed_evidence_ids)
         preferred = PreferredResiduesOutput(residues=self.preferred_residues).residues
         if expected_positions is not None:
             expected = {str(item) for item in expected_positions}
@@ -115,7 +143,7 @@ class HypothesisOutput(BaseModel):
             preferred_residues={
                 int(site): tuple(residues) for site, residues in preferred.items()
             },
-            evidence_ids=tuple(self.evidence_ids),
+            evidence_ids=evidence_ids,
             expected_outcome=self.expected_outcome,
             falsification_criterion=self.falsification_criterion,
             parent_hypothesis_id=self.parent_hypothesis_id,
@@ -180,13 +208,15 @@ def validate_hypothesis_payload(
     expected_positions: tuple[int, ...] | None = None,
 ) -> dict[str, Any]:
     model = HypothesisOutput.model_validate(payload)
-    model.to_hypothesis(
+    hypothesis = model.to_hypothesis(
         expected_hypothesis_id=expected_hypothesis_id,
         expected_parent_hypothesis_id=expected_parent_hypothesis_id,
         allowed_evidence_ids=allowed_evidence_ids,
         expected_positions=expected_positions,
     )
-    return model.model_dump(mode="json", by_alias=True)
+    dumped = model.model_dump(mode="json", by_alias=True)
+    dumped["evidence_ids"] = list(hypothesis.evidence_ids)
+    return dumped
 
 
 def validate_rethink_payload(

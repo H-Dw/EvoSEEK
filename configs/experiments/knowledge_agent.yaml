@@ -15,6 +15,7 @@ critic_config: configs/critic/deepseek_remote.yaml
 knowledge_enabled: true
 score_shuffle: false
 evidence_deletion: false
+condition: knowledge_agent
 generation:
   selection_driver: agent_uq
   use_fitness_predictors: false
@@ -46,7 +47,7 @@ kg_interaction:
     query_physchem_delta, query_evolutionary_profile, query_structure_environment,
     query_assay_association, query_evidence_provenance, query_local_knowledge,
     query_structured_claims]
-  max_tool_calls: 3
+  max_tool_calls: 8
   max_rows: 12
   use_counterevidence: true
   stop_when_sufficient: false

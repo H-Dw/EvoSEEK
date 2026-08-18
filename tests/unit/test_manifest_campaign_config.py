@@ -12,6 +12,21 @@ def test_standard_al96_config_uses_manifest_fold_source():
     assert config.task.oracle_data_path is None
     assert config.task.fold_index == 0
     assert config.task.expected_split_strategy == "al96_closed_loop"
+    assert config.condition == "knowledge_agent"
+    assert config.knowledge.local_knowledge.enabled is False
+    assert config.knowledge.local_knowledge.allow_remote_context is False
+
+
+def test_al96_rag_config_enables_remote_local_knowledge_without_changing_mode():
+    no_rag = load_experiment_config("configs/experiments/knowledge_agent_al96.yaml")
+    rag = load_experiment_config("configs/experiments/knowledge_agent_al96_rag.yaml")
+    assert rag.mode == no_rag.mode == "knowledge_agent"
+    assert rag.condition == "knowledge_agent_rag"
+    assert rag.knowledge.local_knowledge.enabled is True
+    assert rag.knowledge.local_knowledge.allow_remote_context is True
+    assert rag.kg_interaction.max_tool_calls >= no_rag.kg_interaction.max_tool_calls
+    assert rag.task.split_root == no_rag.task.split_root
+    assert rag.generation.selection_driver == no_rag.generation.selection_driver
 
 
 def test_agent_experiments_wire_deepseek_and_kermut_without_literal_secrets():

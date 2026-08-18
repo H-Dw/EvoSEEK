@@ -864,6 +864,7 @@ class ExperimentConfig:
     score_shuffle: bool = False
     evidence_deletion: bool = False
     run_label: str = ""
+    condition: str = ""
     evidence_prefilter_limit: int = 5000
 
 
@@ -1100,11 +1101,12 @@ def load_experiment_config(
             str(item) for item in interaction_raw["enabled_operators"]
         )
     kg_interaction = _dataclass_from_mapping(KGInteractionRuntimeConfig, interaction_raw)
-    critic_raw = (
-        read_yaml(raw["critic_config"], root)
-        if raw.get("critic_config")
-        else (raw.get("critic", {}) or {})
-    )
+    critic_raw: dict[str, Any] = {}
+    if raw.get("critic_config"):
+        critic_raw.update(read_yaml(raw["critic_config"], root))
+    if isinstance(raw.get("critic"), dict):
+        critic_raw.update(raw["critic"])
+    critic_raw = load_inference_api_item(critic_raw, expected_kind="llm", root=root)
     critic = _dataclass_from_mapping(CriticConfig, critic_raw)
     llm_raw: dict[str, Any] = {}
     if raw.get("llm_config"):
@@ -1147,5 +1149,6 @@ def load_experiment_config(
         score_shuffle=bool(raw.get("score_shuffle", False)),
         evidence_deletion=bool(raw.get("evidence_deletion", False)),
         run_label=str(raw.get("run_label", "")),
+        condition=str(raw.get("condition") or raw.get("run_label") or raw["mode"]),
         evidence_prefilter_limit=int(raw.get("evidence_prefilter_limit", 5000)),
     )

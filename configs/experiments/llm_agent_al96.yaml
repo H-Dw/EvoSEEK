@@ -1,8 +1,7 @@
-mode: knowledge_agent
+mode: llm_agent
 seed: 11
 rounds: 3
 budget_per_round: 32
-# Score/ESM-2 only this many remaining variants per round. 0 = full remaining oracle pool.
 candidate_limit: 64
 acquisition: greedy
 ucb_beta: 1.5
@@ -13,11 +12,11 @@ knowledge_config: configs/knowledge/gb1.yaml
 output_root: artifacts/runs
 llm_config: configs/llm/deepseek.yaml
 critic_config: configs/critic/deepseek_remote.yaml
-knowledge_enabled: true
+knowledge_enabled: false
 score_shuffle: false
 evidence_deletion: false
 run_label: GB1-AL96-5CV
-condition: knowledge_agent
+condition: llm_agent
 generation:
   selection_driver: agent_uq
   use_fitness_predictors: false
@@ -43,13 +42,3 @@ evaluation:
 output:
   artifacts: [json, csv, markdown, svg, reasoning]
   top_k: 16
-kg_interaction:
-  enabled: true
-  enabled_operators: [hypothesis_context, explain_variant, compare_variants,
-    query_physchem_delta, query_evolutionary_profile, query_structure_environment,
-    query_assay_association, query_evidence_provenance, query_local_knowledge,
-    query_structured_claims]
-  max_tool_calls: 8
-  max_rows: 12
-  use_counterevidence: true
-  stop_when_sufficient: false

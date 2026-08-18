@@ -1,3 +1,6 @@
+# Three-round demo-split campaign with Kermut dry validation.
+# Use knowledge_agent_qwen_demo.yaml for the cheap smoke path, and
+# knowledge_agent_qwen_al96.yaml for the formal AL96 run.
 mode: knowledge_agent
 seed: 11
 rounds: 3
@@ -10,11 +13,13 @@ task_config: configs/task/gb1_binding.yaml
 model_config: configs/model/kermut.yaml
 knowledge_config: configs/knowledge/gb1.qwen-api.yaml
 output_root: artifacts/runs
-llm_config: configs/llm/qwen-workspace.yaml
+llm_config: configs/llm/deepseek.yaml
 critic_config: configs/critic/deepseek_remote.yaml
 knowledge_enabled: true
 score_shuffle: false
 evidence_deletion: false
+run_label: QWEN-DEMO-FULL
+condition: knowledge_agent_qwen_unified
 generation:
   selection_driver: agent_uq
   use_fitness_predictors: false
@@ -46,7 +51,7 @@ kg_interaction:
     query_physchem_delta, query_evolutionary_profile, query_structure_environment,
     query_assay_association, query_evidence_provenance, query_local_knowledge,
     query_structured_claims]
-  max_tool_calls: 3
+  max_tool_calls: 9
   max_rows: 12
   use_counterevidence: true
   stop_when_sufficient: false

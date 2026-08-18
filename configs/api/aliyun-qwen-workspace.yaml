@@ -55,3 +55,12 @@ items:
     tokenizer_model_id: Qwen/qwen3-rerank
     tokenizer_revision: "provider-managed:model-id:qwen3-rerank"
     score_kind: probability
+  critic_llm:
+    kind: llm
+    provider: openai_compatible
+    base_url_path: /compatible-mode/v1
+    model: qwen-plus
+    temperature: 0.0
+    max_tokens: 8192
+    reasoning_effort: null
+    thinking: null

@@ -89,6 +89,9 @@ class UrllibJSONTransport:
 
 
 def _resolve_api_key(reference: str) -> tuple[str | None, str]:
+    from fitness_agents.agents.remote_llm import load_project_env
+
+    load_project_env()
     if reference.casefold() == "none":
         return None, "none"
     if reference.startswith("env:"):

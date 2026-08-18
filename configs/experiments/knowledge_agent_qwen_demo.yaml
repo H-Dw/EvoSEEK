@@ -1,23 +1,29 @@
+# Complete-loop smoke demo on the GB1 demo split.
+# Path: DeepSeek Scientist/Critic/ReThink + Qwen embedding/rerank RAG -> KG ->
+# multi-mutation hypothesis -> baseline dry validation -> CSV-oracle wet validation.
 mode: knowledge_agent
 seed: 11
-rounds: 3
-budget_per_round: 32
-# Score/ESM-2 only this many remaining variants per round. 0 = full remaining oracle pool.
-candidate_limit: 64
+rounds: 1
+budget_per_round: 4
+candidate_limit: 32
 acquisition: greedy
 ucb_beta: 1.5
 diversity_lambda: 0.10
-task_config: configs/task/gb1_binding_al96.yaml
-model_config: configs/model/kermut.yaml
-knowledge_config: configs/knowledge/gb1.yaml
+task_config: configs/task/gb1_binding.yaml
+model_config: configs/model/baseline.yaml
+knowledge_config: configs/knowledge/gb1.qwen-api.yaml
 output_root: artifacts/runs
 llm_config: configs/llm/deepseek.yaml
 critic_config: configs/critic/deepseek_remote.yaml
+critic:
+  max_revision_attempts: 0
+  on_reject: safe_fallback
+  on_exhausted: safe_fallback
 knowledge_enabled: true
 score_shuffle: false
 evidence_deletion: false
-run_label: GB1-AL96-5CV
-condition: knowledge_agent
+run_label: QWEN-DEMO-SMOKE
+condition: knowledge_agent_qwen_demo
 generation:
   selection_driver: agent_uq
   use_fitness_predictors: false
@@ -39,17 +45,17 @@ validation:
 evaluation:
   metrics: [spearman, pearson, mse, rmse, ndcg, top_k_hit, top_k_recall,
     regret_at_k, interval_90_coverage, gaussian_nll]
-  top_k: 10
+  top_k: 8
 output:
   artifacts: [json, csv, markdown, svg, reasoning]
-  top_k: 16
+  top_k: 8
 kg_interaction:
   enabled: true
   enabled_operators: [hypothesis_context, explain_variant, compare_variants,
     query_physchem_delta, query_evolutionary_profile, query_structure_environment,
     query_assay_association, query_evidence_provenance, query_local_knowledge,
     query_structured_claims]
-  max_tool_calls: 8
+  max_tool_calls: 9
   max_rows: 12
   use_counterevidence: true
   stop_when_sufficient: false

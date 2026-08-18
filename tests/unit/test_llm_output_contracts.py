@@ -11,7 +11,7 @@ from fitness_agents.agents.llm import (
     build_scientist_hypothesis_messages,
     load_scientist_profile,
 )
-from fitness_agents.agents.output_contracts import HypothesisOutput
+from fitness_agents.agents.output_contracts import HypothesisOutput, validate_hypothesis_payload
 from fitness_agents.agents.rethink import NativeReThinkClient
 from fitness_agents.agents.transports import OpenAICompatibleChatTransport
 from fitness_agents.contracts.agent_io import ReThinkContextInput
@@ -132,6 +132,35 @@ def test_scientist_profile_defines_output_and_authority_boundaries() -> None:
     assert "oracle" in profile
     assert "final-test" in profile
     assert "batch submission" in profile
+    assert "sha256:" in profile
+
+
+def test_variant_hash_evidence_ids_are_dropped_unknown_evidence_still_fails() -> None:
+    payload = _valid_payload()
+    payload["evidence_ids"] = [
+        "ev:1",
+        "sha256:06f55338c6fc1a65a6ca3d486e6641f52abfaabb0c3353743f1afc323443f61b",
+    ]
+    cleaned = validate_hypothesis_payload(
+        payload,
+        allowed_evidence_ids=frozenset({"ev:1"}),
+        expected_positions=(39, 40, 41, 54),
+    )
+    assert cleaned["evidence_ids"] == ["ev:1"]
+
+    empty = validate_hypothesis_payload(
+        {**payload, "evidence_ids": ["sha256:deadbeef"]},
+        allowed_evidence_ids=frozenset(),
+        expected_positions=(39, 40, 41, 54),
+    )
+    assert empty["evidence_ids"] == []
+
+    with pytest.raises(ValueError, match="not visible to the role"):
+        validate_hypothesis_payload(
+            {**payload, "evidence_ids": ["ev:missing"]},
+            allowed_evidence_ids=frozenset({"ev:1"}),
+            expected_positions=(39, 40, 41, 54),
+        )
 
 
 def test_scientist_prompt_keeps_decision_provenance_but_drops_backend_bulk() -> None:

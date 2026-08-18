@@ -12,7 +12,9 @@ least two available scientific dimensions, and explicitly acknowledge unavailabl
 counterevidence instead of treating missing evidence as neutral support. Provide preferences for
 every site listed in
 `context.mutable_positions`; state
-a directional outcome and an executable falsification criterion. Cite only supplied evidence IDs.
+a directional outcome and an executable falsification criterion. Cite only supplied `evidence_id` values from `evidence` or KG packs (typically `ev:...`).
+Never put variant identifiers (`sha256:...`) in `evidence_ids`. If no evidence IDs are
+visible, return an empty `evidence_ids` array.
 
 Return one JSON object containing exactly: `hypothesis_id`, `statement`, `preferred_residues`,
 `evidence_ids`, `expected_outcome`, `falsification_criterion`, and `parent_hypothesis_id`.

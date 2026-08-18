@@ -1,0 +1,17 @@
+# Qwen Critic through the shared Aliyun workspace catalog.
+# The secret stays in `.env` as DASHSCOPE_API_KEY.
+api_catalog: configs/api/aliyun-qwen-workspace.yaml
+item: critic_llm
+enabled: true
+mode: remote
+profile: scientific_v1
+max_revision_attempts: 2
+max_model_retries: 2
+on_reject: abort_round
+on_exhausted: abort_round
+fallback_policy: rule
+require_counterevidence_search: false
+rationale_visibility: structured_claims_only
+ood_warning_threshold: null
+model_disagreement_threshold: null
+min_batch_distance: 1

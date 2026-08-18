@@ -469,6 +469,8 @@ class CampaignRunner:
     def _config_record(self) -> dict[str, Any]:
         return {
             "mode": self.config.mode,
+            "condition": self.config.condition or self.config.mode,
+            "run_label": self.config.run_label,
             "seed": self.config.seed,
             "rounds": self.config.rounds,
             "budget_per_round": self.config.budget_per_round,
@@ -1968,6 +1970,8 @@ class CampaignRunner:
         summary = {
             "run_id": self.run_id,
             "mode": self.config.mode,
+            "condition": self.config.condition or self.config.mode,
+            "run_label": self.config.run_label,
             "seed": self.config.seed,
             "round_metrics": round_metrics,
             "final_prediction_metrics": final_metrics,

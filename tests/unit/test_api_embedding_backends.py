@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -314,13 +315,65 @@ def test_unified_qwen_catalog_resolves_llm_embedding_and_reranker_items() -> Non
     embedding = experiment.knowledge.local_knowledge.retrieval.embedding_api_config
     reranker = experiment.knowledge.local_knowledge.retrieval.reranker_api_config
 
-    assert experiment.llm.provider == "openai_compatible"
-    assert experiment.llm.model == "qwen-plus"
-    assert experiment.llm.base_url is not None
-    assert experiment.llm.base_url.endswith("/compatible-mode/v1")
-    assert experiment.llm.api_key == "env:DASHSCOPE_API_KEY"
-    assert embedding is not None and embedding.api_key == experiment.llm.api_key
-    assert reranker is not None and reranker.api_key == experiment.llm.api_key
+    assert experiment.llm.provider == "deepseek"
+    assert experiment.llm.model == "deepseek-v4-flash"
+    assert experiment.llm.api_key == "env:DEEPSEEK_API_KEY"
+    assert experiment.llm.base_url == "https://api.deepseek.com"
+    assert embedding is not None and embedding.api_key == "env:DASHSCOPE_API_KEY"
+    assert reranker is not None and reranker.api_key == "env:DASHSCOPE_API_KEY"
+    assert experiment.critic.mode == "remote"
+    assert experiment.critic.provider == "deepseek"
+    assert experiment.critic.model == "deepseek-v4-flash"
+    assert experiment.critic.api_key == "env:DEEPSEEK_API_KEY"
+    assert experiment.kg_interaction.max_tool_calls >= 4
+
+
+def test_qwen_demo_and_al96_configs_cover_test_and_formal_loops() -> None:
+    demo = load_experiment_config("configs/experiments/knowledge_agent_qwen_demo.yaml")
+    formal = load_experiment_config("configs/experiments/knowledge_agent_qwen_al96.yaml")
+
+    assert demo.condition == "knowledge_agent_qwen_demo"
+    assert demo.rounds == 1
+    assert demo.budget_per_round == 4
+    assert demo.model.name == "onehot_heterogeneous_ensemble"
+    assert demo.task.public_data_path is not None
+    assert demo.llm.provider == "deepseek"
+    assert demo.llm.model == "deepseek-v4-flash"
+    assert demo.llm.api_key == "env:DEEPSEEK_API_KEY"
+    assert demo.knowledge.local_knowledge.retrieval.embedding_backend == "api"
+    assert demo.knowledge.local_knowledge.retrieval.reranker_backend == "api"
+    assert demo.knowledge.local_knowledge.retrieval.embedding_api_config is not None
+    assert (
+        demo.knowledge.local_knowledge.retrieval.embedding_api_config.api_key
+        == "env:DASHSCOPE_API_KEY"
+    )
+    assert demo.validation.enabled is True
+    assert demo.validation.rethink_enabled is True
+    assert demo.kg_interaction.max_tool_calls >= 4
+    assert demo.critic.max_revision_attempts == 0
+    assert demo.critic.on_exhausted == "safe_fallback"
+    assert demo.critic.on_reject == "safe_fallback"
+    assert demo.critic.provider == "deepseek"
+
+    assert formal.condition == "knowledge_agent_qwen_rag"
+    assert formal.rounds == 3
+    assert formal.model.name == "kermut"
+    assert formal.task.split_root is not None
+    assert formal.llm.api_key == demo.llm.api_key == "env:DEEPSEEK_API_KEY"
+    assert formal.critic.api_key == "env:DEEPSEEK_API_KEY"
+    assert formal.knowledge.local_knowledge.retrieval.embedding_backend == "api"
+    assert formal.validation.enabled is True
+
+
+def test_checked_in_configs_do_not_contain_plaintext_api_keys() -> None:
+    from fitness_agents.config import project_root
+
+    offenders: list[str] = []
+    for path in (project_root() / "configs").rglob("*.yaml"):
+        for line_no, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+            if re.search(r"sk-[A-Za-z0-9_-]{8,}", line):
+                offenders.append(f"{path}:{line_no}")
+    assert offenders == []
 
 
 def test_external_yaml_loader_and_factory_keep_model_and_provider_separate(
