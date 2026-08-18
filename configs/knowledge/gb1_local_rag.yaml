@@ -13,7 +13,11 @@ local_knowledge:
   allow_remote_context: true
   roots:
     - path: resources/local_knowledge/directed_evolution
-      include: ["**/*.md"]
+      include: ["claims/**/*.md"]
+      exclude: ["**/~$*", "**/.git/**", "**/artifacts/**"]
+    # Independent ablation unit for binding-affinity operations.
+    - path: resources/local_knowledge/binding
+      include: ["claims/**/*.md"]
       exclude: ["**/~$*", "**/.git/**", "**/artifacts/**"]
   ingestion:
     parser: auto
@@ -30,6 +34,8 @@ local_knowledge:
     fusion: rrf
     top_k: 8
     token_budget: 5000
+    minimum_dense_similarity: 0.55
+    require_dense_match_for_hybrid: true
   kg_update:
     enabled: true
     materialization: retrieved_only

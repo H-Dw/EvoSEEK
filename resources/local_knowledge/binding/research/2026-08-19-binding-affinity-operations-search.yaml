@@ -1,0 +1,59 @@
+schema_version: scientific-research-log:v1
+research_date: 2026-08-19
+research_question: >-
+  Which target-independent, citation-supported operations can guide directed
+  evolution campaigns that improve protein binding affinity while preserving
+  specificity, kinetics, stability, soluble behavior, and auditable measurements?
+inclusion_criteria:
+  - English-language DOI-backed primary studies, protocols, or authoritative reviews.
+  - Actions that connect a campaign intervention to an affinity, kinetic, specificity, or developability readout.
+  - Display, library, selection, measurement, and validation methods applicable beyond one named target.
+  - Sources with an inspected abstract, method section, result, figure, or review section supporting the saved claim.
+exclusion_criteria:
+  - Target assay labels, held-out fitness measurements, preferred target sequences, or campaign-specific winners.
+  - Docking or learned affinity scores presented as measured affinity without experimental calibration.
+  - Raw enrichment or display fluorescence presented as an intrinsic dissociation constant.
+  - Generic warnings that do not specify an executable control, measurement, or decision.
+discovery_routes:
+  - route: openalex_fallback
+    filters: {language: en, result_limit: 8, ranking: relevance_score}
+    queries:
+      - protein binding affinity maturation directed evolution display review
+      - yeast surface display affinity maturation equilibrium kinetic selection
+      - phage display affinity maturation panning antigen concentration off rate
+      - mRNA display ribosome display protein binding affinity selection
+      - Tite-Seq binding affinity deep mutational scanning titration
+      - surface plasmon resonance biolayer interferometry binding kinetics validation affinity
+      - protein protein interface hotspot saturation mutagenesis affinity maturation
+      - antibody affinity maturation developability polyspecificity counterselection
+  - route: web_primary_repository_search
+    filters: {language: en, preferred_domains: [pubmed.ncbi.nlm.nih.gov, pmc.ncbi.nlm.nih.gov, doi.org]}
+    queries:
+      - 'site:pubmed.ncbi.nlm.nih.gov protein binding affinity maturation directed evolution phage yeast display review'
+      - 'site:pmc.ncbi.nlm.nih.gov yeast surface display affinity maturation equilibrium kinetic off-rate selection'
+      - 'site:pmc.ncbi.nlm.nih.gov phage display affinity maturation low antigen concentration counterselection avidity'
+      - 'site:pmc.ncbi.nlm.nih.gov Tite-Seq massively parallel titration curves binding affinity'
+      - 'site:pubmed.ncbi.nlm.nih.gov surface plasmon resonance binding kinetics mass transport rebinding validation protein interactions review'
+      - 'site:pmc.ncbi.nlm.nih.gov biolayer interferometry binding kinetic assay antibody antigen design mass transport'
+      - 'site:pmc.ncbi.nlm.nih.gov protein protein interface binding hotspot alanine scanning affinity engineering'
+      - 'site:pmc.ncbi.nlm.nih.gov antibody affinity maturation developability specificity polyspecificity counterselection'
+      - 'Hawkins Russell Winter 1992 selection of phage antibodies by binding affinity DOI'
+      - 'Boder Wittrup 2000 directed evolution antibody fragments monovalent femtomolar affinity DOI PMC'
+      - 'Hanes Pluckthun 1997 ribosome display affinity selection DOI PMC'
+      - 'protein interface affinity maturation hotspot library design soft randomization review DOI'
+      - 'site:pmc.ncbi.nlm.nih.gov affinity maturation library soft randomization CDR site directed mutagenesis antibody phage display'
+      - 'site:pmc.ncbi.nlm.nih.gov affinity maturation secondary library combine beneficial mutations antibody display'
+      - 'site:pmc.ncbi.nlm.nih.gov yeast display two color target off target counterselection specificity binding'
+      - 'site:pmc.ncbi.nlm.nih.gov phage display negative selection tag binder support binder alternating antigen presentation'
+verification:
+  publication_identity: Crossref REST metadata independently checked for every cataloged DOI.
+  claim_support: Publisher, PubMed, or PubMed Central locator inspected for every CitationSupport record.
+  deduplication_key: normalized lowercase DOI
+  corpus_layer: binding
+  catalog_path: catalog/publications.yaml
+  saved_claims_path: claims
+limitations:
+  - Closed publications were used only for statements entailed by an inspected abstract or indexed method scope.
+  - Antibody-focused evidence was generalized only to display-compatible binding proteins when the mechanism did not depend on immunoglobulin-specific biology.
+  - Affinity improvements remain assay- and format-dependent; no citation was converted into a candidate-specific effect size.
+  - The bundle contains no target-specific calibration overlay and all claims remain selection-ineligible.

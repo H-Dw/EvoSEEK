@@ -31,3 +31,79 @@ queries:
     query: Why must external deep mutational scanning evidence be aligned to the current assay?
     expected_knowledge_type: evidence_applicability
     expected_terms: [assay, conditions]
+  - id: assay_validation
+    query: How should a quantitative directed-evolution screen be validated before screening the library?
+    expected_knowledge_type: assay_engineering
+    expected_terms: [positive, negative, Z-prime]
+  - id: epcr_calibration
+    query: How should an error-prone PCR mutation rate be calibrated before scaling the library?
+    expected_knowledge_type: random_mutagenesis_operations
+    expected_terms: [pilot, sequence, mutations per gene]
+  - id: saturation_library_qc
+    query: How should a saturation mutagenesis library be quality-controlled before screening?
+    expected_knowledge_type: saturation_mutagenesis_operations
+    expected_terms: [pooled, sequencing, randomized codon]
+  - id: structure_guided_recombination
+    query: How should crossover blocks be selected when recombining divergent protein homologs?
+    expected_knowledge_type: recombination_operations
+    expected_terms: [residue-residue contacts, crossover]
+  - id: specificity_dual_selection
+    query: How can activity on a desired substrate be increased while reducing activity on the parental substrate?
+    expected_knowledge_type: specificity_engineering
+    expected_terms: [positive selection, negative selection]
+  - id: stable_parent_choice
+    query: Which parent should be used for broad mutagenesis when candidate parents have similar activity but different stability?
+    expected_knowledge_type: stability_evolvability_operations
+    expected_terms: [stability, folding]
+  - id: monoclonal_droplets
+    query: How should cells or DNA be loaded so droplet phenotypes come from one library genotype?
+    expected_knowledge_type: droplet_screening_operations
+    expected_terms: [Poisson, monoclonal]
+  - id: mlde_initial_batch
+    query: What variants should be measured first for a machine-learning-guided combinatorial library?
+    expected_knowledge_type: machine_learning_operations
+    expected_terms: [random, measured, design space]
+  - id: active_learning_batch
+    query: How should the next active-learning batch balance predicted performance and uncertainty?
+    expected_knowledge_type: machine_learning_operations
+    expected_terms: [predicted fitness, uncertainty, retrain]
+  - id: uncertain_mutation
+    query: What should be done when the estimated effect of a mutation remains uncertain after one library?
+    expected_knowledge_type: round_decision_operations
+    expected_terms: [retest, combinatorial library]
+  - id: pace_prerequisite
+    query: What must be coupled before phage-assisted continuous evolution can optimize a protein activity?
+    expected_knowledge_type: continuous_evolution_operations
+    expected_terms: [activity, propagation]
+  - id: binding_objective
+    query: Which binding quantity should an affinity-maturation campaign define before library construction?
+    expected_knowledge_type: binding_campaign_definition
+    expected_terms: [equilibrium affinity, association rate, dissociation rate]
+  - id: binding_titration
+    query: How should KD be measured for variants across a displayed binding library?
+    expected_knowledge_type: binding_affinity_measurement
+    expected_terms: [binding curve, multiple ligand concentrations]
+  - id: binding_avidity
+    query: How should intrinsic affinity be distinguished from multivalent avidity?
+    expected_knowledge_type: binding_affinity_measurement
+    expected_terms: [monovalent, avidity]
+  - id: binding_off_rate
+    query: How should slow-off-rate binders be selected while preventing dissociated ligand from rebinding?
+    expected_knowledge_type: binding_kinetic_selection
+    expected_terms: [labeled ligand, unlabeled ligand, rebind]
+  - id: binding_large_library
+    query: Which display approach can explore a binding library larger than cellular transformation capacity?
+    expected_knowledge_type: binding_display_selection
+    expected_terms: [ribosome, mRNA, cell-free]
+  - id: binding_focused_library
+    query: How should interface positions be selected for a focused affinity-maturation library?
+    expected_knowledge_type: binding_library_design
+    expected_terms: [alanine scanning, permissive]
+  - id: binding_counterselection
+    query: How should an affinity campaign remove variants that bind homologs, matrix components, or other off-targets?
+    expected_knowledge_type: binding_specificity_counterselection
+    expected_terms: [negative selection, off-target]
+  - id: binding_lead_advancement
+    query: Which measurements should be reviewed before advancing an affinity-matured binding clone?
+    expected_knowledge_type: binding_developability_validation
+    expected_terms: [affinity, specificity, aggregation, stability]

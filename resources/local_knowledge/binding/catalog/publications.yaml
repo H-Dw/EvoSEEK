@@ -1,0 +1,238 @@
+schema_version: scientific-publications:v1
+generated_from: Crossref REST metadata plus publisher, PubMed, and PubMed Central source verification
+verified_on: 2026-08-19
+publications:
+  - publication_id: doi:10.1039/b511782h
+    title: Optimizing the affinity and specificity of proteins with molecular display
+    authors: [A. M. Levin, G. A. Weiss]
+    year: 2005
+    venue: Molecular BioSystems
+    doi: 10.1039/b511782h
+    url: https://doi.org/10.1039/b511782h
+    publication_type: review
+    verification: {metadata_source: crossref_and_pubmed, metadata_verified: true, full_text_verified: false}
+  - publication_id: doi:10.1038/nprot.2006.94
+    title: Isolating and engineering human antibodies using yeast surface display
+    authors: [Ginger Chao, Wai L. Lau, Benjamin J. Hackel, Stephen L. Sazinsky, Shaun M. Lippow, K. Dane Wittrup]
+    year: 2006
+    venue: Nature Protocols
+    doi: 10.1038/nprot.2006.94
+    url: https://doi.org/10.1038/nprot.2006.94
+    publication_type: protocol
+    verification: {metadata_source: crossref_and_pubmed, metadata_verified: true, full_text_verified: false}
+  - publication_id: doi:10.2174/138620708783744516
+    title: "A Decade of Yeast Surface Display Technology: Where Are We Now?"
+    authors: [Eric V. Shusta, Lauren R. Pepper, Yong Ku Cho, Eric T. Boder]
+    year: 2008
+    venue: Combinatorial Chemistry and High Throughput Screening
+    doi: 10.2174/138620708783744516
+    url: https://doi.org/10.2174/138620708783744516
+    publication_type: review
+    verification: {metadata_source: crossref_and_pmc, metadata_verified: true, full_text_verified: true}
+  - publication_id: doi:10.7554/elife.23156
+    title: Measuring the sequence-affinity landscape of antibodies with massively parallel titration curves
+    authors: [Rhys M. Adams, Thierry Mora, Aleksandra M. Walczak, Justin B. Kinney]
+    year: 2016
+    venue: eLife
+    doi: 10.7554/eLife.23156
+    url: https://doi.org/10.7554/eLife.23156
+    publication_type: journal-article
+    verification: {metadata_source: crossref_and_pmc, metadata_verified: true, full_text_verified: true}
+  - publication_id: doi:10.1073/pnas.170297297
+    title: Directed evolution of antibody fragments with monovalent femtomolar antigen-binding affinity
+    authors: [Eric T. Boder, Katarina S. Midelfort, K. Dane Wittrup]
+    year: 2000
+    venue: Proceedings of the National Academy of Sciences
+    doi: 10.1073/pnas.170297297
+    url: https://doi.org/10.1073/pnas.170297297
+    publication_type: journal-article
+    verification: {metadata_source: crossref_and_pmc, metadata_verified: true, full_text_verified: true}
+  - publication_id: doi:10.1016/0022-2836(92)90639-2
+    title: Selection of phage antibodies by binding affinity
+    authors: [Robert E. Hawkins, Stephen J. Russell, Greg Winter]
+    year: 1992
+    venue: Journal of Molecular Biology
+    doi: 10.1016/0022-2836(92)90639-2
+    url: https://doi.org/10.1016/0022-2836(92)90639-2
+    publication_type: journal-article
+    verification: {metadata_source: crossref_and_pubmed, metadata_verified: true, full_text_verified: false}
+  - publication_id: doi:10.1016/j.ab.2013.07.025
+    title: Off-rate screening for selection of high-affinity anti-drug antibodies
+    authors: [Francisco Ylera, Stefan Harth, Dirk Waldherr, Christian Frisch, Achim Knappik]
+    year: 2013
+    venue: Analytical Biochemistry
+    doi: 10.1016/j.ab.2013.07.025
+    url: https://doi.org/10.1016/j.ab.2013.07.025
+    publication_type: journal-article
+    verification: {metadata_source: crossref_and_pubmed, metadata_verified: true, full_text_verified: false}
+  - publication_id: doi:10.1073/pnas.94.10.4937
+    title: In vitro selection and evolution of functional proteins by using ribosome display
+    authors: [Jozef Hanes, Andreas Pluckthun]
+    year: 1997
+    venue: Proceedings of the National Academy of Sciences
+    doi: 10.1073/pnas.94.10.4937
+    url: https://doi.org/10.1073/pnas.94.10.4937
+    publication_type: journal-article
+    verification: {metadata_source: crossref_and_pmc, metadata_verified: true, full_text_verified: true}
+  - publication_id: doi:10.1038/nmeth1003
+    title: "Ribosome display: selecting and evolving proteins in vitro that specifically bind to a target"
+    authors: [Christian Zahnd, Patrick Amstutz, Andreas Pluckthun]
+    year: 2007
+    venue: Nature Methods
+    doi: 10.1038/nmeth1003
+    url: https://doi.org/10.1038/nmeth1003
+    publication_type: review
+    verification: {metadata_source: crossref_and_pubmed, metadata_verified: true, full_text_verified: false}
+  - publication_id: doi:10.1146/annurev.biophys.26.1.541
+    title: Use of surface plasmon resonance to probe the equilibrium and dynamic aspects of interactions between biological macromolecules
+    authors: [Peter Schuck]
+    year: 1997
+    venue: Annual Review of Biophysics and Biomolecular Structure
+    doi: 10.1146/annurev.biophys.26.1.541
+    url: https://doi.org/10.1146/annurev.biophys.26.1.541
+    publication_type: review
+    verification: {metadata_source: crossref_and_pubmed, metadata_verified: true, full_text_verified: false}
+  - publication_id: doi:10.1016/j.ab.2008.03.035
+    title: Determining kinetics and affinities of protein interactions using a parallel real-time label-free biosensor, the Octet
+    authors: [Yasmina Abdiche, Dan Malashock, Alanna Pinkerton, Jaume Pons]
+    year: 2008
+    venue: Analytical Biochemistry
+    doi: 10.1016/j.ab.2008.03.035
+    url: https://doi.org/10.1016/j.ab.2008.03.035
+    publication_type: journal-article
+    verification: {metadata_source: crossref_and_pubmed, metadata_verified: true, full_text_verified: false}
+  - publication_id: doi:10.1016/j.ab.2017.08.002
+    title: Designing binding kinetic assay on the bio-layer interferometry biosensor to characterize antibody-antigen interactions
+    authors: [Vishal Kamat, Ashique Rafique]
+    year: 2017
+    venue: Analytical Biochemistry
+    doi: 10.1016/j.ab.2017.08.002
+    url: https://doi.org/10.1016/j.ab.2017.08.002
+    publication_type: journal-article
+    verification: {metadata_source: crossref_and_pubmed, metadata_verified: true, full_text_verified: false}
+  - publication_id: doi:10.1016/j.xpro.2021.100836
+    title: Characterization of antibody-antigen interactions using biolayer interferometry
+    authors: [Tal Noy-Porat, Ron Alcalay, Adva Mechaly, Eldar Peretz, Efi Makdasi, Ronit Rosenfeld, Ohad Mazor]
+    year: 2021
+    venue: STAR Protocols
+    doi: 10.1016/j.xpro.2021.100836
+    url: https://doi.org/10.1016/j.xpro.2021.100836
+    publication_type: protocol
+    verification: {metadata_source: crossref_and_pmc, metadata_verified: true, full_text_verified: true}
+  - publication_id: doi:10.1021/acschembio.9b00560
+    title: Predicting and experimentally validating hot-spot residues at protein-protein interfaces
+    authors: [Amaurys A. Ibarra, Gail J. Bartlett, Zsofia Hegedus, Som Dutt, Fruzsina Hobor, Katherine A. Horner, Kristina Hetherington, Kirstin Spence, Adam Nelson, Thomas A. Edwards, Derek N. Woolfson, Richard B. Sessions, Andrew J. Wilson]
+    year: 2019
+    venue: ACS Chemical Biology
+    doi: 10.1021/acschembio.9b00560
+    url: https://doi.org/10.1021/acschembio.9b00560
+    publication_type: journal-article
+    verification: {metadata_source: crossref_and_pmc, metadata_verified: true, full_text_verified: true}
+  - publication_id: doi:10.1006/jmbi.1998.1843
+    title: Anatomy of hot spots in protein interfaces
+    authors: [Andrew A. Bogan, Kurt S. Thorn]
+    year: 1998
+    venue: Journal of Molecular Biology
+    doi: 10.1006/jmbi.1998.1843
+    url: https://doi.org/10.1006/jmbi.1998.1843
+    publication_type: journal-article
+    verification: {metadata_source: crossref_and_pubmed, metadata_verified: true, full_text_verified: false}
+  - publication_id: doi:10.1038/srep45259
+    title: Efficient affinity maturation of antibody variable domains requires co-selection of compensatory mutations to maintain thermodynamic stability
+    authors: [Mark C. Julian, Lijuan Li, Shekhar Garde, Rebecca Wilen, Peter M. Tessier]
+    year: 2017
+    venue: Scientific Reports
+    doi: 10.1038/srep45259
+    url: https://doi.org/10.1038/srep45259
+    publication_type: journal-article
+    verification: {metadata_source: crossref_and_pmc, metadata_verified: true, full_text_verified: true}
+  - publication_id: doi:10.1016/j.bej.2018.06.003
+    title: Understanding and overcoming trade-offs between antibody affinity, specificity, stability and solubility
+    authors: [Lilia A. Rabia, Alec A. Desai, Harkamal S. Jhajj, Peter M. Tessier]
+    year: 2018
+    venue: Biochemical Engineering Journal
+    doi: 10.1016/j.bej.2018.06.003
+    url: https://doi.org/10.1016/j.bej.2018.06.003
+    publication_type: review
+    verification: {metadata_source: crossref_and_pmc, metadata_verified: true, full_text_verified: true}
+  - publication_id: doi:10.1080/19420862.2020.1829335
+    title: "Beyond affinity: selection of antibody variants with optimal biophysical properties and reduced immunogenicity from mammalian display libraries"
+    authors: [Michael R. Dyson, Edward Masters, Deividas Pazeraitis, Rajika L. Perera, Johanna L. Syrjanen, Sachin Surade, Nels Thorsteinson, Kothai Parthiban, Philip C. Jones, Maheen Sattar, Gordana Wozniak-Knopp, Florian Rueker, Rachael Leah, John McCafferty]
+    year: 2020
+    venue: mAbs
+    doi: 10.1080/19420862.2020.1829335
+    url: https://doi.org/10.1080/19420862.2020.1829335
+    publication_type: journal-article
+    verification: {metadata_source: crossref_and_pmc, metadata_verified: true, full_text_verified: true}
+  - publication_id: doi:10.1084/jem.182.3.743
+    title: Random mutagenesis of two complementarity determining region amino acids yields an unexpectedly high frequency of antibodies with increased affinity for both cognate antigen and autoantigen
+    authors: [L. P. Casson, T. Manser]
+    year: 1995
+    venue: Journal of Experimental Medicine
+    doi: 10.1084/jem.182.3.743
+    url: https://doi.org/10.1084/jem.182.3.743
+    publication_type: journal-article
+    verification: {metadata_source: crossref_and_pmc, metadata_verified: true, full_text_verified: true}
+  - publication_id: doi:10.3389/fimmu.2017.00986
+    title: Facile affinity maturation of antibody variable domains using natural diversity mutagenesis
+    authors: [Kathryn E. Tiller, Ratul Chowdhury, Tong Li, Seth D. Ludwig, Sabyasachi Sen, Costas D. Maranas, Peter M. Tessier]
+    year: 2017
+    venue: Frontiers in Immunology
+    doi: 10.3389/fimmu.2017.00986
+    url: https://doi.org/10.3389/fimmu.2017.00986
+    publication_type: journal-article
+    verification: {metadata_source: crossref_and_pmc, metadata_verified: true, full_text_verified: true}
+  - publication_id: doi:10.1371/journal.pone.0129125
+    title: Effective optimization of antibody affinity by phage display integrated with high-throughput DNA synthesis and sequencing technologies
+    authors: [Dongmei Hu, Siyi Hu, Wen Wan, Man Xu, Ruikai Du, Wei Zhao, Xiaolian Gao, Jing Liu, Haiyan Liu, Jiong Hong]
+    year: 2015
+    venue: PLOS ONE
+    doi: 10.1371/journal.pone.0129125
+    url: https://doi.org/10.1371/journal.pone.0129125
+    publication_type: journal-article
+    verification: {metadata_source: crossref_and_pmc, metadata_verified: true, full_text_verified: true}
+  - publication_id: doi:10.1016/j.crmeth.2022.100254
+    title: Computational counterselection identifies nonspecific therapeutic biologic candidates
+    authors: [Sachit Dinesh Saksena, Ge Liu, Christine Banholzer, Geraldine Horny, Stefan Ewert, David K. Gifford]
+    year: 2022
+    venue: Cell Reports Methods
+    doi: 10.1016/j.crmeth.2022.100254
+    url: https://doi.org/10.1016/j.crmeth.2022.100254
+    publication_type: journal-article
+    verification: {metadata_source: crossref_and_pubmed, metadata_verified: true, full_text_verified: true}
+  - publication_id: doi:10.1007/978-1-4939-9853-1_17
+    title: Ligand engineering via yeast surface display and adherent cell panning
+    authors: [Lawrence A. Stern, Patrick S. Lown, Benjamin J. Hackel]
+    year: 2019
+    venue: Methods in Molecular Biology
+    doi: 10.1007/978-1-4939-9853-1_17
+    url: https://doi.org/10.1007/978-1-4939-9853-1_17
+    publication_type: protocol
+    verification: {metadata_source: crossref_and_pmc, metadata_verified: true, full_text_verified: true}
+  - publication_id: doi:10.1080/19420862.2022.2115200
+    title: Simultaneous affinity maturation and developability enhancement using natural liability-free CDRs
+    authors: [Andre A. R. Teixeira, Sara D'Angelo, M. Frank Erasmus, Camila Leal-Lopes, Fortunato Ferrara, Laura P. Spector, Leslie Naranjo, Esteban Molina, Tamara Max, Ashley DeAguero, Katherine Perea, Shaun Stewart, Rebecca A. Buonpane, Horacio G. Nastri, Andrew R. M. Bradbury]
+    year: 2022
+    venue: mAbs
+    doi: 10.1080/19420862.2022.2115200
+    url: https://doi.org/10.1080/19420862.2022.2115200
+    publication_type: journal-article
+    verification: {metadata_source: crossref_and_pmc, metadata_verified: true, full_text_verified: true}
+  - publication_id: doi:10.1038/s41551-023-01093-3
+    title: Rapid discovery of high-affinity antibodies via massively parallel sequencing, ribosome display and affinity screening
+    authors: [Benjamin T. Porebski, Matthew Balmforth, Gareth Browne, Aidan Riley, Kiarash Jamali, Maximillian J. L. J. Furst, Mirko Velic, Andrew Buchanan, Ralph Minter, Tristan Vaughan, Philipp Holliger]
+    year: 2023
+    venue: Nature Biomedical Engineering
+    doi: 10.1038/s41551-023-01093-3
+    url: https://doi.org/10.1038/s41551-023-01093-3
+    publication_type: journal-article
+    verification: {metadata_source: crossref_and_pubmed, metadata_verified: true, full_text_verified: false}
+  - publication_id: doi:10.1039/c9me00118b
+    title: Parallelized identification of on- and off-target protein interactions
+    authors: [Jiayi Dou, Inna Goreshnik, Cassie Bryan, David Baker, Eva-Maria Strauch]
+    year: 2020
+    venue: Molecular Systems Design and Engineering
+    doi: 10.1039/c9me00118b
+    url: https://doi.org/10.1039/c9me00118b
+    publication_type: journal-article
+    verification: {metadata_source: crossref_and_pmc, metadata_verified: true, full_text_verified: true}
