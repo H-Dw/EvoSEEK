@@ -17,6 +17,7 @@ def test_directed_evolution_corpus_flows_from_typed_rag_into_kg(tmp_path) -> Non
     experiment = load_experiment_config("configs/experiments/knowledge_agent.yaml")
     local_config = replace(
         experiment.knowledge.local_knowledge,
+        enabled=True,
         index_path=tmp_path / "directed-evolution.sqlite",
         corpus_index_path=tmp_path / "directed-evolution.sqlite",
         retrieval_overlay_path=tmp_path / "gb1-overlay.sqlite",
@@ -47,6 +48,35 @@ def test_directed_evolution_corpus_flows_from_typed_rag_into_kg(tmp_path) -> Non
             round_id=1,
             knowledge_types=("sequence_safeguards",),
         )
+        operational_queries = {
+            "assay_engineering": (
+                "How should positive and negative controls and Z-prime validate a screen?"
+            ),
+            "random_mutagenesis_operations": (
+                "How should an error-prone PCR pilot measure mutations per gene?"
+            ),
+            "saturation_mutagenesis_operations": (
+                "How should pooled sequencing quality control verify randomized codons?"
+            ),
+            "specificity_engineering": (
+                "How should positive and negative selection evolve substrate specificity?"
+            ),
+            "machine_learning_operations": (
+                "How should uncertainty and predicted fitness select an active-learning batch?"
+            ),
+            "round_decision_operations": (
+                "How should an uncertain substitution be retested in a combinatorial library?"
+            ),
+        }
+        operational_results = {
+            knowledge_type: knowledge.retrieve(
+                query=query,
+                intent="constraint",
+                round_id=1,
+                knowledge_types=(knowledge_type,),
+            )
+            for knowledge_type, query in operational_queries.items()
+        }
         registry = PluginRegistry("knowledge_adapter")
         registry.register(
             "local_rag",
@@ -77,12 +107,28 @@ def test_directed_evolution_corpus_flows_from_typed_rag_into_kg(tmp_path) -> Non
         "directed_evolution_strategy",
         "history_guided_combination",
         "evidence_applicability",
+        "assay_engineering",
+        "campaign_definition",
+        "continuous_evolution_operations",
+        "droplet_screening_operations",
+        "machine_learning_operations",
+        "random_mutagenesis_operations",
+        "recombination_operations",
+        "round_decision_operations",
+        "saturation_mutagenesis_operations",
+        "specificity_engineering",
+        "stability_evolvability_operations",
     }
     assert report.indexed_documents >= len(expected_types)
     assert report.quarantined_documents == 0
     assert expected_types.issubset(stats["knowledge_types"])
     assert result.chunks
     assert {item.knowledge_type for item in result.chunks} == {"sequence_safeguards"}
+    for knowledge_type, operational_result in operational_results.items():
+        assert operational_result.chunks
+        assert {item.knowledge_type for item in operational_result.chunks} == {
+            knowledge_type
+        }
     assert claims
     document_types = {
         item.properties["knowledge_type"]

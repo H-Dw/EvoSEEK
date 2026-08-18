@@ -1,5 +1,5 @@
 schema_version: scientific-publications:v1
-generated_from: Crossref REST metadata
+generated_from: Crossref REST metadata plus publisher and repository source verification
 verified_on: 2026-08-18
 publications:
   - publication_id: doi:10.1016/0022-2836(82)90515-0
@@ -145,7 +145,7 @@ publications:
     doi: 10.1039/C4CS00351A
     url: https://doi.org/10.1039/C4CS00351A
     publication_type: review
-    verification: {metadata_source: crossref, metadata_verified: true, full_text_verified: false}
+    verification: {metadata_source: crossref_and_pmc, metadata_verified: true, full_text_verified: true}
   - publication_id: doi:10.1002/pro.2897
     title: Epistasis in protein evolution
     authors: [Tyler N. Starr, Joseph W. Thornton]
@@ -173,3 +173,183 @@ publications:
     url: https://doi.org/10.1038/nrm2805
     publication_type: review
     verification: {metadata_source: crossref, metadata_verified: true, full_text_verified: false}
+  - publication_id: doi:10.1101/gr.2.1.28
+    title: Randomization of genes by PCR mutagenesis
+    authors: [R. C. Cadwell, G. F. Joyce]
+    year: 1992
+    venue: Genome Research
+    doi: 10.1101/gr.2.1.28
+    url: https://doi.org/10.1101/gr.2.1.28
+    publication_type: journal-article
+    verification: {metadata_source: crossref_and_pubmed, metadata_verified: true, full_text_verified: false}
+  - publication_id: doi:10.1007/978-1-4939-1053-3_1
+    title: Error-Prone PCR and Effective Generation of Gene Variant Libraries for Directed Evolution
+    authors: [Janine N. Copp, Paulina Hanson-Manful, David F. Ackerley, Wayne M. Patrick]
+    year: 2014
+    venue: Methods in Molecular Biology
+    doi: 10.1007/978-1-4939-1053-3_1
+    url: https://doi.org/10.1007/978-1-4939-1053-3_1
+    publication_type: book-chapter
+    verification: {metadata_source: crossref_and_pubmed, metadata_verified: true, full_text_verified: false}
+  - publication_id: doi:10.1186/s12859-016-0996-7
+    title: Mutanalyst, an online tool for assessing the mutational spectrum of epPCR libraries with poor sampling
+    authors: [Matteo Paolo Ferla]
+    year: 2016
+    venue: BMC Bioinformatics
+    doi: 10.1186/s12859-016-0996-7
+    url: https://doi.org/10.1186/s12859-016-0996-7
+    publication_type: journal-article
+    verification: {metadata_source: crossref_and_pmc, metadata_verified: true, full_text_verified: true}
+  - publication_id: doi:10.1038/srep10654
+    title: Economical analysis of saturation mutagenesis experiments
+    authors: [Carlos G. Acevedo-Rocha, Manfred T. Reetz, Yuval Nov]
+    year: 2015
+    venue: Scientific Reports
+    doi: 10.1038/srep10654
+    url: https://doi.org/10.1038/srep10654
+    publication_type: journal-article
+    verification: {metadata_source: crossref_and_pmc, metadata_verified: true, full_text_verified: true}
+  - publication_id: doi:10.1371/journal.pone.0068069
+    title: Fitness Loss and Library Size Determination in Saturation Mutagenesis
+    authors: [Yuval Nov]
+    year: 2013
+    venue: PLOS ONE
+    doi: 10.1371/journal.pone.0068069
+    url: https://doi.org/10.1371/journal.pone.0068069
+    publication_type: journal-article
+    verification: {metadata_source: crossref_and_pmc, metadata_verified: true, full_text_verified: true}
+  - publication_id: doi:10.1093/nar/gku1323
+    title: "SwiftLib: rapid degenerate-codon-library optimization through dynamic programming"
+    authors: [Timothy M. Jacobs, Hayretin Yumerefendi, Brian Kuhlman, Andrew Leaver-Fay]
+    year: 2014
+    venue: Nucleic Acids Research
+    doi: 10.1093/nar/gku1323
+    url: https://doi.org/10.1093/nar/gku1323
+    publication_type: journal-article
+    verification: {metadata_source: crossref_and_pmc, metadata_verified: true, full_text_verified: true}
+  - publication_id: doi:10.1371/journal.pbio.0040112
+    title: Structure-Guided Recombination Creates an Artificial Family of Cytochromes P450
+    authors: [Christopher R. Otey, Marco Landwehr, Jeffrey B. Endelman, Kaori Hiraga, Jesse D. Bloom, Frances H. Arnold]
+    year: 2006
+    venue: PLOS Biology
+    doi: 10.1371/journal.pbio.0040112
+    url: https://doi.org/10.1371/journal.pbio.0040112
+    publication_type: journal-article
+    verification: {metadata_source: crossref_and_pmc, metadata_verified: true, full_text_verified: true}
+  - publication_id: doi:10.1038/370389a0
+    title: Rapid evolution of a protein in vitro by DNA shuffling
+    authors: [Willem P. C. Stemmer]
+    year: 1994
+    venue: Nature
+    doi: 10.1038/370389a0
+    url: https://doi.org/10.1038/370389a0
+    publication_type: journal-article
+    verification: {metadata_source: crossref_and_publisher, metadata_verified: true, full_text_verified: false}
+  - publication_id: doi:10.1073/pnas.0510098103
+    title: Protein stability promotes evolvability
+    authors: [Jesse D. Bloom, Sy T. Labthavikul, Christopher R. Otey, Frances H. Arnold]
+    year: 2006
+    venue: Proceedings of the National Academy of Sciences
+    doi: 10.1073/pnas.0510098103
+    url: https://doi.org/10.1073/pnas.0510098103
+    publication_type: journal-article
+    verification: {metadata_source: crossref_and_pmc, metadata_verified: true, full_text_verified: true}
+  - publication_id: doi:10.1038/s41467-020-20650-x
+    title: Engineered dual selection for directed evolution of SpCas9 PAM specificity
+    authors: [Gregory W. Goldberg, Jeffrey M. Spencer, David O. Giganti, Brendan R. Camellato, Neta Agmon, David M. Ichikawa, Jef D. Boeke, Marcus B. Noyes]
+    year: 2021
+    venue: Nature Communications
+    doi: 10.1038/s41467-020-20650-x
+    url: https://doi.org/10.1038/s41467-020-20650-x
+    publication_type: journal-article
+    verification: {metadata_source: crossref_and_pmc, metadata_verified: true, full_text_verified: true}
+  - publication_id: doi:10.1073/pnas.1606927113
+    title: Ultrahigh-throughput-directed enzyme evolution by absorbance-activated droplet sorting
+    authors: [Fabrice Gielen, Raphaelle Hours, Stephane Emond, Martin Fischlechner, Ursula Schell, Florian Hollfelder]
+    year: 2016
+    venue: Proceedings of the National Academy of Sciences
+    doi: 10.1073/pnas.1606927113
+    url: https://doi.org/10.1073/pnas.1606927113
+    publication_type: journal-article
+    verification: {metadata_source: crossref_and_pmc, metadata_verified: true, full_text_verified: true}
+  - publication_id: doi:10.1038/s41467-018-03492-6
+    title: Efficient molecular evolution to generate enantioselective enzymes using a dual-channel microfluidic droplet screening platform
+    authors: [Fuqiang Ma, Meng Ting Chung, Yuan Yao, Robert Nidetz, Lap Man Lee, Allen P. Liu, Yan Feng, Katsuo Kurabayashi, Guang-Yu Yang]
+    year: 2018
+    venue: Nature Communications
+    doi: 10.1038/s41467-018-03492-6
+    url: https://doi.org/10.1038/s41467-018-03492-6
+    publication_type: journal-article
+    verification: {metadata_source: crossref_and_pmc, metadata_verified: true, full_text_verified: true}
+  - publication_id: doi:10.1073/pnas.1901979116
+    title: Machine learning-assisted directed protein evolution with combinatorial libraries
+    authors: [Zachary Wu, S. B. Jennifer Kan, Russell D. Lewis, Bruce J. Wittmann, Frances H. Arnold]
+    year: 2019
+    venue: Proceedings of the National Academy of Sciences
+    doi: 10.1073/pnas.1901979116
+    url: https://doi.org/10.1073/pnas.1901979116
+    publication_type: journal-article
+    verification: {metadata_source: crossref_and_pmc, metadata_verified: true, full_text_verified: true}
+  - publication_id: doi:10.1038/s41467-025-55987-8
+    title: Active learning-assisted directed evolution
+    authors: [Jason Yang, Ravi G. Lal, James C. Bowden, Raul Astudillo, Mikhail A. Hameedi, Sukhvinder Kaur, Matthew Hill, Yisong Yue, Frances H. Arnold]
+    year: 2025
+    venue: Nature Communications
+    doi: 10.1038/s41467-025-55987-8
+    url: https://doi.org/10.1038/s41467-025-55987-8
+    publication_type: journal-article
+    verification: {metadata_source: crossref_and_pmc, metadata_verified: true, full_text_verified: true}
+  - publication_id: doi:10.1177/108705719900400206
+    title: A Simple Statistical Parameter for Use in Evaluation and Validation of High Throughput Screening Assays
+    authors: [Ji-Hu Zhang, Thomas D. Y. Chung, Kevin R. Oldenburg]
+    year: 1999
+    venue: SLAS Discovery
+    doi: 10.1177/108705719900400206
+    url: https://doi.org/10.1177/108705719900400206
+    publication_type: journal-article
+    verification: {metadata_source: crossref_and_pubmed, metadata_verified: true, full_text_verified: false}
+  - publication_id: doi:10.3390/molecules26185599
+    title: Directed Evolution Methods for Enzyme Engineering
+    authors: [Saurabh Rajendra Nirantar]
+    year: 2021
+    venue: Molecules
+    doi: 10.3390/molecules26185599
+    url: https://doi.org/10.3390/molecules26185599
+    publication_type: review
+    verification: {metadata_source: crossref_and_pmc, metadata_verified: true, full_text_verified: true}
+  - publication_id: doi:10.1039/c2lc21035e
+    title: A completely in vitro ultrahigh-throughput droplet-based microfluidic screening system for protein engineering and directed evolution
+    authors: [Ali Fallah-Araghi, Jean-Christophe Baret, Michael Ryckelynck, Andrew D. Griffiths]
+    year: 2012
+    venue: Lab on a Chip
+    doi: 10.1039/c2lc21035e
+    url: https://doi.org/10.1039/c2lc21035e
+    publication_type: journal-article
+    verification: {metadata_source: crossref_and_publisher, metadata_verified: true, full_text_verified: false}
+  - publication_id: doi:10.1021/acs.chemrev.2c00910
+    title: Ultrahigh-Throughput Enzyme Engineering and Discovery in In Vitro Compartments
+    authors: [Maximilian Gantz, Stefanie Neun, Elliot J. Medcalf, Liisa D. van Vliet, Florian Hollfelder]
+    year: 2023
+    venue: Chemical Reviews
+    doi: 10.1021/acs.chemrev.2c00910
+    url: https://doi.org/10.1021/acs.chemrev.2c00910
+    publication_type: review
+    verification: {metadata_source: crossref_and_pmc, metadata_verified: true, full_text_verified: true}
+  - publication_id: doi:10.1038/nature09929
+    title: A system for the continuous directed evolution of biomolecules
+    authors: [Kevin M. Esvelt, Jacob C. Carlson, David R. Liu]
+    year: 2011
+    venue: Nature
+    doi: 10.1038/nature09929
+    url: https://doi.org/10.1038/nature09929
+    publication_type: journal-article
+    verification: {metadata_source: crossref_and_pmc, metadata_verified: true, full_text_verified: true}
+  - publication_id: doi:10.1038/nbt1286
+    title: Improving catalytic function by ProSAR-driven enzyme evolution
+    authors: [Richard J. Fox, S. Christopher Davis, Emily C. Mundorff, Lisa M. Newman, Vesna Gavrilovic, Steven K. Ma, Loleta M. Chung, Charlene Ching, Sarena Tam, Sheela Muley, John Grate, John Gruber, John C. Whitman, Roger A. Sheldon, Gjalt W. Huisman]
+    year: 2007
+    venue: Nature Biotechnology
+    doi: 10.1038/nbt1286
+    url: https://doi.org/10.1038/nbt1286
+    publication_type: journal-article
+    verification: {metadata_source: crossref_and_pubmed, metadata_verified: true, full_text_verified: true}
