@@ -8,11 +8,116 @@ import pandas as pd
 import pytest
 import yaml
 
+from fitness_agents.config import (
+    ActiveLearningConfig,
+    AgentQuotaAllocationConfig,
+    CalibratedPosteriorConfig,
+    GenerationConfig,
+    HybridBatchAcquisitionConfig,
+)
 from fitness_agents.data.canonical import CanonicalDataset
 from fitness_agents.data.specs import ComponentSpec, DatasetSpec
 from fitness_agents.data.splitting import SplitRequest, build_split
 from fitness_agents.data.splitting.writer import write_split
 from fitness_agents.loop import CampaignRunner, run_campaign
+
+
+@pytest.mark.integration
+def test_agent_quota_allocation_enters_main_loop(config_factory):
+    base = config_factory(
+        rounds=1,
+        budget_per_round=4,
+        candidate_limit=40,
+        run_label="agent-quota",
+    )
+    config = replace(
+        base,
+        generation=GenerationConfig(
+            selection_driver="agent_uq",
+            quota_allocation=AgentQuotaAllocationConfig(
+                enabled=True,
+                hypothesis_target=2,
+                evidence_prior=1,
+                coverage_exploration=1,
+                matched_control=0,
+            ),
+        ),
+    )
+
+    summary = CampaignRunner(config).run()
+    run_dir = Path(summary["run_dir"])
+    allocation = json.loads(
+        (run_dir / "round_01/agent_quota_acquisition.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert allocation["plugin"] == "agent_uq_quota_v1"
+    assert allocation["quotas"] == {
+        "hypothesis_target": 2,
+        "evidence_prior": 1,
+        "coverage_exploration": 1,
+        "matched_control": 0,
+    }
+    assert len(allocation["selected_ids"]) == 4
+    approved = json.loads(
+        (run_dir / "round_01/agent_quota_acquisition_approved.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert approved["matches_approved_batch"] is True
+
+
+@pytest.mark.integration
+def test_configured_active_learning_module_enters_main_loop(config_factory):
+    base = config_factory(
+        rounds=1,
+        budget_per_round=4,
+        candidate_limit=40,
+        run_label="active-learning",
+    )
+    config = replace(
+        base,
+        generation=GenerationConfig(selection_driver="active_learning"),
+        active_learning=ActiveLearningConfig(
+            enabled=True,
+            posterior=CalibratedPosteriorConfig(
+                predictor_models=(base.model,),
+                calibration_fraction=0.25,
+                min_calibration_size=4,
+                min_training_size=8,
+            ),
+            acquisition=HybridBatchAcquisitionConfig(
+                exploitation_fraction=0.50,
+                exploration_fraction=0.25,
+                knowledge_fraction=0.25,
+                ucb_beta=1.0,
+                diversity_lambda=0.10,
+            ),
+        ),
+    )
+
+    summary = CampaignRunner(config).run()
+    run_dir = Path(summary["run_dir"])
+    posterior = json.loads(
+        (run_dir / "round_01/active_learning_posterior.json").read_text(encoding="utf-8")
+    )
+    acquisition = json.loads(
+        (run_dir / "round_01/active_learning_acquisition.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    state = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
+
+    assert summary["selection_driver"] == "active_learning"
+    assert summary["fitness_predictors_used_for_generation"] is True
+    assert summary["active_learning_module"] == "lightweight_calibrated_hybrid"
+    assert posterior["calibration"]["status"] == "calibrated"
+    assert sum(acquisition["selection"]["quotas"].values()) == 4
+    assert len(acquisition["selection"]["selected_ids"]) == 4
+    assert {
+        item["selection_driver"] for item in state["selections"]
+    } == {"active_learning:lightweight_calibrated_hybrid"}
 
 
 @pytest.mark.integration

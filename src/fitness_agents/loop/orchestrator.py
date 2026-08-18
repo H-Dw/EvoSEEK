@@ -10,6 +10,7 @@ from typing import Any
 import numpy as np
 
 from fitness_agents.acquisition import create_policy
+from fitness_agents.active_learning import create_active_learning_module
 from fitness_agents.agents.client_registry import create_role_client_bundle
 from fitness_agents.agents.critic import CriticAgent, OpenAICriticClient, RuleBasedCriticClient
 from fitness_agents.agents.rethink import create_rethink_client
@@ -40,6 +41,7 @@ from fitness_agents.kg_interaction import (
     CompareVariantsOperator,
     EvidenceProvenanceOperator,
     ExplainVariantOperator,
+    FeatureBundleOperator,
     FeatureEvidenceOperator,
     HypothesisContextOperator,
     InteractionAblationConfig,
@@ -47,13 +49,19 @@ from fitness_agents.kg_interaction import (
     KGQueryContext,
     KGQueryPlan,
     KGQueryStep,
+    KGTruncationAuditOperator,
     LocalKnowledgeQueryOperator,
     QueryIntent,
     StructuredClaimQueryOperator,
+    runtime_truncation_audit_payload,
 )
 from fitness_agents.knowledge import KnowledgeEngine
 from fitness_agents.models import create_predictor
-from fitness_agents.mutation import AgentUncertaintySelector, create_candidate_generator
+from fitness_agents.mutation import (
+    AgentQuotaBatchAcquisition,
+    AgentUncertaintySelector,
+    create_candidate_generator,
+)
 from fitness_agents.plugin_registry import PluginRegistry
 from fitness_agents.protein_features import ProteinTaskContext
 from fitness_agents.reporting import write_campaign_outputs
@@ -210,6 +218,16 @@ class CampaignRunner:
         self.approval_gateway = ApprovalGateway()
         self.backend = ApprovalEnforcingBackend(raw_backend, self.approval_gateway)
         self.predictor_factory = predictor_factory
+        self.active_learning = (
+            create_active_learning_module(
+                config.active_learning,
+                fallback_model=config.model,
+                predictor_factory=predictor_factory,
+                seed=config.seed,
+            )
+            if config.active_learning.enabled
+            else None
+        )
         self.task_context = ProteinTaskContext.from_task(config.task)
         self.knowledge = KnowledgeEngine(
             config.knowledge,
@@ -275,6 +293,11 @@ class CampaignRunner:
                 FeatureEvidenceOperator(
                     "query_structure_environment", "structure", graph_tool
                 ),
+            )
+            operators.register("query_feature_bundle", FeatureBundleOperator(graph_tool))
+            operators.register(
+                "query_kg_truncation_audit",
+                KGTruncationAuditOperator(self.knowledge.structured_sink),
             )
             operators.register(
                 "query_assay_association",
@@ -343,6 +366,11 @@ class CampaignRunner:
             config.generation,
             position_to_index=self.task_context.position_to_variant_index,
         )
+        self.agent_quota_acquisition = (
+            AgentQuotaBatchAcquisition(config.generation.quota_allocation)
+            if config.generation.quota_allocation.enabled
+            else None
+        )
         knowledge_weight = config.knowledge.soft_weight if config.knowledge_enabled else 0.0
         self.policy = create_policy(
             config.acquisition,
@@ -361,6 +389,11 @@ class CampaignRunner:
         if self.config.mode == "random":
             return "random"
         return "agent_uq"
+
+    def _fitness_predictors_used_for_generation(self, selection_driver: str) -> bool:
+        if selection_driver == "agent_uq":
+            return self.config.generation.use_fitness_predictors
+        return selection_driver in {"active_learning", "predictor"}
 
     def _create_and_fit_predictor(self, model_config: Any, observed_variants: list[Any], seed: int):
         predictor = self.predictor_factory(model_config, seed=seed)
@@ -388,6 +421,64 @@ class CampaignRunner:
                 {"limit": self.config.kg_interaction.max_rows},
             )
         ]
+        channel_operator = {
+            "physchem": "query_physchem_delta",
+            "conservation": "query_evolutionary_profile",
+            "structure": "query_structure_environment",
+        }
+        feature_variants = representative_ids[
+            : self.config.kg_interaction.feature_variant_limit
+        ]
+        if self.config.kg_interaction.feature_tool_strategy in {
+            "independent",
+            "independent_and_joint",
+        }:
+            for variant_id in feature_variants:
+                for channel in self.config.kg_interaction.feature_channels:
+                    steps.append(
+                        KGQueryStep(
+                            f"feature_{channel}_{variant_id}",
+                            channel_operator[channel],
+                            QueryIntent.EXPLAIN,
+                            {"variant_id": variant_id},
+                            ("context",),
+                            f"Retrieve the {channel} feature channel independently.",
+                        )
+                    )
+        if self.config.kg_interaction.feature_tool_strategy in {
+            "joint",
+            "independent_and_joint",
+        }:
+            for variant_id in feature_variants:
+                steps.append(
+                    KGQueryStep(
+                        f"feature_bundle_{variant_id}",
+                        "query_feature_bundle",
+                        QueryIntent.EXPLAIN,
+                        {
+                            "variant_id": variant_id,
+                            "channels": list(self.config.kg_interaction.feature_channels),
+                        },
+                        ("context",),
+                        "Retrieve the configured channels as one joint evidence bundle.",
+                    )
+                )
+        if self.config.kg_interaction.truncation_audit_enabled:
+            steps.append(
+                KGQueryStep(
+                    "kg_truncation_audit",
+                    "query_kg_truncation_audit",
+                    QueryIntent.UNCERTAINTY,
+                    {
+                        "items": list(self.config.kg_interaction.truncation_audit_items),
+                        "sample_rows": (
+                            self.config.kg_interaction.truncation_audit_sample_rows
+                        ),
+                    },
+                    ("context",),
+                    "Count keyword matches before max_rows and report missing bounded rows.",
+                )
+            )
         if (
             self.knowledge.local_knowledge is not None
             and self._scientist_local_context_allowed
@@ -454,6 +545,15 @@ class CampaignRunner:
             f"round_{round_id:02d}/kg_interaction.json",
             interaction_result,
         )
+        truncation_audit = runtime_truncation_audit_payload(
+            interaction_result,
+            self.config.kg_interaction.truncation_audit_items,
+        )
+        if truncation_audit is not None:
+            self.writer.write_json(
+                f"round_{round_id:02d}/kg_truncation_audit.json",
+                truncation_audit,
+            )
         self.writer.event(
             "kg_interaction_completed",
             {
@@ -463,6 +563,16 @@ class CampaignRunner:
                 "executed_steps": interaction_result.executed_steps,
                 "skipped_steps": interaction_result.skipped_steps,
                 "stop_reason": interaction_result.stop_reason,
+                "feature_tool_strategy": self.config.kg_interaction.feature_tool_strategy,
+                "feature_channels": self.config.kg_interaction.feature_channels,
+                "kg_truncation_audit": (
+                    {
+                        "any_truncated": truncation_audit.get("any_truncated"),
+                        "missing_items": truncation_audit.get("missing_items"),
+                    }
+                    if truncation_audit is not None
+                    else None
+                ),
             },
         )
 
@@ -610,6 +720,46 @@ class CampaignRunner:
                 "hypothesis_recency_decay": (
                     self.config.generation.hypothesis_recency_decay
                 ),
+                "quota_allocation": {
+                    "enabled": self.config.generation.quota_allocation.enabled,
+                    "plugin": (
+                        self.agent_quota_acquisition.name
+                        if self.agent_quota_acquisition is not None
+                        else None
+                    ),
+                    "quotas": self.config.generation.quota_allocation.quotas(),
+                    "strong_hypothesis_threshold": (
+                        self.config.generation.quota_allocation.strong_hypothesis_threshold
+                    ),
+                },
+            },
+            "active_learning": {
+                "enabled": self.config.active_learning.enabled,
+                "module": self.config.active_learning.module,
+                "posterior_plugin": self.config.active_learning.posterior.plugin,
+                "posterior_models": [
+                    item.name
+                    for item in (
+                        self.config.active_learning.posterior.predictor_models
+                        or (self.config.model,)
+                    )
+                ],
+                "calibration_fraction": (
+                    self.config.active_learning.posterior.calibration_fraction
+                ),
+                "min_calibration_size": (
+                    self.config.active_learning.posterior.min_calibration_size
+                ),
+                "acquisition_plugin": self.config.active_learning.acquisition.plugin,
+                "fractions": {
+                    "exploitation": (
+                        self.config.active_learning.acquisition.exploitation_fraction
+                    ),
+                    "exploration": (
+                        self.config.active_learning.acquisition.exploration_fraction
+                    ),
+                    "knowledge": self.config.active_learning.acquisition.knowledge_fraction,
+                },
             },
             "validation": {
                 "enabled": self.config.validation.enabled,
@@ -623,7 +773,20 @@ class CampaignRunner:
             "kg_interaction": {
                 "enabled": self.kg_interaction is not None,
                 "enabled_operators": list(self.config.kg_interaction.enabled_operators),
+                "feature_tool_strategy": self.config.kg_interaction.feature_tool_strategy,
+                "feature_channels": list(self.config.kg_interaction.feature_channels),
+                "feature_variant_limit": self.config.kg_interaction.feature_variant_limit,
+                "truncation_audit_enabled": (
+                    self.config.kg_interaction.truncation_audit_enabled
+                ),
+                "truncation_audit_items": list(
+                    self.config.kg_interaction.truncation_audit_items
+                ),
+                "truncation_audit_sample_rows": (
+                    self.config.kg_interaction.truncation_audit_sample_rows
+                ),
                 "max_tool_calls": self.config.kg_interaction.max_tool_calls,
+                "max_rows": self.config.kg_interaction.max_rows,
                 "stop_when_sufficient": self.config.kg_interaction.stop_when_sufficient,
             },
             "evaluation": {
@@ -1009,6 +1172,9 @@ class CampaignRunner:
             )
             design_scores: list[DesignScore] = []
             generation_prediction_sets: list[list[Prediction]] = []
+            active_score_result = None
+            active_knowledge_scores: dict[str, float] = {}
+            agent_quota_selection = None
 
             if selection_driver == "agent_uq":
                 if self.config.generation.use_fitness_predictors:
@@ -1047,6 +1213,91 @@ class CampaignRunner:
                 working_by_id = {
                     item.variant_id: item for item in design_predictions
                 }
+            elif selection_driver == "active_learning":
+                if self.active_learning is None:
+                    raise AssertionError("Active-learning selection has no configured module")
+                validation_prior_scores = self.knowledge.validation_prior_scores(
+                    eligible,
+                    round_id=round_id,
+                )
+                active_knowledge_scores = {
+                    item.variant_id: knowledge_scores.get(item.variant_id, 0.0)
+                    + self.config.active_learning.acquisition.validation_prior_weight
+                    * validation_prior_scores.get(item.variant_id, 0.0)
+                    for item in eligible
+                }
+                self._progress(
+                    "active_learning_posterior_fit_started",
+                    f"round {round_id}/{self.config.rounds} fitting visible-label posterior",
+                    phase=CampaignPhase.MODEL_FIT,
+                    n_train=len(observed_variants),
+                    n_candidates=len(eligible),
+                    module=self.config.active_learning.module,
+                )
+                posterior_result = self.active_learning.fit_predict(
+                    observed_variants,
+                    self.state.observed,
+                    eligible,
+                )
+                selection_posterior = posterior_result
+                if self.config.score_shuffle:
+                    selection_posterior = replace(
+                        posterior_result,
+                        predictions=tuple(
+                            _shuffle_prediction_scores(
+                                posterior_result.predictions,
+                                self.rng,
+                            )
+                        ),
+                    )
+                active_score_result = self.active_learning.score(
+                    selection_posterior,
+                    active_knowledge_scores,
+                )
+                working_predictions = list(selection_posterior.predictions)
+                all_scores = active_score_result.composite_by_id()
+                active_scores_by_id = active_score_result.by_id()
+                working_by_id = {
+                    item.variant_id: item for item in working_predictions
+                }
+                design_scores = [
+                    DesignScore(
+                        item.variant_id,
+                        all_scores[item.variant_id],
+                        item.fitness_std,
+                        0.0,
+                        knowledge_scores.get(item.variant_id, 0.0),
+                        validation_prior_scores.get(item.variant_id, 0.0),
+                        item.fitness_mean,
+                        f"active_learning:{self.config.active_learning.module}",
+                        (
+                            f"Calibrated posterior {item.model_version}; hybrid components: "
+                            f"exploitation={active_scores_by_id[item.variant_id].exploitation:.3f}; "
+                            f"exploration={active_scores_by_id[item.variant_id].exploration:.3f}; "
+                            f"knowledge={active_scores_by_id[item.variant_id].knowledge:.3f}; "
+                            f"ood={item.ood_score:.3f}."
+                        ),
+                    )
+                    for item in working_predictions
+                ]
+                self.writer.write_json(
+                    f"round_{round_id:02d}/active_learning_posterior.json",
+                    {
+                        "module": self.config.active_learning.module,
+                        "calibration": posterior_result.calibration,
+                        "predictions": posterior_result.predictions,
+                    },
+                )
+                self._progress(
+                    "active_learning_posterior_ready",
+                    f"round {round_id}/{self.config.rounds} calibrated posterior ready",
+                    phase=CampaignPhase.PREDICTING,
+                    n_candidates=len(working_predictions),
+                    calibration_status=posterior_result.calibration.status,
+                    calibration_observations=(
+                        posterior_result.calibration.calibration_observations
+                    ),
+                )
             elif selection_driver == "random":
                 design_scores = [
                     DesignScore(
@@ -1114,13 +1365,75 @@ class CampaignRunner:
                 phase=CampaignPhase.DESIGN_SCORED,
                 n_candidates=len(eligible),
             )
-            selected_ids = self.policy.select(
-                eligible,
-                [working_by_id[item.variant_id] for item in eligible],
-                all_scores,
-                expected_batch_size,
-                self.config.diversity_lambda,
-            )
+            if selection_driver == "active_learning":
+                if self.active_learning is None or active_score_result is None:
+                    raise AssertionError("Active-learning acquisition is unavailable")
+                active_selection = self.active_learning.select(
+                    eligible,
+                    active_score_result,
+                    expected_batch_size,
+                    knowledge_scores=active_knowledge_scores,
+                )
+                selected_ids = list(active_selection.selected_ids)
+                self.writer.write_json(
+                    f"round_{round_id:02d}/active_learning_acquisition.json",
+                    {
+                        "module": self.config.active_learning.module,
+                        "candidate_scores": active_score_result.scores,
+                        "selection": active_selection,
+                    },
+                )
+                self.writer.event(
+                    "active_learning_batch_selected",
+                    {
+                        "round_id": round_id,
+                        "module": self.config.active_learning.module,
+                        "selected_ids": selected_ids,
+                        "quotas": active_selection.quotas,
+                        "selected_by_arm": active_selection.selected_by_arm,
+                    },
+                )
+            elif selection_driver == "agent_uq" and self.agent_quota_acquisition is not None:
+                agent_quota_selection = self.agent_quota_acquisition.select(
+                    eligible,
+                    [
+                        replace(
+                            item,
+                            utility=all_scores[item.variant_id],
+                        )
+                        for item in design_scores
+                    ],
+                    expected_batch_size,
+                    diversity_lambda=self.config.diversity_lambda,
+                )
+                selected_ids = list(agent_quota_selection.selected_ids)
+                self.writer.write_json(
+                    f"round_{round_id:02d}/agent_quota_acquisition.json",
+                    agent_quota_selection,
+                )
+                self.writer.event(
+                    "agent_quota_batch_selected",
+                    {
+                        "round_id": round_id,
+                        "plugin": agent_quota_selection.plugin,
+                        "selected_ids": selected_ids,
+                        "quotas": agent_quota_selection.quotas,
+                        "selected_by_arm": agent_quota_selection.selected_by_arm,
+                        "matched_control_pairs": (
+                            agent_quota_selection.matched_control_pairs
+                        ),
+                        "shortfalls": agent_quota_selection.shortfalls,
+                        "fallback_ids": agent_quota_selection.fallback_ids,
+                    },
+                )
+            else:
+                selected_ids = self.policy.select(
+                    eligible,
+                    [working_by_id[item.variant_id] for item in eligible],
+                    all_scores,
+                    expected_batch_size,
+                    self.config.diversity_lambda,
+                )
             if len(selected_ids) != min(self.config.budget_per_round, len(eligible)):
                 raise RuntimeError("Acquisition returned an incomplete batch")
             self.writer.event(
@@ -1130,9 +1443,7 @@ class CampaignRunner:
                     "selection_driver": selection_driver,
                     "candidate_ids": selected_ids,
                     "fitness_predictors_used_for_generation": (
-                        self.config.generation.use_fitness_predictors
-                        if selection_driver == "agent_uq"
-                        else selection_driver == "predictor"
+                        self._fitness_predictors_used_for_generation(selection_driver)
                     ),
                 },
             )
@@ -1252,6 +1563,9 @@ class CampaignRunner:
                 "working_by_id": working_by_id,
                 "all_scores": all_scores,
                 "expected_batch_size": expected_batch_size,
+                "active_score_result": active_score_result,
+                "active_knowledge_scores": active_knowledge_scores,
+                "agent_quota_selection": agent_quota_selection,
                 "predictor": validation_predictors[0] if validation_predictors else None,
                 "prediction_by_id": prediction_by_id,
                 "round_id": round_id,
@@ -1267,6 +1581,7 @@ class CampaignRunner:
                 parent_draft_batch_id: str | None,
                 exclusions: set[str],
                 _context: dict[str, Any] = draft_context,
+                _design_score_by_id: dict[str, DesignScore] = design_score_by_id,
             ):
                 if review_attempt == 0:
                     candidate_ids = list(_context["initial_selected_ids"])
@@ -1276,16 +1591,50 @@ class CampaignRunner:
                         for item in _context["eligible"]
                         if item.variant_id not in exclusions
                     ]
-                    candidate_ids = self.policy.select(
-                        revised_eligible,
-                        [
-                            _context["working_by_id"][item.variant_id]
-                            for item in revised_eligible
-                        ],
-                        _context["all_scores"],
-                        min(_context["expected_batch_size"], len(revised_eligible)),
-                        self.config.diversity_lambda,
-                    )
+                    if selection_driver == "active_learning":
+                        if (
+                            self.active_learning is None
+                            or _context["active_score_result"] is None
+                        ):
+                            raise AssertionError(
+                                "Active-learning acquisition is unavailable during revision"
+                            )
+                        revised_selection = self.active_learning.select(
+                            revised_eligible,
+                            _context["active_score_result"],
+                            min(_context["expected_batch_size"], len(revised_eligible)),
+                            knowledge_scores=_context["active_knowledge_scores"],
+                        )
+                        candidate_ids = list(revised_selection.selected_ids)
+                    elif (
+                        selection_driver == "agent_uq"
+                        and self.agent_quota_acquisition is not None
+                    ):
+                        revised_selection = self.agent_quota_acquisition.select(
+                            revised_eligible,
+                            [
+                                replace(
+                                    _design_score_by_id[item.variant_id],
+                                    utility=_context["all_scores"][item.variant_id],
+                                )
+                                for item in revised_eligible
+                            ],
+                            min(_context["expected_batch_size"], len(revised_eligible)),
+                            diversity_lambda=self.config.diversity_lambda,
+                        )
+                        _context["agent_quota_selection"] = revised_selection
+                        candidate_ids = list(revised_selection.selected_ids)
+                    else:
+                        candidate_ids = self.policy.select(
+                            revised_eligible,
+                            [
+                                _context["working_by_id"][item.variant_id]
+                                for item in revised_eligible
+                            ],
+                            _context["all_scores"],
+                            min(_context["expected_batch_size"], len(revised_eligible)),
+                            self.config.diversity_lambda,
+                        )
                 candidate_variants = [public_by_id[item] for item in candidate_ids]
                 missing_predictions = [
                     item
@@ -1568,6 +1917,19 @@ class CampaignRunner:
 
             approved_batch = review_result.approved_batch
             selected_ids = list(approved_batch.candidate_ids)
+            final_agent_quota_selection = draft_context.get("agent_quota_selection")
+            if final_agent_quota_selection is not None:
+                self.writer.write_json(
+                    f"round_{round_id:02d}/agent_quota_acquisition_approved.json",
+                    {
+                        "selection": final_agent_quota_selection,
+                        "approved_candidate_ids": selected_ids,
+                        "matches_approved_batch": (
+                            tuple(selected_ids)
+                            == tuple(final_agent_quota_selection.selected_ids)
+                        ),
+                    },
+                )
             self.state.approved_batch_ids.append(approved_batch.draft_batch_id)
             self._progress(
                 None,
@@ -1984,9 +2346,12 @@ class CampaignRunner:
             "validation_records": len(self.validation_records),
             "selection_driver": selection_driver,
             "fitness_predictors_used_for_generation": (
-                self.config.generation.use_fitness_predictors
-                if selection_driver == "agent_uq"
-                else selection_driver == "predictor"
+                self._fitness_predictors_used_for_generation(selection_driver)
+            ),
+            "active_learning_module": (
+                self.config.active_learning.module
+                if selection_driver == "active_learning"
+                else None
             ),
             "rounds_aborted": rounds_aborted,
             "finalized": True,

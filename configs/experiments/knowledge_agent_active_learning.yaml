@@ -2,13 +2,14 @@ mode: knowledge_agent
 seed: 11
 rounds: 3
 budget_per_round: 16
-# Score/ESM-2 only this many remaining variants per round. 0 = full remaining oracle pool.
-candidate_limit: 64
+candidate_limit: 256
+# Legacy policy fields remain available to baseline drivers. The active-learning driver below
+# delegates batch selection to active_learning.acquisition.
 acquisition: greedy
 ucb_beta: 1.5
 diversity_lambda: 0.10
-task_config: configs/task/gb1_binding_al96.yaml
-model_config: configs/model/kermut.yaml
+task_config: configs/task/gb1_binding.yaml
+model_config: configs/model/baseline.yaml
 knowledge_config: configs/knowledge/gb1.yaml
 output_root: artifacts/runs
 llm_config: configs/llm/deepseek.yaml
@@ -16,10 +17,12 @@ critic_config: configs/critic/deepseek_remote.yaml
 knowledge_enabled: true
 score_shuffle: false
 evidence_deletion: false
-run_label: GB1-AL48-5CV
-condition: knowledge_agent
+condition: knowledge_agent_active_learning
+
 generation:
-  selection_driver: agent_uq
+  selection_driver: active_learning
+  # Agent-UQ predictor mixing remains off; the structured active-learning module owns its
+  # posterior and keeps it separate from hypothesis/coverage utility.
   use_fitness_predictors: false
   predictor_models: []
   hypothesis_weight: 1.0
@@ -29,13 +32,32 @@ generation:
   predictor_weight: 0.0
   gp_length_scale: 1.0
   hypothesis_recency_decay: 0.85
-  quota_allocation:
-    enabled: true
-    hypothesis_target: 8
-    evidence_prior: 3
-    coverage_exploration: 3
-    matched_control: 2
-    strong_hypothesis_threshold: 0.75
+
+active_learning:
+  enabled: true
+  module: lightweight_calibrated_hybrid
+  posterior:
+    plugin: visible_holdout_ensemble
+    predictor_models:
+      - configs/model/baseline.yaml
+    calibration_fraction: 0.20
+    min_calibration_size: 8
+    min_training_size: 8
+    conformal_alpha: 0.10
+    min_std: 1.0e-6
+    variance_scale_bounds: [0.25, 4.0]
+    refit_full: true
+  acquisition:
+    plugin: hybrid_batch
+    exploitation_fraction: 0.50
+    exploration_fraction: 0.25
+    knowledge_fraction: 0.25
+    ucb_beta: 1.0
+    diversity_lambda: 0.10
+    ood_penalty: 0.25
+    knowledge_fitness_weight: 0.25
+    validation_prior_weight: 1.0
+
 validation:
   enabled: true
   predictor_models: []
@@ -43,13 +65,16 @@ validation:
   dry_weight_cap: 0.20
   recency_decay: 0.85
   rethink_enabled: true
+
 evaluation:
   metrics: [spearman, pearson, mse, rmse, ndcg, top_k_hit, top_k_recall,
     regret_at_k, interval_90_coverage, gaussian_nll]
   top_k: 10
+
 output:
   artifacts: [json, csv, markdown, svg, reasoning]
   top_k: 16
+
 kg_interaction:
   enabled: true
   enabled_operators: [hypothesis_context, explain_variant, compare_variants,

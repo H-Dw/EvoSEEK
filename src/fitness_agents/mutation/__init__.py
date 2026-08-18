@@ -19,9 +19,12 @@ from .notation import (
     format_canonical,
     parse_mutation_notation,
 )
+from .quota_acquisition import AgentQuotaBatchAcquisition, AgentQuotaSelection
 from .uncertainty import AgentUncertaintySelector
 
 __all__ = [
+    "AgentQuotaBatchAcquisition",
+    "AgentQuotaSelection",
     "AgentUncertaintySelector",
     "EnumeratingCandidateGenerator",
     "EpistasisResult",
