@@ -1,0 +1,57 @@
+# Remote-LLM companion to knowledge_agent_features.example.yaml.
+# Requires DEEPSEEK_API_KEY; feature/KG/tool settings intentionally match the offline example.
+mode: knowledge_agent
+seed: 11
+rounds: 1
+budget_per_round: 4
+candidate_limit: 16
+acquisition: greedy
+task_config: configs/task/gb1_binding_features.example.yaml
+model_config: configs/model/baseline.yaml
+knowledge_config: configs/knowledge/gb1_features.example.yaml
+output_root: artifacts/runs
+llm_config: configs/llm/deepseek.yaml
+critic_config: configs/critic/deepseek_remote.yaml
+knowledge_enabled: true
+score_shuffle: false
+evidence_deletion: false
+condition: knowledge_agent_feature_tools_deepseek_example
+generation:
+  selection_driver: agent_uq
+  use_fitness_predictors: false
+  predictor_models: []
+validation:
+  enabled: true
+  predictor_models: []
+  rethink_enabled: true
+kg_interaction:
+  enabled: true
+  enabled_operators:
+    - hypothesis_context
+    - explain_variant
+    - compare_variants
+    - query_physchem_delta
+    - query_evolutionary_profile
+    - query_structure_environment
+    - query_feature_bundle
+    - query_kg_truncation_audit
+    - query_assay_association
+    - query_evidence_provenance
+  feature_tool_strategy: independent_and_joint
+  feature_channels: [physchem, conservation, structure]
+  feature_variant_limit: 1
+  truncation_audit_enabled: true
+  truncation_audit_items:
+    - physchem
+    - conservation
+    - structure
+    - HAS_PHYSCHEM_DELTA
+    - HAS_EVOLUTIONARY_CONTEXT
+    - OCCURS_IN_ENVIRONMENT
+    - MutationEffectEstimate
+    - HAS_EPISTASIS_ESTIMATE
+  truncation_audit_sample_rows: 3
+  max_tool_calls: 8
+  max_rows: 12
+  use_counterevidence: true
+  stop_when_sufficient: false

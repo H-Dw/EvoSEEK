@@ -1,0 +1,140 @@
+# Superset knowledge configuration. scripts/run_reasoning_routes.py activates only
+# the RAG and feature channels declared by each route in the matrix.
+physchem: true
+conservation: true
+structure: true
+kg: true
+legacy_mode: false
+fusion_mode: independent_features
+parameter_set_id: gb1-reasoning-routes:v1
+evidence_heartbeat_interval: 256
+local_knowledge:
+  enabled: true
+  index_path: artifacts/local_knowledge/gb1-reasoning-routes.sqlite
+  allow_remote_context: true
+  roots:
+    - path: resources/local_knowledge/directed_evolution
+      include: ["claims/**/*.md"]
+      exclude: ["**/~$*", "**/.git/**", "**/artifacts/**"]
+    - path: resources/local_knowledge/binding
+      include: ["claims/**/*.md"]
+      exclude: ["**/~$*", "**/.git/**", "**/artifacts/**"]
+  ingestion:
+    parser: auto
+    chunk_tokens: 480
+    chunk_overlap: 64
+    max_file_mb: 50
+    follow_symlinks: false
+    extract_archives: false
+  retrieval:
+    mode: lexical
+    lexical_backend: sqlite_fts5
+    dense_enabled: false
+    allow_model_download: false
+    fusion: rrf
+    top_k: 8
+    token_budget: 5000
+  kg_update:
+    enabled: true
+    materialization: retrieved_only
+    source_group: directed_evolution_library
+    max_claims_per_round: 32
+    contributes_to_selection: false
+  leakage_guard:
+    enabled: true
+    mode: generalize_and_filter
+    derive_protected_terms_from_task: true
+    protected_aliases: []
+    protected_accessions: []
+    strict_aliases_required: true
+    quarantine_target_documents: true
+    block_target_entities: true
+providers:
+  physchem:
+    kind: aaindex_delta
+    resource_path: configs/resources/aaindex_minimal.yaml
+    contributes_to_selection: false
+    calibration: none
+    missing_policy: fail
+  conservation:
+    kind: msa_profile
+    a3m_path: examples/gb1/msa/0/non_pairing.a3m
+    contributes_to_selection: false
+    calibration: none
+    missing_policy: fail
+    options:
+      identity_threshold: 0.8
+      pseudocount_mode: neff_scaled_uniform
+      pseudocount_weight: 0.5
+      minimum_single_site_neff: 10.0
+      minimum_site_effective_count: 5.0
+      minimum_sequence_coverage: 0.7
+      maximum_sequence_gap_fraction: 0.3
+      single_site_aggregation: sum_log_odds
+      pairwise_enabled: false
+      pairwise_mode: marginal_corrected_log_odds
+      pairwise_minimum_neff_per_length: 1.0
+      estimated_parameters:
+        - pseudocount_weight
+        - minimum_single_site_neff
+        - minimum_site_effective_count
+        - minimum_sequence_coverage
+        - maximum_sequence_gap_fraction
+        - pairwise_minimum_neff_per_length
+  structure:
+    kind: static_structure
+    contributes_to_selection: false
+    calibration: none
+    missing_policy: fail
+    options:
+      resource_id: rcsb:1PGB
+      contact_cutoff_angstrom: 5.0
+      interface_cutoff_angstrom: 5.0
+      hbond_cutoff_angstrom: 3.5
+      salt_bridge_cutoff_angstrom: 4.0
+      sasa_probe_radius_angstrom: 1.4
+      sasa_sphere_points: 96
+      dense_contact_count: 12
+      clash_distance_fraction: 0.75
+      disulfide_sg_cutoff_angstrom: 2.3
+  kg:
+    kind: observation_association
+    contributes_to_selection: true
+    calibration: none
+parameters:
+  kg.shrinkage_pseudocount:
+    value: 3.0
+    category: scientific
+    status: expert_prior
+    learnable: false
+    bounds: [0.1, 100.0]
+    transform: log
+    source: project_prior_pending_calibration
+    version: gb1-reasoning-routes:v1
+  kg.confidence_base:
+    value: 0.25
+    category: policy
+    status: expert_prior
+    learnable: false
+    bounds: [0.0, 1.0]
+    transform: logit
+    source: project_prior_pending_calibration
+    version: gb1-reasoning-routes:v1
+  kg.support_gain:
+    value: 0.03
+    category: policy
+    status: expert_prior
+    learnable: false
+    bounds: [0.0001, 0.5]
+    transform: log
+    source: project_prior_pending_calibration
+    version: gb1-reasoning-routes:v1
+  kg.confidence_cap:
+    value: 0.85
+    category: policy
+    status: expert_prior
+    learnable: false
+    bounds: [0.01, 0.999]
+    transform: logit
+    source: project_prior_pending_calibration
+    version: gb1-reasoning-routes:v1

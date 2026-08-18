@@ -1,0 +1,46 @@
+schema_version: reasoning-route-matrix:v1
+base_config: configs/experiments/gb1_reasoning_routes_base.yaml
+folds: [0, 1, 2]
+seed: 11
+max_parallel: 2
+routes:
+  rag_kg_none:
+    rag: true
+    channels: []
+    active_learning: false
+    test_goal: Verify RAG retrieval and KG-to-LLM context without protein feature channels.
+  rag_kg_all:
+    rag: true
+    channels: [physchem, conservation, structure]
+    active_learning: false
+    test_goal: Verify all three feature tools, KG injection, RAG retrieval, and LLM context.
+  rag_kg_physchem:
+    rag: true
+    channels: [physchem]
+    active_learning: false
+    test_goal: Isolate physicochemical evidence while conservation and structure stay absent.
+  rag_kg_physchem_structure:
+    rag: true
+    channels: [physchem, structure]
+    active_learning: false
+    test_goal: Verify joint physicochemical and coordinate-derived evidence without MSA evidence.
+  rag_kg_physchem_conservation:
+    rag: true
+    channels: [physchem, conservation]
+    active_learning: false
+    test_goal: Verify physicochemical and MSA evidence without structure evidence.
+  kg_all:
+    rag: false
+    channels: [physchem, conservation, structure]
+    active_learning: false
+    test_goal: Isolate KG plus all protein feature channels from local-document RAG.
+  kg_none:
+    rag: false
+    channels: []
+    active_learning: false
+    test_goal: Validate the observation-centric KG-to-LLM baseline without RAG or feature tools.
+  rag_kg_all_active_learning:
+    rag: true
+    channels: [physchem, conservation, structure]
+    active_learning: true
+    test_goal: Verify the full evidence path and calibrated-posterior active-learning acquisition.
