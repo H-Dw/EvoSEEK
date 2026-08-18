@@ -137,6 +137,7 @@ class KnowledgeProviderConfig:
     kind: str
     enabled: bool = True
     resource_path: Path | None = None
+    a3m_path: Path | None = None
     contributes_to_selection: bool = False
     calibration: str = "none"
     minimum_calibration_samples: int = 8
@@ -150,6 +151,14 @@ class KnowledgeProviderConfig:
             raise ValueError("minimum_calibration_samples must be at least 2")
         if self.missing_policy not in {"unavailable", "fail"}:
             raise ValueError("missing_policy must be unavailable or fail")
+        if self.a3m_path is not None and self.kind != "msa_profile":
+            raise ValueError("a3m_path is only valid for the msa_profile provider")
+        if (
+            self.a3m_path is not None
+            and self.resource_path is not None
+            and Path(self.a3m_path) != Path(self.resource_path)
+        ):
+            raise ValueError("Configure only one of a3m_path or resource_path for msa_profile")
 
 
 @dataclass(frozen=True)
@@ -655,6 +664,38 @@ class KnowledgeConfig:
         )
 
 
+@dataclass(frozen=True)
+class AgentQuotaAllocationConfig:
+    """Fixed, auditable batch quotas for the one-hypothesis Agent-UQ path."""
+
+    enabled: bool = False
+    hypothesis_target: int = 8
+    evidence_prior: int = 3
+    coverage_exploration: int = 3
+    matched_control: int = 2
+    strong_hypothesis_threshold: float = 0.75
+
+    def __post_init__(self) -> None:
+        if any(value < 0 for value in self.quotas().values()):
+            raise ValueError("generation.quota_allocation quotas must be non-negative")
+        if not 0.0 < self.strong_hypothesis_threshold <= 1.0:
+            raise ValueError(
+                "generation.quota_allocation.strong_hypothesis_threshold must be in (0, 1]"
+            )
+
+    def quotas(self) -> dict[str, int]:
+        return {
+            "hypothesis_target": self.hypothesis_target,
+            "evidence_prior": self.evidence_prior,
+            "coverage_exploration": self.coverage_exploration,
+            "matched_control": self.matched_control,
+        }
+
+    @property
+    def total(self) -> int:
+        return sum(self.quotas().values())
+
+
 @dataclass
 class GenerationConfig:
     """Mutation-selection controls for Agent modes.
@@ -674,9 +715,22 @@ class GenerationConfig:
     gp_length_scale: float = 1.0
     gp_noise: float = 1e-6
     hypothesis_recency_decay: float = 1.0
+    quota_allocation: AgentQuotaAllocationConfig | dict[str, Any] = field(
+        default_factory=AgentQuotaAllocationConfig
+    )
 
     def __post_init__(self) -> None:
-        if self.selection_driver not in {"auto", "agent_uq", "predictor", "random"}:
+        if isinstance(self.quota_allocation, dict):
+            self.quota_allocation = AgentQuotaAllocationConfig(
+                **dict(self.quota_allocation)
+            )
+        if self.selection_driver not in {
+            "auto",
+            "active_learning",
+            "agent_uq",
+            "predictor",
+            "random",
+        }:
             raise ValueError("generation.selection_driver is invalid")
         if self.gp_length_scale <= 0 or self.gp_noise <= 0:
             raise ValueError("generation GP length scale and noise must be positive")
@@ -684,6 +738,116 @@ class GenerationConfig:
             raise ValueError("generation.hypothesis_recency_decay must be in (0, 1]")
         if self.predictor_weight < 0:
             raise ValueError("generation.predictor_weight must be non-negative")
+
+
+@dataclass(frozen=True)
+class CalibratedPosteriorConfig:
+    """Visible-label-only posterior configuration for active learning."""
+
+    plugin: str = "visible_holdout_ensemble"
+    predictor_models: tuple[ModelConfig, ...] = ()
+    calibration_fraction: float = 0.20
+    min_calibration_size: int = 8
+    min_training_size: int = 8
+    conformal_alpha: float = 0.10
+    min_std: float = 1e-6
+    variance_scale_bounds: tuple[float, float] = (0.25, 4.0)
+    refit_full: bool = True
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "variance_scale_bounds",
+            tuple(float(item) for item in self.variance_scale_bounds),
+        )
+        if not self.plugin:
+            raise ValueError("active_learning.posterior.plugin must not be empty")
+        if not 0 < self.calibration_fraction < 0.5:
+            raise ValueError(
+                "active_learning.posterior.calibration_fraction must be in (0, 0.5)"
+            )
+        if self.min_calibration_size < 2 or self.min_training_size < 4:
+            raise ValueError(
+                "active_learning posterior requires min_calibration_size >= 2 and "
+                "min_training_size >= 4"
+            )
+        if not 0 < self.conformal_alpha < 1:
+            raise ValueError("active_learning.posterior.conformal_alpha must be in (0, 1)")
+        if self.min_std <= 0:
+            raise ValueError("active_learning.posterior.min_std must be positive")
+        if len(self.variance_scale_bounds) != 2:
+            raise ValueError(
+                "active_learning.posterior.variance_scale_bounds must contain two values"
+            )
+        lower, upper = self.variance_scale_bounds
+        if lower <= 0 or lower > 1 or upper < 1 or lower >= upper:
+            raise ValueError(
+                "active_learning posterior variance_scale_bounds must straddle 1"
+            )
+
+
+@dataclass(frozen=True)
+class HybridBatchAcquisitionConfig:
+    """Quota-based hybrid acquisition over calibrated fitness predictions."""
+
+    plugin: str = "hybrid_batch"
+    exploitation_fraction: float = 0.50
+    exploration_fraction: float = 0.25
+    knowledge_fraction: float = 0.25
+    ucb_beta: float = 1.0
+    diversity_lambda: float = 0.10
+    ood_penalty: float = 0.25
+    knowledge_fitness_weight: float = 0.25
+    validation_prior_weight: float = 1.0
+
+    def __post_init__(self) -> None:
+        if not self.plugin:
+            raise ValueError("active_learning.acquisition.plugin must not be empty")
+        fractions = (
+            self.exploitation_fraction,
+            self.exploration_fraction,
+            self.knowledge_fraction,
+        )
+        if any(value < 0 for value in fractions) or not abs(sum(fractions) - 1.0) <= 1e-8:
+            raise ValueError("active_learning acquisition fractions must be non-negative and sum to 1")
+        if self.ucb_beta < 0:
+            raise ValueError("active_learning.acquisition.ucb_beta must be non-negative")
+        if self.diversity_lambda < 0 or self.ood_penalty < 0:
+            raise ValueError(
+                "active_learning acquisition diversity_lambda and ood_penalty must be non-negative"
+            )
+        if self.knowledge_fitness_weight < 0 or self.validation_prior_weight < 0:
+            raise ValueError(
+                "active_learning acquisition knowledge weights must be non-negative"
+            )
+
+
+@dataclass(frozen=True)
+class ActiveLearningConfig:
+    """Opt-in structured active-learning module configured independently of baselines."""
+
+    enabled: bool = False
+    module: str = "lightweight_calibrated_hybrid"
+    posterior: CalibratedPosteriorConfig | dict[str, Any] = field(
+        default_factory=CalibratedPosteriorConfig
+    )
+    acquisition: HybridBatchAcquisitionConfig | dict[str, Any] = field(
+        default_factory=HybridBatchAcquisitionConfig
+    )
+
+    def __post_init__(self) -> None:
+        if not self.module:
+            raise ValueError("active_learning.module must not be empty")
+        if isinstance(self.posterior, dict):
+            object.__setattr__(
+                self, "posterior", CalibratedPosteriorConfig(**dict(self.posterior))
+            )
+        if isinstance(self.acquisition, dict):
+            object.__setattr__(
+                self,
+                "acquisition",
+                HybridBatchAcquisitionConfig(**dict(self.acquisition)),
+            )
 
 
 @dataclass
@@ -773,6 +937,8 @@ class KGInteractionRuntimeConfig:
         "query_physchem_delta",
         "query_evolutionary_profile",
         "query_structure_environment",
+        "query_feature_bundle",
+        "query_kg_truncation_audit",
         "query_assay_association",
         "query_evidence_provenance",
         "query_local_knowledge",
@@ -782,10 +948,89 @@ class KGInteractionRuntimeConfig:
     max_rows: int = 12
     use_counterevidence: bool = True
     stop_when_sufficient: bool = False
+    feature_tool_strategy: str = "context_only"
+    feature_channels: tuple[str, ...] = ("physchem", "conservation", "structure")
+    feature_variant_limit: int = 1
+    truncation_audit_enabled: bool = False
+    truncation_audit_items: tuple[str, ...] = ()
+    truncation_audit_sample_rows: int = 3
 
     def __post_init__(self) -> None:
         if self.max_tool_calls < 1 or self.max_rows < 1:
             raise ValueError("kg_interaction limits must be positive")
+        allowed_strategies = {
+            "context_only",
+            "independent",
+            "joint",
+            "independent_and_joint",
+        }
+        if self.feature_tool_strategy not in allowed_strategies:
+            raise ValueError(
+                f"Unsupported feature_tool_strategy: {self.feature_tool_strategy!r}"
+            )
+        allowed_channels = {"physchem", "conservation", "structure"}
+        unknown_channels = set(self.feature_channels).difference(allowed_channels)
+        if unknown_channels or not self.feature_channels:
+            raise ValueError(
+                f"feature_channels must be a non-empty subset of {sorted(allowed_channels)}"
+            )
+        if len(self.feature_channels) != len(set(self.feature_channels)):
+            raise ValueError("feature_channels must not contain duplicates")
+        if self.feature_variant_limit < 1:
+            raise ValueError("feature_variant_limit must be positive")
+        independent_calls = (
+            len(self.feature_channels) * self.feature_variant_limit
+            if self.feature_tool_strategy in {"independent", "independent_and_joint"}
+            else 0
+        )
+        joint_calls = (
+            self.feature_variant_limit
+            if self.feature_tool_strategy in {"joint", "independent_and_joint"}
+            else 0
+        )
+        audit_calls = 1 if self.truncation_audit_enabled else 0
+        minimum_calls = 1 + independent_calls + joint_calls + audit_calls
+        if (
+            self.feature_tool_strategy != "context_only" or self.truncation_audit_enabled
+        ) and self.max_tool_calls < minimum_calls:
+            raise ValueError(
+                "max_tool_calls is too small for the configured feature/audit strategy; "
+                f"requires at least {minimum_calls}"
+            )
+        required_operators = {"hypothesis_context"}
+        channel_operators = {
+            "physchem": "query_physchem_delta",
+            "conservation": "query_evolutionary_profile",
+            "structure": "query_structure_environment",
+        }
+        if self.feature_tool_strategy in {"independent", "independent_and_joint"}:
+            required_operators.update(channel_operators[item] for item in self.feature_channels)
+        if self.feature_tool_strategy in {"joint", "independent_and_joint"}:
+            required_operators.add("query_feature_bundle")
+        if self.truncation_audit_enabled:
+            required_operators.add("query_kg_truncation_audit")
+        missing_operators = required_operators.difference(self.enabled_operators)
+        if (
+            self.feature_tool_strategy != "context_only" or self.truncation_audit_enabled
+        ) and missing_operators:
+            raise ValueError(
+                "feature/audit strategy operators are missing from enabled_operators: "
+                f"{sorted(missing_operators)}"
+            )
+        if self.truncation_audit_enabled:
+            if not self.truncation_audit_items:
+                raise ValueError(
+                    "truncation_audit_items must not be empty when the audit is enabled"
+                )
+            if len(self.truncation_audit_items) > self.max_rows:
+                raise ValueError(
+                    "truncation_audit_items cannot exceed max_rows because each item "
+                    "produces one LLM-visible audit row"
+                )
+            if any(not item.strip() or len(item) > 128 for item in self.truncation_audit_items):
+                raise ValueError("truncation audit items must contain 1 to 128 characters")
+        if self.truncation_audit_sample_rows < 1:
+            raise ValueError("truncation_audit_sample_rows must be positive")
 
 
 @dataclass
@@ -855,6 +1100,7 @@ class ExperimentConfig:
     critic: CriticConfig = field(default_factory=CriticConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
     generation: GenerationConfig = field(default_factory=GenerationConfig)
+    active_learning: ActiveLearningConfig = field(default_factory=ActiveLearningConfig)
     validation: ValidationConfig = field(default_factory=ValidationConfig)
     evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
@@ -866,6 +1112,24 @@ class ExperimentConfig:
     run_label: str = ""
     condition: str = ""
     evidence_prefilter_limit: int = 5000
+
+    def __post_init__(self) -> None:
+        selected = self.generation.selection_driver == "active_learning"
+        if selected != self.active_learning.enabled:
+            raise ValueError(
+                "generation.selection_driver=active_learning and active_learning.enabled=true "
+                "must be configured together"
+            )
+        quota = self.generation.quota_allocation
+        if quota.enabled:
+            if self.generation.selection_driver != "agent_uq":
+                raise ValueError(
+                    "generation.quota_allocation requires selection_driver=agent_uq"
+                )
+            if quota.total != self.budget_per_round:
+                raise ValueError(
+                    "generation.quota_allocation quotas must sum to budget_per_round"
+                )
 
 
 def _resolve_api_tokenizer_path(raw: dict[str, Any], root: Path) -> dict[str, Any]:
@@ -1012,11 +1276,12 @@ def load_experiment_config(
     provider_values: dict[str, Any] = {}
     for name, raw_provider in (knowledge_raw.pop("providers", {}) or {}).items():
         values = dict(raw_provider)
-        if values.get("resource_path"):
-            resource_path = Path(values["resource_path"])
-            values["resource_path"] = (
-                resource_path if resource_path.is_absolute() else root / resource_path
-            )
+        for path_key in ("resource_path", "a3m_path"):
+            if values.get(path_key):
+                provider_path = Path(values[path_key])
+                values[path_key] = (
+                    provider_path if provider_path.is_absolute() else root / provider_path
+                )
         provider_values[str(name)] = KnowledgeProviderConfig(**values)
     knowledge_raw["providers"] = provider_values
     local_raw = dict(knowledge_raw.get("local_knowledge", {}) or {})
@@ -1083,7 +1348,24 @@ def load_experiment_config(
 
     generation_raw = dict(raw.get("generation", {}) or {})
     generation_raw["predictor_models"] = load_model_entries(generation_raw.get("predictor_models"))
+    generation_raw["quota_allocation"] = _dataclass_from_mapping(
+        AgentQuotaAllocationConfig,
+        dict(generation_raw.get("quota_allocation", {}) or {}),
+    )
     generation = _dataclass_from_mapping(GenerationConfig, generation_raw)
+    active_learning_raw = dict(raw.get("active_learning", {}) or {})
+    posterior_raw = dict(active_learning_raw.get("posterior", {}) or {})
+    posterior_raw["predictor_models"] = load_model_entries(
+        posterior_raw.get("predictor_models")
+    )
+    active_learning_raw["posterior"] = _dataclass_from_mapping(
+        CalibratedPosteriorConfig, posterior_raw
+    )
+    active_learning_raw["acquisition"] = _dataclass_from_mapping(
+        HybridBatchAcquisitionConfig,
+        dict(active_learning_raw.get("acquisition", {}) or {}),
+    )
+    active_learning = _dataclass_from_mapping(ActiveLearningConfig, active_learning_raw)
     validation_raw = dict(raw.get("validation", {}) or {})
     validation_raw["predictor_models"] = load_model_entries(validation_raw.get("predictor_models"))
     validation = _dataclass_from_mapping(ValidationConfig, validation_raw)
@@ -1099,6 +1381,14 @@ def load_experiment_config(
     if "enabled_operators" in interaction_raw:
         interaction_raw["enabled_operators"] = tuple(
             str(item) for item in interaction_raw["enabled_operators"]
+        )
+    if "feature_channels" in interaction_raw:
+        interaction_raw["feature_channels"] = tuple(
+            str(item) for item in interaction_raw["feature_channels"]
+        )
+    if "truncation_audit_items" in interaction_raw:
+        interaction_raw["truncation_audit_items"] = tuple(
+            str(item) for item in interaction_raw["truncation_audit_items"]
         )
     kg_interaction = _dataclass_from_mapping(KGInteractionRuntimeConfig, interaction_raw)
     critic_raw: dict[str, Any] = {}
@@ -1139,6 +1429,7 @@ def load_experiment_config(
         critic=critic,
         llm=llm,
         generation=generation,
+        active_learning=active_learning,
         validation=validation,
         evaluation=evaluation,
         output=output,

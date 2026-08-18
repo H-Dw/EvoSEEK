@@ -1,11 +1,13 @@
 import pytest
 
+from fitness_agents.config import KGInteractionRuntimeConfig
 from fitness_agents.kg_interaction import (
     ChangeOperation,
     CompareVariantsOperator,
     EvidenceProvenanceOperator,
     EvidenceSufficiencyPolicy,
     ExplainVariantOperator,
+    FeatureBundleOperator,
     FeatureEvidenceOperator,
     HypothesisContextOperator,
     InMemoryChangeWriter,
@@ -87,6 +89,7 @@ def _registry():
         "query_physchem_delta",
         FeatureEvidenceOperator("query_physchem_delta", "physchem", tool),
     )
+    registry.register("query_feature_bundle", FeatureBundleOperator(tool))
     registry.register(
         "query_evidence_provenance", EvidenceProvenanceOperator(tool)
     )
@@ -259,3 +262,64 @@ def test_feature_and_provenance_tools_remain_scoped_and_bounded():
     assert result.executed_steps == ("feature", "provenance")
     assert result.packs[0].evidence[0]["channel"] == "physchem"
     assert result.packs[1].provenance[0]["resource_sha256"] == "abc"
+
+
+def test_joint_feature_bundle_reports_each_channel_and_child_query():
+    controller = KGInteractionController(
+        _registry(),
+        config=InteractionAblationConfig(
+            enabled_operators=frozenset({"query_feature_bundle"}),
+            max_tool_calls=1,
+            stop_when_sufficient=False,
+        ),
+    )
+    result = controller.execute(
+        KGQueryPlan(
+            "plan:bundle",
+            "joint feature evidence",
+            (
+                KGQueryStep(
+                    "bundle",
+                    "query_feature_bundle",
+                    QueryIntent.EXPLAIN,
+                    {
+                        "variant_id": "v_good",
+                        "channels": ["physchem", "conservation", "structure"],
+                    },
+                ),
+            ),
+            max_tool_calls=1,
+        ),
+        KGQueryContext("run:1", 2, frozenset({"v_good"}), max_rows=6),
+    )
+
+    pack = result.packs[0]
+    assert {item["channel"] for item in pack.evidence} == {
+        "physchem",
+        "conservation",
+        "structure",
+    }
+    assert pack.metadata["channel_status"] == {
+        "physchem": "available",
+        "conservation": "available",
+        "structure": "available",
+    }
+    assert len(pack.metadata["child_query_ids"]) == 3
+
+
+def test_feature_strategy_config_requires_budget_for_every_requested_channel():
+    config = KGInteractionRuntimeConfig(
+        feature_tool_strategy="independent_and_joint",
+        feature_channels=("physchem", "conservation", "structure"),
+        feature_variant_limit=1,
+        max_tool_calls=5,
+    )
+    assert config.feature_tool_strategy == "independent_and_joint"
+
+    with pytest.raises(ValueError, match="requires at least 5"):
+        KGInteractionRuntimeConfig(
+            feature_tool_strategy="independent_and_joint",
+            feature_channels=("physchem", "conservation", "structure"),
+            feature_variant_limit=1,
+            max_tool_calls=4,
+        )

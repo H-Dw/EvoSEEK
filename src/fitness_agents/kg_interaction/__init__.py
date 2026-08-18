@@ -18,13 +18,22 @@ from .operators import (
     CompareVariantsOperator,
     EvidenceProvenanceOperator,
     ExplainVariantOperator,
+    FeatureBundleOperator,
     FeatureEvidenceOperator,
     HypothesisContextOperator,
+    KGTruncationAuditOperator,
     LocalKnowledgeQueryOperator,
     QueryOperator,
     StructuredClaimQueryOperator,
 )
 from .tool_runtime import RoundScopedToolExecutor
+from .truncation_audit import (
+    KeywordTruncationEntry,
+    KGKeywordTruncationAuditor,
+    KGTruncationAuditReport,
+    interaction_item_presence,
+    runtime_truncation_audit_payload,
+)
 from .writeback import (
     InMemoryChangeWriter,
     ProposalGateway,
@@ -39,6 +48,7 @@ __all__ = [
     "EvidenceProvenanceOperator",
     "EvidenceSufficiencyPolicy",
     "ExplainVariantOperator",
+    "FeatureBundleOperator",
     "FeatureEvidenceOperator",
     "HypothesisContextOperator",
     "InMemoryChangeWriter",
@@ -46,10 +56,14 @@ __all__ = [
     "InteractionResult",
     "KGChangeProposal",
     "KGInteractionController",
+    "KGKeywordTruncationAuditor",
     "KGQueryContext",
     "KGQueryPlan",
     "KGQueryStep",
+    "KGTruncationAuditOperator",
+    "KGTruncationAuditReport",
     "KGUpdateResult",
+    "KeywordTruncationEntry",
     "LocalKnowledgeQueryOperator",
     "ProposalGateway",
     "QueryIntent",
@@ -57,4 +71,6 @@ __all__ = [
     "RoundScopedToolExecutor",
     "StructuredClaimQueryOperator",
     "TrustBoundaryValidator",
+    "interaction_item_presence",
+    "runtime_truncation_audit_payload",
 ]

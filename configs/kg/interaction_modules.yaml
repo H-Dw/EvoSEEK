@@ -32,9 +32,23 @@ profiles:
   feature_channels:
     enabled_operators: [hypothesis_context, explain_variant, compare_variants,
       query_physchem_delta, query_evolutionary_profile, query_structure_environment,
+      query_feature_bundle,
       query_assay_association, query_evidence_provenance, query_local_knowledge,
       query_structured_claims]
     max_tool_calls: 8
+    feature_tool_strategy: independent
+    feature_channels: [physchem, conservation, structure]
+    feature_variant_limit: 1
+    use_counterevidence: true
+    stop_when_sufficient: false
+    read_only: true
+
+  joint_feature_bundle:
+    enabled_operators: [hypothesis_context, query_feature_bundle]
+    max_tool_calls: 2
+    feature_tool_strategy: joint
+    feature_channels: [physchem, conservation, structure]
+    feature_variant_limit: 1
     use_counterevidence: true
     stop_when_sufficient: false
     read_only: true

@@ -1,0 +1,27 @@
+task_id: gb1_binding_feature_tools_example
+protein_id: GB1
+protein_name: immunoglobulin-binding domain B1 of protein G
+protein_aliases: [GB1, protein G B1 domain]
+protein_accessions: [PDB:1PGB]
+assay_id: GB1_IgG_binding_Wu2016
+wild_type_sites: VDGV
+mutable_positions: [39, 40, 41, 54]
+reference_sequence_path: examples/gb1/rcsb_pdb_1PGB.fasta
+sequence_position_offset: 1
+numbering_scheme: GB1_domain_1_based
+objective: maximize
+public_data_path: data/demo/gb1_demo_public.csv
+oracle_data_path: data/demo/gb1_demo_oracle.csv
+sequence_column: variant
+fitness_column: fitness
+structure_resources:
+  - resource_id: rcsb:1PGB
+    path: examples/gb1/1PGB.cif
+    format: cif
+    chain: A
+    sha256: 70dee89314535f274a5ebcd496d32fb825feb335ab2e9bc716479d7ea22b2626
+    residue_map:
+      "39": {chain: A, residue: 39}
+      "40": {chain: A, residue: 40}
+      "41": {chain: A, residue: 41}
+      "54": {chain: A, residue: 54}

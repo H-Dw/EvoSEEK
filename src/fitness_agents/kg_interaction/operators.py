@@ -7,6 +7,7 @@ from dataclasses import asdict
 from typing import Any, Protocol
 
 from .contracts import EvidencePack, KGQueryContext, KGQueryStep
+from .truncation_audit import KGKeywordTruncationAuditor
 
 
 class QueryOperator(Protocol):
@@ -223,6 +224,129 @@ class FeatureEvidenceOperator:
                 dict(item.get("provenance", {})) for item in evidence
             )[: context.max_rows],
             metadata={"variant_id": variant_id, "channel": self.channel},
+        )
+
+
+class FeatureBundleOperator:
+    """Jointly retrieve an allow-listed feature bundle in one auditable tool step."""
+
+    name = "query_feature_bundle"
+    allowed_channels = frozenset({"physchem", "conservation", "structure"})
+
+    def __init__(self, tool: Any) -> None:
+        self.tool = tool
+
+    def execute(self, step: KGQueryStep, context: KGQueryContext) -> EvidencePack:
+        variant_id = str(step.arguments["variant_id"])
+        raw_channels = step.arguments.get("channels", tuple(sorted(self.allowed_channels)))
+        if isinstance(raw_channels, str):
+            raw_channels = (raw_channels,)
+        channels = tuple(dict.fromkeys(str(item) for item in raw_channels))
+        unknown = set(channels).difference(self.allowed_channels)
+        if unknown:
+            raise ValueError(f"Unsupported feature bundle channels: {sorted(unknown)}")
+        if not channels:
+            raise ValueError("query_feature_bundle requires at least one channel")
+
+        query_ids: list[str] = []
+        evidence: list[dict[str, Any]] = []
+        caveats: list[str] = []
+        provenance: list[dict[str, Any]] = []
+        channel_status: dict[str, str] = {}
+        for channel in channels:
+            result = self.tool.feature_evidence(
+                variant_id,
+                channel=channel,
+                round_id=context.round_id,
+            )
+            query_ids.append(str(result["query_id"]))
+            items = _dict_tuple(result.get("evidence"))
+            evidence.extend(items)
+            channel_status[channel] = "available" if items else "missing"
+            for item in items:
+                caveats.extend(str(warning) for warning in item.get("warnings", ()))
+                if isinstance(item.get("provenance"), Mapping):
+                    provenance.append(dict(item["provenance"]))
+
+        return EvidencePack(
+            query_id=_stable_query_id(self.name, query_ids),
+            operator=self.name,
+            as_of_round=context.round_id,
+            evidence=tuple(evidence[: context.max_rows]),
+            counterevidence=tuple(
+                item for item in evidence if float(item.get("score", 0.0)) < 0.0
+            )[: context.max_rows],
+            caveats=tuple(dict.fromkeys(caveats))[: context.max_rows],
+            provenance=tuple(provenance[: context.max_rows]),
+            metadata={
+                "variant_id": variant_id,
+                "channels": list(channels),
+                "channel_status": channel_status,
+                "child_query_ids": query_ids,
+            },
+        )
+
+
+class KGTruncationAuditOperator:
+    """Expose an exact keyword-count audit before bounded KG rows reach the LLM."""
+
+    name = "query_kg_truncation_audit"
+
+    def __init__(self, structured_sink: Any) -> None:
+        self.auditor = KGKeywordTruncationAuditor(structured_sink)
+
+    def execute(self, step: KGQueryStep, context: KGQueryContext) -> EvidencePack:
+        raw_items = step.arguments.get("items", ())
+        if isinstance(raw_items, str):
+            raw_items = (raw_items,)
+        items = tuple(dict.fromkeys(str(item).strip() for item in raw_items))
+        if not items or any(not item for item in items):
+            raise ValueError("query_kg_truncation_audit requires non-empty keyword items")
+        if len(items) > context.max_rows:
+            raise ValueError(
+                "query_kg_truncation_audit item count cannot exceed context.max_rows"
+            )
+        sample_rows = int(step.arguments.get("sample_rows", 3))
+        report = self.auditor.audit(
+            items,
+            round_id=context.round_id,
+            max_rows=context.max_rows,
+            sample_rows=sample_rows,
+        )
+        facts = tuple(
+            {
+                "fact_type": "kg_truncation_audit",
+                "item": item.item,
+                "status": item.status,
+                "kg_entity_match_count": item.entity_match_count,
+                "kg_relation_match_count": item.relation_match_count,
+                "kg_total_match_count": item.total_match_count,
+                "llm_row_limit": item.max_rows,
+                "bounded_returned_match_count": item.returned_match_count,
+                "truncated": item.truncated,
+                "sample_matches": item.sample_matches,
+            }
+            for item in report.entries
+        )
+        caveats = tuple(
+            f"kg_keyword_rows_truncated:{item.item}:{item.total_match_count}>{item.max_rows}"
+            for item in report.entries
+            if item.truncated
+        ) + tuple(
+            f"kg_keyword_not_found:{item.item}"
+            for item in report.entries
+            if item.status == "not_found"
+        )
+        return EvidencePack(
+            query_id=_stable_query_id(
+                self.name,
+                (str(context.round_id), str(context.max_rows), *items),
+            ),
+            operator=self.name,
+            as_of_round=context.round_id,
+            facts=facts,
+            caveats=caveats[: context.max_rows],
+            metadata={"audit_report": report.as_dict()},
         )
 
 

@@ -328,6 +328,107 @@ class SQLiteGraphSink:
         ).fetchall()
         return tuple(self._decode_relation(row) for row in rows)
 
+    def query_keyword(
+        self,
+        *,
+        item: str,
+        round_id: int,
+        limit: int = 12,
+    ) -> dict[str, Any]:
+        """Count and sample visible KG records containing one literal keyword item."""
+
+        keyword = item.strip()
+        if round_id < 0 or limit < 1:
+            raise ValueError("round_id must be non-negative and limit must be positive")
+        if not keyword or len(keyword) > 128:
+            raise ValueError("item must contain 1 to 128 characters")
+        escaped = (
+            keyword.casefold()
+            .replace("\\", "\\\\")
+            .replace("%", "\\%")
+            .replace("_", "\\_")
+        )
+        pattern = f"%{escaped}%"
+        visibility = (
+            "(valid_from_round IS NULL OR valid_from_round <= ?) AND "
+            "(valid_to_round IS NULL OR valid_to_round >= ?)"
+        )
+        entity_search = (
+            "LOWER(entity_id || ' ' || entity_type || ' ' || properties_json || ' ' || "
+            "source_ids_json || ' ' || source_group) LIKE ? ESCAPE '\\'"
+        )
+        relation_search = (
+            "LOWER(relation_id || ' ' || subject_id || ' ' || predicate || ' ' || "
+            "object_id || ' ' || properties_json || ' ' || evidence_ids_json || ' ' || "
+            "source_ids_json || ' ' || source_group) LIKE ? ESCAPE '\\'"
+        )
+        entity_count = int(
+            self.connection.execute(
+                f"SELECT COUNT(*) FROM entities WHERE {visibility} AND {entity_search}",
+                (round_id, round_id, pattern),
+            ).fetchone()[0]
+        )
+        relation_count = int(
+            self.connection.execute(
+                f"SELECT COUNT(*) FROM relations WHERE {visibility} AND {relation_search}",
+                (round_id, round_id, pattern),
+            ).fetchone()[0]
+        )
+        self.connection.row_factory = sqlite3.Row
+        entity_rows = self.connection.execute(
+            f"SELECT * FROM entities WHERE {visibility} AND {entity_search} "
+            "ORDER BY confidence DESC, entity_id LIMIT ?",
+            (round_id, round_id, pattern, limit),
+        ).fetchall()
+        relation_rows = self.connection.execute(
+            f"SELECT * FROM relations WHERE {visibility} AND {relation_search} "
+            "ORDER BY confidence DESC, relation_id LIMIT ?",
+            (round_id, round_id, pattern, limit),
+        ).fetchall()
+        matches = [
+            {
+                "record_kind": "entity",
+                "record_id": str(row["entity_id"]),
+                "record_type": str(row["entity_type"]),
+                "layer": str(row["layer"]),
+                "source_group": str(row["source_group"]),
+                "confidence": float(row["confidence"]),
+            }
+            for row in entity_rows
+        ]
+        matches.extend(
+            {
+                "record_kind": "relation",
+                "record_id": str(row["relation_id"]),
+                "record_type": str(row["predicate"]),
+                "layer": str(row["layer"]),
+                "source_group": str(row["source_group"]),
+                "confidence": float(row["confidence"]),
+            }
+            for row in relation_rows
+        )
+        matches.sort(
+            key=lambda row: (
+                -float(row["confidence"]),
+                str(row["record_kind"]),
+                str(row["record_id"]),
+            )
+        )
+        selected = tuple(matches[:limit])
+        total = entity_count + relation_count
+        return {
+            "item": keyword,
+            "round_id": round_id,
+            "max_rows": limit,
+            "entity_match_count": entity_count,
+            "relation_match_count": relation_count,
+            "total_match_count": total,
+            "returned_match_count": len(selected),
+            "truncated": total > len(selected),
+            "status": "not_found" if total == 0 else "truncated" if total > len(selected) else "complete",
+            "matches": selected,
+        }
+
     def query_claims(
         self, *, query: str, round_id: int, limit: int = 12
     ) -> tuple[dict[str, Any], ...]:

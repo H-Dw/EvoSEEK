@@ -125,3 +125,158 @@ def test_fusion_counts_independent_sources_but_not_duplicate_source_family():
 def test_catalog_places_experimental_identity_and_sequence_anchors_first():
     p0_types = {item.entity_type for item in DEFAULT_ENTITY_SPECS if item.priority == "P0"}
     assert {"Protein", "Variant", "Mutation", "Assay", "Observation", "CampaignRound"} <= p0_types
+
+
+def test_effect_estimates_and_feature_channels_materialize_typed_mutation_knowledge():
+    variants = [
+        Variant("wt", "AA", "AAAA", "WT", 0, "observed"),
+        Variant("a", "WA", "WAAA", "A3W", 1, "observed"),
+        Variant("b", "AF", "AAAF", "A4F", 1, "observed"),
+        Variant("ab", "WF", "WAAF", "A3W;A4F", 2, "observed"),
+    ]
+    observations = [
+        FitnessObservation("wt", 0.0, "observed", 0, "wet"),
+        FitnessObservation("a", 1.0, "observed", 0, "wet"),
+        FitnessObservation("b", 0.5, "observed", 0, "wet"),
+        FitnessObservation("ab", 2.0, "observed", 1, "wet"),
+    ]
+    evidence = [
+        Evidence(
+            "e-physchem",
+            "ab",
+            "physchem",
+            "descriptor",
+            0.1,
+            "aaindex:test",
+            0.0,
+            2,
+            raw_features={
+                "sites": {
+                    "3": {
+                        "mutation": "A3W",
+                        "deltas": {"hydropathy": 1.2},
+                        "wild_type_values": {"hydropathy": 0.2},
+                        "mutant_values": {"hydropathy": 1.4},
+                    }
+                },
+                "property_accessions": {"hydropathy": "TEST0001"},
+            },
+            contributes_to_selection=False,
+            provenance={"resource_sha256": "physchem-hash"},
+        ),
+        Evidence(
+            "e-conservation",
+            "ab",
+            "conservation",
+            "profile",
+            -0.2,
+            "msa:test",
+            0.0,
+            2,
+            raw_features={
+                "sites": {
+                    "3": {
+                        "wild_type_frequency": 0.7,
+                        "mutant_frequency": 0.1,
+                        "log_odds_vs_wild_type": -1.9,
+                        "entropy": 0.4,
+                        "coverage": 1.0,
+                        "gap_fraction": 0.0,
+                    }
+                },
+                "sequence_count": 24,
+                "neff": 12.0,
+            },
+            contributes_to_selection=False,
+            provenance={"resource_sha256": "msa-hash"},
+        ),
+        Evidence(
+            "e-structure",
+            "ab",
+            "structure",
+            "environment",
+            -1.0,
+            "structure:1PGB",
+            0.0,
+            2,
+            raw_features={
+                "sites": {
+                    "3": {
+                        "status": "ok",
+                        "mutation": "A3W",
+                        "structure_chain": "A",
+                        "structure_residue": 3,
+                        "contact_count": 6,
+                        "sasa_angstrom2": 12.0,
+                        "mutant_side_chain_not_modelled": True,
+                    }
+                },
+                "resource_id": "rcsb:1PGB",
+            },
+            contributes_to_selection=False,
+            provenance={"resource_sha256": "structure-hash"},
+        ),
+    ]
+    context = BuildContext(
+        "run-effects",
+        2,
+        "PTEST",
+        "binding",
+        resources={
+            "variants": variants,
+            "observations": observations,
+            "evidence": evidence,
+        },
+    )
+    registry = PluginRegistry("knowledge_adapter")
+    registry.register("campaign_observations", CampaignObservationAdapter())
+    registry.register("inference_records", InferenceKnowledgeAdapter())
+
+    snapshot = KnowledgeGraphBuilder(registry).build(context).snapshot
+    entity_types = {item.entity_type for item in snapshot.entities}
+    assert {
+        "MutationEffectEstimate",
+        "MutationInteraction",
+        "EffectEstimate",
+        "ResidueType",
+        "PhyschemPropertyValue",
+        "SubstitutionDescriptor",
+        "EvolutionProfile",
+        "ResidueEnvironment",
+    } <= entity_types
+    predicates = {item.predicate for item in snapshot.relations}
+    assert {
+        "ABOUT_MUTATION",
+        "IN_BACKGROUND",
+        "DERIVED_FROM",
+        "HAS_DESCRIPTOR",
+        "HAS_PHYSCHEM_DELTA",
+        "HAS_EVOLUTIONARY_CONTEXT",
+        "OCCURS_IN_ENVIRONMENT",
+        "HAS_EPISTASIS_ESTIMATE",
+    } <= predicates
+    epistasis = next(
+        item.properties["epistasis"]
+        for item in snapshot.entities
+        if item.entity_type == "EffectEstimate"
+    )
+    assert epistasis == pytest.approx(0.5)
+
+
+def test_effect_estimates_require_visible_matched_backgrounds():
+    context = BuildContext(
+        "run-incomplete",
+        1,
+        "PTEST",
+        "binding",
+        resources={
+            "variants": [Variant("a", "WA", "WAAA", "A3W", 1, "observed")],
+            "observations": [FitnessObservation("a", 1.0, "observed", 0, "wet")],
+        },
+    )
+    batch = InferenceKnowledgeAdapter().extract(context)
+    assert not {
+        "MutationEffectEstimate",
+        "MutationInteraction",
+        "EffectEstimate",
+    }.intersection(item.entity_type for item in batch.entities)

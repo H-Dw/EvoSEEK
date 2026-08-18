@@ -1,0 +1,18 @@
+[
+    {
+        "name": "protenix_prediction_1PGB",
+        "covalent_bonds": [],
+        "sequences": [
+            {
+                "proteinChain": {
+                    "count": 1,
+                    "sequence": "MTYKLILNGKTLKGETTTEAVDAATAEKVFKQYANDNGVDGEWTYDDATKTFTVTE",
+                    "modifications": [],
+                    "pairedMsaPath": "/mnt/bn/ai4s-vepfs/protenix_inference/infer_outputs/2026-08-19/e3a33009-fe9b-4387-939e-f91e7f25918e/msa/0/pairing.a3m",
+                    "unpairedMsaPath": "/mnt/bn/ai4s-vepfs/protenix_inference/infer_outputs/2026-08-19/e3a33009-fe9b-4387-939e-f91e7f25918e/msa/0/non_pairing.a3m",
+                    "templatesPath": "/mnt/bn/ai4s-vepfs/protenix_inference/infer_outputs/2026-08-19/e3a33009-fe9b-4387-939e-f91e7f25918e/msa/0/hmmsearch.a3m"
+                }
+            }
+        ]
+    }
+]

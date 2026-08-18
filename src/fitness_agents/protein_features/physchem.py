@@ -69,6 +69,12 @@ class PhyschemDescriptorProvider:
             site_features[str(position)] = {
                 "mutation": f"{wild_type}{position}{mutant}",
                 "deltas": deltas,
+                "wild_type_values": {
+                    name: table[wild_type] for name, table in self.properties.items()
+                },
+                "mutant_values": {
+                    name: table[mutant] for name, table in self.properties.items()
+                },
             }
             normalized_changes.extend(
                 abs(deltas[name]) / self.scales[name] for name in sorted(deltas)

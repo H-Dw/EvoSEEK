@@ -38,6 +38,39 @@ _PROMPT_PROVENANCE_KEYS = (
     "claim_id",
     "publication_id",
     "doi",
+    "provider",
+    "provider_version",
+    "resource_id",
+    "resource_sha256",
+    "input_mode",
+)
+
+_PROMPT_FEATURE_KEYS = (
+    "sites",
+    "mean_normalized_absolute_delta",
+    "special_flags",
+    "global_sequence_deltas",
+    "independent_log_odds",
+    "independent_log_odds_sum",
+    "independent_mean_log_odds_per_mutation",
+    "single_site_aggregation",
+    "pairwise_frequency_log_odds",
+    "pairwise_residual_log_odds",
+    "pairwise_enabled",
+    "pairwise_eligible",
+    "pairwise_score_method",
+    "sequence_count",
+    "neff",
+    "neff_per_length",
+    "pseudocount_mode",
+    "pseudocount_value",
+    "single_pseudocount_total",
+    "pair_pseudocount_total",
+    "estimated_parameters",
+    "static_context_flag_count",
+    "resource_id",
+    "retrieval_scores",
+    "knowledge_type",
 )
 
 
@@ -76,7 +109,7 @@ def _compact_prompt_evidence(value: Evidence | dict[str, Any]) -> dict[str, Any]
     if isinstance(raw_features, dict):
         output["raw_features"] = {
             key: raw_features[key]
-            for key in ("retrieval_scores", "knowledge_type")
+            for key in _PROMPT_FEATURE_KEYS
             if key in raw_features
         }
     output["provenance"] = _compact_prompt_provenance(raw.get("provenance"))

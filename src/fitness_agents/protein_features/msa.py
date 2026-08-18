@@ -58,6 +58,7 @@ class MSAProfile:
     frequencies: tuple[dict[str, float], ...]
     pair_frequencies: dict[tuple[int, int], dict[str, float]]
     coverage: tuple[float, ...]
+    effective_count: tuple[float, ...]
     gap_fraction: tuple[float, ...]
     entropy: tuple[float, ...]
     sequence_count: int
@@ -75,6 +76,7 @@ class MSAProfile:
                 for (left, right), values in self.pair_frequencies.items()
             },
             "coverage": list(self.coverage),
+            "effective_count": list(self.effective_count),
             "gap_fraction": list(self.gap_fraction),
             "entropy": list(self.entropy),
             "sequence_count": self.sequence_count,
@@ -85,6 +87,8 @@ class MSAProfile:
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> MSAProfile:
+        neff = float(raw["neff"])
+        coverage = tuple(float(item) for item in raw["coverage"])
         return cls(
             query=str(raw["query"]),
             query_index_to_column=tuple(int(item) for item in raw["query_index_to_column"]),
@@ -93,11 +97,18 @@ class MSAProfile:
                 tuple(int(item) for item in key.split(",")): dict(values)
                 for key, values in raw.get("pair_frequencies", {}).items()
             },
-            coverage=tuple(float(item) for item in raw["coverage"]),
+            coverage=coverage,
+            effective_count=tuple(
+                float(item)
+                for item in raw.get(
+                    "effective_count",
+                    (value * neff for value in coverage),
+                )
+            ),
             gap_fraction=tuple(float(item) for item in raw["gap_fraction"]),
             entropy=tuple(float(item) for item in raw["entropy"]),
             sequence_count=int(raw["sequence_count"]),
-            neff=float(raw["neff"]),
+            neff=neff,
             resource_sha256=str(raw["resource_sha256"]),
             settings=dict(raw["settings"]),
         )
@@ -173,9 +184,11 @@ def build_profile(
     *,
     mutable_columns: tuple[int, ...],
     identity_threshold: float,
-    pseudocount: float,
+    pseudocount_mode: str,
+    pseudocount_value: float,
     minimum_sequence_coverage: float,
     maximum_sequence_gap_fraction: float,
+    pairwise_enabled: bool,
 ) -> MSAProfile:
     unfiltered = _read_alignment(alignment_path)
     query_non_gap = max(sum(character != "-" for character in unfiltered[0]), 1)
@@ -207,11 +220,22 @@ def build_profile(
     total_weight = max(neff, 1e-12)
     frequencies: list[dict[str, float]] = []
     coverage: list[float] = []
+    effective_count: list[float] = []
     gaps: list[float] = []
     entropies: list[float] = []
     alphabet = tuple(sorted(CANONICAL_AA))
+
+    def prior_total(state_count: int) -> float:
+        if pseudocount_mode == "per_state":
+            return pseudocount_value * state_count
+        if pseudocount_mode == "neff_scaled_uniform":
+            return pseudocount_value * neff
+        raise ValueError(f"Unsupported MSA pseudocount_mode: {pseudocount_mode}")
+
     for column in range(len(aligned_query)):
-        counts = {residue: pseudocount for residue in alphabet}
+        single_prior_total = prior_total(len(alphabet))
+        prior_per_residue = single_prior_total / len(alphabet)
+        counts = {residue: prior_per_residue for residue in alphabet}
         observed_weight = 0.0
         for sequence, weight in zip(sequences, weights, strict=True):
             residue = sequence[column]
@@ -223,6 +247,7 @@ def build_profile(
         frequencies.append(profile)
         column_coverage = observed_weight / total_weight
         coverage.append(column_coverage)
+        effective_count.append(observed_weight)
         gaps.append(1.0 - column_coverage)
         entropies.append(
             -sum(value * math.log(value + 1e-12) for value in profile.values())
@@ -233,19 +258,26 @@ def build_profile(
     )
     aligned_mutable_columns = tuple(query_index_to_column[index] for index in mutable_columns)
     pair_frequencies: dict[tuple[int, int], dict[str, float]] = {}
-    for left_index, left in enumerate(aligned_mutable_columns):
-        for right in aligned_mutable_columns[left_index + 1 :]:
-            counts: dict[str, float] = {}
-            for sequence, weight in zip(sequences, weights, strict=True):
-                pair = f"{sequence[left]}{sequence[right]}"
-                if all(item in CANONICAL_AA for item in pair):
-                    counts[pair] = counts.get(pair, 0.0) + weight
-            denominator = sum(counts.values()) + pseudocount * len(alphabet) ** 2
-            pair_frequencies[(left, right)] = {
-                f"{a}{b}": (counts.get(f"{a}{b}", 0.0) + pseudocount) / denominator
-                for a in alphabet
-                for b in alphabet
-            }
+    if pairwise_enabled:
+        for left_index, left in enumerate(aligned_mutable_columns):
+            for right in aligned_mutable_columns[left_index + 1 :]:
+                counts: dict[str, float] = {}
+                for sequence, weight in zip(sequences, weights, strict=True):
+                    pair = f"{sequence[left]}{sequence[right]}"
+                    if all(item in CANONICAL_AA for item in pair):
+                        counts[pair] = counts.get(pair, 0.0) + weight
+                pair_state_count = len(alphabet) ** 2
+                pair_prior_total = prior_total(pair_state_count)
+                pair_prior_per_state = pair_prior_total / pair_state_count
+                denominator = sum(counts.values()) + pair_prior_total
+                pair_frequencies[(left, right)] = {
+                    f"{a}{b}": (
+                        counts.get(f"{a}{b}", 0.0) + pair_prior_per_state
+                    )
+                    / denominator
+                    for a in alphabet
+                    for b in alphabet
+                }
 
     return MSAProfile(
         query=query,
@@ -253,6 +285,7 @@ def build_profile(
         frequencies=tuple(frequencies),
         pair_frequencies=pair_frequencies,
         coverage=tuple(coverage),
+        effective_count=tuple(effective_count),
         gap_fraction=tuple(gaps),
         entropy=tuple(entropies),
         sequence_count=len(sequences),
@@ -260,9 +293,13 @@ def build_profile(
         resource_sha256=hashlib.sha256(alignment_path.read_bytes()).hexdigest(),
         settings={
             "identity_threshold": identity_threshold,
-            "pseudocount": pseudocount,
+            "pseudocount_mode": pseudocount_mode,
+            "pseudocount_value": pseudocount_value,
+            "single_pseudocount_total": prior_total(len(alphabet)),
+            "pair_pseudocount_total": prior_total(len(alphabet) ** 2),
             "minimum_sequence_coverage": minimum_sequence_coverage,
             "maximum_sequence_gap_fraction": maximum_sequence_gap_fraction,
+            "pairwise_enabled": pairwise_enabled,
             "unfiltered_sequence_count": len(unfiltered),
         },
     )
@@ -286,8 +323,6 @@ class MSAProfileProvider:
         self.parameter_set_id = parameter_set_id
         required = {
             "identity_threshold",
-            "pseudocount",
-            "minimum_neff",
             "minimum_sequence_coverage",
             "maximum_sequence_gap_fraction",
         }
@@ -295,26 +330,87 @@ class MSAProfileProvider:
         if missing:
             raise ValueError(f"msa_profile options are required: {missing}")
         identity_threshold = float(config.options["identity_threshold"])
-        pseudocount = float(config.options["pseudocount"])
+        pseudocount_mode = str(config.options.get("pseudocount_mode", "per_state"))
+        if pseudocount_mode == "per_state":
+            if "pseudocount" not in config.options:
+                raise ValueError("per_state MSA smoothing requires options.pseudocount")
+            pseudocount_value = float(config.options["pseudocount"])
+        elif pseudocount_mode == "neff_scaled_uniform":
+            if "pseudocount_weight" not in config.options:
+                raise ValueError(
+                    "neff_scaled_uniform MSA smoothing requires options.pseudocount_weight"
+                )
+            pseudocount_value = float(config.options["pseudocount_weight"])
+        else:
+            raise ValueError(f"Unsupported MSA pseudocount_mode: {pseudocount_mode}")
+        minimum_single_site_neff = float(
+            config.options.get(
+                "minimum_single_site_neff",
+                config.options.get("minimum_neff", 0.0),
+            )
+        )
+        minimum_site_effective_count = float(
+            config.options.get("minimum_site_effective_count", 0.0)
+        )
+        pairwise_enabled = bool(config.options.get("pairwise_enabled", True))
+        pairwise_mode = str(
+            config.options.get("pairwise_mode", "raw_frequency_log_odds")
+        )
+        pairwise_minimum_neff_per_length = float(
+            config.options.get("pairwise_minimum_neff_per_length", 0.0)
+        )
+        single_site_aggregation = str(
+            config.options.get("single_site_aggregation", "sum_log_odds")
+        )
         minimum_sequence_coverage = float(config.options["minimum_sequence_coverage"])
         maximum_sequence_gap_fraction = float(
             config.options["maximum_sequence_gap_fraction"]
         )
-        if not 0 < identity_threshold <= 1 or pseudocount <= 0:
-            raise ValueError("MSA identity_threshold and pseudocount are outside valid ranges")
+        if not 0 < identity_threshold <= 1 or pseudocount_value <= 0:
+            raise ValueError(
+                "MSA identity_threshold and pseudocount value are outside valid ranges"
+            )
+        if minimum_single_site_neff < 0 or minimum_site_effective_count < 0:
+            raise ValueError("MSA effective-count thresholds must be non-negative")
+        if pairwise_minimum_neff_per_length < 0:
+            raise ValueError("pairwise_minimum_neff_per_length must be non-negative")
+        if pairwise_mode not in {
+            "raw_frequency_log_odds",
+            "marginal_corrected_log_odds",
+        }:
+            raise ValueError(f"Unsupported MSA pairwise_mode: {pairwise_mode}")
+        if single_site_aggregation not in {"sum_log_odds", "mean_mutated_log_odds"}:
+            raise ValueError(
+                f"Unsupported MSA single_site_aggregation: {single_site_aggregation}"
+            )
         if not 0 <= minimum_sequence_coverage <= 1:
             raise ValueError("minimum_sequence_coverage must be in [0, 1]")
         if not 0 <= maximum_sequence_gap_fraction <= 1:
             raise ValueError("maximum_sequence_gap_fraction must be in [0, 1]")
+        alignment_input = config.a3m_path or config.resource_path
         resource_sha256 = None
-        if config.resource_path is not None:
-            resource_sha256 = hashlib.sha256(Path(config.resource_path).read_bytes()).hexdigest()
+        if alignment_input is not None:
+            resource_sha256 = hashlib.sha256(Path(alignment_input).read_bytes()).hexdigest()
         settings = {
             "reference_sha256": hashlib.sha256(context.full_sequence.encode()).hexdigest(),
-            "resource_path": str(config.resource_path) if config.resource_path else None,
+            "input_mode": "precomputed_a3m" if alignment_input is not None else "mmseqs_search",
+            "a3m_path": str(alignment_input) if alignment_input else None,
             "resource_sha256": resource_sha256,
             "options": config.options,
         }
+        self.input_mode = str(settings["input_mode"])
+        self.a3m_path = str(settings["a3m_path"]) if settings["a3m_path"] else None
+        self.pseudocount_mode = pseudocount_mode
+        self.pseudocount_value = pseudocount_value
+        self.minimum_single_site_neff = minimum_single_site_neff
+        self.minimum_site_effective_count = minimum_site_effective_count
+        self.pairwise_enabled = pairwise_enabled
+        self.pairwise_mode = pairwise_mode
+        self.pairwise_minimum_neff_per_length = pairwise_minimum_neff_per_length
+        self.single_site_aggregation = single_site_aggregation
+        self.estimated_parameters = tuple(
+            str(item) for item in config.options.get("estimated_parameters", ())
+        )
         cache_key = hashlib.sha256(
             json.dumps(settings, sort_keys=True, default=str).encode()
         ).hexdigest()[:20]
@@ -328,8 +424,8 @@ class MSAProfileProvider:
             self.cache_status = "hit"
         else:
             alignment_path = (
-                Path(config.resource_path)
-                if config.resource_path is not None
+                Path(alignment_input)
+                if alignment_input is not None
                 else _run_mmseqs_search(context, config, provider_cache)
             )
             columns = tuple(
@@ -340,9 +436,11 @@ class MSAProfileProvider:
                 alignment_path,
                 mutable_columns=columns,
                 identity_threshold=identity_threshold,
-                pseudocount=pseudocount,
+                pseudocount_mode=pseudocount_mode,
+                pseudocount_value=pseudocount_value,
                 minimum_sequence_coverage=minimum_sequence_coverage,
                 maximum_sequence_gap_fraction=maximum_sequence_gap_fraction,
+                pairwise_enabled=pairwise_enabled,
             )
             if self.profile.query != context.full_sequence:
                 raise ValueError(
@@ -359,7 +457,7 @@ class MSAProfileProvider:
             json.dumps(
                 {
                     "provider": type(self).__name__,
-                    "provider_version": "v1",
+                    "provider_version": "v3",
                     "cache_key": cache_key,
                     "cache_status": self.cache_status,
                     "profile_path": str(profile_path),
@@ -378,6 +476,7 @@ class MSAProfileProvider:
     def evaluate(self, variant: Variant, *, round_id: int, **_kwargs: Any) -> Evidence:
         epsilon = 1e-12
         single_terms: list[float] = []
+        mutated_single_terms: list[float] = []
         site_features: dict[str, Any] = {}
         variant_by_position = dict(
             zip(self.context.mutable_positions, variant.variant, strict=True)
@@ -391,56 +490,179 @@ class MSAProfileProvider:
             profile = self.profile.frequencies[column]
             log_odds = math.log((profile[mutant] + epsilon) / (profile[wild_type] + epsilon))
             single_terms.append(log_odds)
+            if mutant != wild_type:
+                mutated_single_terms.append(log_odds)
+            entropy_nats = self.profile.entropy[column]
+            effective_count = self.profile.effective_count[column]
             site_features[str(position)] = {
                 "column": column,
                 "wild_type_frequency": profile[wild_type],
                 "mutant_frequency": profile[mutant],
                 "log_odds_vs_wild_type": log_odds,
-                "entropy": self.profile.entropy[column],
+                "entropy": entropy_nats,
+                "entropy_nats": entropy_nats,
+                "normalized_entropy": entropy_nats / math.log(len(CANONICAL_AA)),
+                "information_content_bits": (
+                    math.log2(len(CANONICAL_AA)) - entropy_nats / math.log(2.0)
+                ),
                 "coverage": self.profile.coverage[column],
+                "effective_count": effective_count,
                 "gap_fraction": self.profile.gap_fraction[column],
+                "site_quality": (
+                    "ok"
+                    if effective_count >= self.minimum_site_effective_count
+                    else "low_effective_count"
+                ),
             }
+        independent_sum = float(sum(single_terms))
+        independent_mean = float(
+            sum(mutated_single_terms) / len(mutated_single_terms)
+            if mutated_single_terms
+            else 0.0
+        )
+        independent_score = (
+            independent_mean
+            if self.single_site_aggregation == "mean_mutated_log_odds"
+            else independent_sum
+        )
+        neff_per_length = self.profile.neff / max(len(self.profile.query), 1)
+        pairwise_eligible = (
+            self.pairwise_enabled
+            and neff_per_length >= self.pairwise_minimum_neff_per_length
+        )
         pair_terms: list[float] = []
-        for (left_column, right_column), profile in self.profile.pair_frequencies.items():
-            left_position = next(
-                position
-                for position, sequence_index in self.context.position_to_sequence_index.items()
-                if self.profile.query_index_to_column[sequence_index] == left_column
-            )
-            right_position = next(
-                position
-                for position, sequence_index in self.context.position_to_sequence_index.items()
-                if self.profile.query_index_to_column[sequence_index] == right_column
-            )
-            mutant_pair = variant_by_position[left_position] + variant_by_position[right_position]
-            wild_type_pair = (
-                self.context.wild_type_residues[
-                    self.context.position_to_variant_index[left_position]
-                ]
-                + self.context.wild_type_residues[
-                    self.context.position_to_variant_index[right_position]
-                ]
-            )
-            pair_terms.append(
-                math.log((profile[mutant_pair] + epsilon) / (profile[wild_type_pair] + epsilon))
-            )
-        independent_score = float(sum(single_terms))
+        if pairwise_eligible:
+            for (left_column, right_column), profile in self.profile.pair_frequencies.items():
+                left_position = next(
+                    position
+                    for position, sequence_index in (
+                        self.context.position_to_sequence_index.items()
+                    )
+                    if self.profile.query_index_to_column[sequence_index] == left_column
+                )
+                right_position = next(
+                    position
+                    for position, sequence_index in (
+                        self.context.position_to_sequence_index.items()
+                    )
+                    if self.profile.query_index_to_column[sequence_index] == right_column
+                )
+                mutant_pair = (
+                    variant_by_position[left_position] + variant_by_position[right_position]
+                )
+                wild_type_pair = (
+                    self.context.wild_type_residues[
+                        self.context.position_to_variant_index[left_position]
+                    ]
+                    + self.context.wild_type_residues[
+                        self.context.position_to_variant_index[right_position]
+                    ]
+                )
+                if self.pairwise_mode == "raw_frequency_log_odds":
+                    pair_term = math.log(
+                        (profile[mutant_pair] + epsilon)
+                        / (profile[wild_type_pair] + epsilon)
+                    )
+                else:
+                    left_profile = self.profile.frequencies[left_column]
+                    right_profile = self.profile.frequencies[right_column]
+                    mutant_pmi = math.log(
+                        (profile[mutant_pair] + epsilon)
+                        / (
+                            (left_profile[mutant_pair[0]] + epsilon)
+                            * (right_profile[mutant_pair[1]] + epsilon)
+                        )
+                    )
+                    wild_type_pmi = math.log(
+                        (profile[wild_type_pair] + epsilon)
+                        / (
+                            (left_profile[wild_type_pair[0]] + epsilon)
+                            * (right_profile[wild_type_pair[1]] + epsilon)
+                        )
+                    )
+                    pair_term = mutant_pmi - wild_type_pmi
+                pair_terms.append(pair_term)
         pairwise_score = float(sum(pair_terms))
         raw_score = independent_score + pairwise_score
-        minimum_neff = float(self.config.options["minimum_neff"])
-        quality = "ok" if self.profile.neff >= minimum_neff else "degraded"
-        warnings = [] if quality == "ok" else ["msa_neff_below_configured_minimum"]
+        changed_site_features = [
+            site_features[str(position)]
+            for position, wild_type in zip(
+                self.context.mutable_positions,
+                self.context.wild_type_residues,
+                strict=True,
+            )
+            if variant_by_position[position] != wild_type
+        ]
+        evaluated_site_features = changed_site_features or list(site_features.values())
+        sites_have_depth = all(
+            float(item["effective_count"]) >= self.minimum_site_effective_count
+            for item in evaluated_site_features
+        )
+        quality = (
+            "ok"
+            if self.profile.neff >= self.minimum_single_site_neff and sites_have_depth
+            else "degraded"
+        )
+        warnings: list[str] = ["evolutionary_profile_not_assay_fitness"]
+        if self.profile.neff < self.minimum_single_site_neff:
+            warnings.append("msa_neff_below_configured_single_site_minimum")
+        if not sites_have_depth:
+            warnings.append("msa_site_effective_count_below_configured_minimum")
+        if not self.pairwise_enabled:
+            warnings.append("pairwise_evolution_disabled_by_config")
+        elif not pairwise_eligible:
+            warnings.append("pairwise_evolution_disabled_low_neff_per_length")
+        elif self.pairwise_mode == "marginal_corrected_log_odds":
+            warnings.append("pairwise_residual_not_direct_coupling")
+        pairwise_label = (
+            f"{self.pairwise_mode}={pairwise_score:.3f}"
+            if pairwise_eligible
+            else "disabled"
+        )
         statement = (
-            f"MSA log-odds={raw_score:.3f} (independent={independent_score:.3f}, "
-            f"pairwise-frequency={pairwise_score:.3f}); Neff={self.profile.neff:.2f}; "
+            f"MSA single-site log-odds={independent_score:.3f} "
+            f"(sum={independent_sum:.3f}, mean/mutation={independent_mean:.3f}); "
+            f"pairwise={pairwise_label}; Neff={self.profile.neff:.2f}, "
+            f"Neff/L={neff_per_length:.3f}; "
             "evolutionary prior, not assay fitness"
         )
         raw_features = {
             "sites": site_features,
             "independent_log_odds": independent_score,
-            "pairwise_frequency_log_odds": pairwise_score,
+            "independent_log_odds_sum": independent_sum,
+            "independent_mean_log_odds_per_mutation": independent_mean,
+            "single_site_aggregation": self.single_site_aggregation,
+            "pairwise_frequency_log_odds": (
+                pairwise_score
+                if pairwise_eligible and self.pairwise_mode == "raw_frequency_log_odds"
+                else None
+            ),
+            "pairwise_residual_log_odds": (
+                pairwise_score
+                if pairwise_eligible
+                and self.pairwise_mode == "marginal_corrected_log_odds"
+                else None
+            ),
+            "pairwise_enabled": self.pairwise_enabled,
+            "pairwise_eligible": pairwise_eligible,
+            "pairwise_score_method": self.pairwise_mode,
             "sequence_count": self.profile.sequence_count,
             "neff": self.profile.neff,
+            "neff_per_length": neff_per_length,
+            "minimum_single_site_neff": self.minimum_single_site_neff,
+            "minimum_site_effective_count": self.minimum_site_effective_count,
+            "pairwise_minimum_neff_per_length": (
+                self.pairwise_minimum_neff_per_length
+            ),
+            "pseudocount_mode": self.pseudocount_mode,
+            "pseudocount_value": self.pseudocount_value,
+            "single_pseudocount_total": self.profile.settings.get(
+                "single_pseudocount_total"
+            ),
+            "pair_pseudocount_total": self.profile.settings.get(
+                "pair_pseudocount_total"
+            ),
+            "estimated_parameters": list(self.estimated_parameters),
             "cache_status": self.cache_status,
         }
         identity = json.dumps(
@@ -471,7 +693,9 @@ class MSAProfileProvider:
             warnings=tuple(warnings),
             provenance={
                 "provider": type(self).__name__,
-                "provider_version": "v1",
+                "provider_version": "v3",
+                "input_mode": self.input_mode,
+                "a3m_path": self.a3m_path,
                 "profile_path": str(self.profile_path),
                 "prepare_manifest_path": str(self.manifest_path),
                 "resource_sha256": self.profile.resource_sha256,

@@ -1,0 +1,123 @@
+physchem: true
+conservation: true
+structure: true
+kg: true
+legacy_mode: false
+fusion_mode: independent_features
+parameter_set_id: gb1-feature-tools:v2
+local_knowledge:
+  enabled: false
+providers:
+  physchem:
+    kind: aaindex_delta
+    resource_path: configs/resources/aaindex_minimal.yaml
+    contributes_to_selection: false
+    calibration: none
+    missing_policy: fail
+  conservation:
+    kind: msa_profile
+    a3m_path: examples/gb1/msa/0/non_pairing.a3m
+    contributes_to_selection: false
+    calibration: none
+    missing_policy: fail
+    options:
+      # Literature-precedent sequence reweighting default; still target-dependent.
+      identity_threshold: 0.8
+      # A total uniform prior of weight * Neff is shared across q or q^2 states.
+      # This is deliberately not the legacy "0.5 added to every state" behavior.
+      pseudocount_mode: neff_scaled_uniform
+      pseudocount_weight: 0.5
+      # Single-site evidence remains usable at the current Neff=15.13, but these
+      # two QC cutoffs are useful engineering estimates, not literature constants.
+      minimum_single_site_neff: 10.0
+      minimum_site_effective_count: 5.0
+      # Operational MSA filters; useful but estimated for this GB1 input.
+      minimum_sequence_coverage: 0.7
+      maximum_sequence_gap_fraction: 0.3
+      single_site_aggregation: sum_log_odds
+      # Raw pair frequencies are not DCA. The current Neff/L=0.27 is below the
+      # conservative pairwise gate, so only single-site evidence is activated.
+      pairwise_enabled: false
+      pairwise_mode: marginal_corrected_log_odds
+      pairwise_minimum_neff_per_length: 1.0
+      estimated_parameters:
+        - pseudocount_weight
+        - minimum_single_site_neff
+        - minimum_site_effective_count
+        - minimum_sequence_coverage
+        - maximum_sequence_gap_fraction
+        - pairwise_minimum_neff_per_length
+      parameter_annotations:
+        identity_threshold:
+          status: literature_precedent_task_dependent
+          source: Morcos_et_al_PNAS_2011
+        pseudocount_weight:
+          status: estimated_initial_value
+          suggested_sensitivity_grid: [0.1, 0.25, 0.5]
+        minimum_single_site_neff:
+          status: estimated_quality_control
+        minimum_site_effective_count:
+          status: estimated_quality_control
+        minimum_sequence_coverage:
+          status: estimated_operational_filter
+        maximum_sequence_gap_fraction:
+          status: estimated_operational_filter
+        pairwise_minimum_neff_per_length:
+          status: conservative_literature_precedent_task_dependent
+  structure:
+    kind: static_structure
+    contributes_to_selection: false
+    calibration: none
+    missing_policy: fail
+    options:
+      resource_id: rcsb:1PGB
+      contact_cutoff_angstrom: 5.0
+      interface_cutoff_angstrom: 5.0
+      hbond_cutoff_angstrom: 3.5
+      salt_bridge_cutoff_angstrom: 4.0
+      sasa_probe_radius_angstrom: 1.4
+      sasa_sphere_points: 96
+      dense_contact_count: 12
+      clash_distance_fraction: 0.75
+      disulfide_sg_cutoff_angstrom: 2.3
+  kg:
+    kind: observation_association
+    contributes_to_selection: true
+    calibration: none
+parameters:
+  kg.shrinkage_pseudocount:
+    value: 3.0
+    category: scientific
+    status: expert_prior
+    learnable: false
+    bounds: [0.1, 100.0]
+    transform: log
+    source: project_prior_pending_calibration
+    version: gb1-feature-tools:v1
+  kg.confidence_base:
+    value: 0.25
+    category: policy
+    status: expert_prior
+    learnable: false
+    bounds: [0.0, 1.0]
+    transform: logit
+    source: project_prior_pending_calibration
+    version: gb1-feature-tools:v1
+  kg.support_gain:
+    value: 0.03
+    category: policy
+    status: expert_prior
+    learnable: false
+    bounds: [0.0001, 0.5]
+    transform: log
+    source: project_prior_pending_calibration
+    version: gb1-feature-tools:v1
+  kg.confidence_cap:
+    value: 0.85
+    category: policy
+    status: expert_prior
+    learnable: false
+    bounds: [0.01, 0.999]
+    transform: logit
+    source: project_prior_pending_calibration
+    version: gb1-feature-tools:v1

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
+from itertools import combinations
 from typing import Protocol
 
 from fitness_agents.contracts.schemas import (
@@ -77,6 +78,8 @@ def _relation(
     source_group: str,
     context_id: str | None = None,
     valid_from_round: int | None = None,
+    properties: dict[str, object] | None = None,
+    evidence_ids: tuple[str, ...] = (),
 ) -> RelationRecord:
     return RelationRecord(
         relation_id=stable_record_id(
@@ -87,11 +90,298 @@ def _relation(
         object_id=object_id,
         layer=layer,
         modalities=frozenset({modality}),
+        properties=properties or {},
         source_ids=(source_id,),
+        evidence_ids=evidence_ids,
         source_group=source_group,
         context_id=context_id,
         valid_from_round=valid_from_round,
     )
+
+
+def _observation_record_id(context: BuildContext, observation: FitnessObservation) -> str:
+    return stable_record_id(
+        "observation",
+        context.run_id,
+        observation.variant_id,
+        observation.round_revealed,
+        observation.source,
+    )
+
+
+def _mutation_edits(variant: Variant):
+    try:
+        return parse_mutation_notation(variant.mutation_notation)
+    except InvalidMutationNotation:
+        return ()
+
+
+def _mutation_signature(variant: Variant) -> frozenset[tuple[int, str, str]]:
+    return frozenset(edit.identity for edit in _mutation_edits(variant))
+
+
+def _feature_semantic_records(
+    *,
+    context: BuildContext,
+    item: Evidence,
+    variant: Variant,
+) -> tuple[tuple[EntityRecord, ...], tuple[RelationRecord, ...]]:
+    """Materialize typed feature semantics without treating descriptors as fitness labels."""
+
+    if item.quality_status == "unavailable" or item.variant_id.startswith("context:"):
+        return (), ()
+    raw = item.raw_features if isinstance(item.raw_features, dict) else {}
+    raw_sites = raw.get("sites", {})
+    if not isinstance(raw_sites, dict):
+        return (), ()
+    edits = {edit.position: edit for edit in _mutation_edits(variant)}
+    entities: dict[str, EntityRecord] = {}
+    relations: list[RelationRecord] = []
+    source_group = f"feature:{item.channel}"
+    evidence_entity_id = f"evidence:{item.evidence_id}"
+    valid_from_round = item.valid_from_round if item.valid_from_round is not None else item.round_id
+    provenance_hash = str(item.provenance.get("resource_sha256", item.source_id))
+
+    def relation(
+        subject_id: str,
+        predicate: str,
+        object_id: str,
+        layer: KnowledgeLayer,
+        modality: Modality,
+    ) -> RelationRecord:
+        return _relation(
+            "inference_records",
+            subject_id,
+            predicate,
+            object_id,
+            layer,
+            modality=modality,
+            source_id=item.source_id,
+            source_group=source_group,
+            context_id=f"variant:{variant.variant_id}",
+            valid_from_round=valid_from_round,
+            evidence_ids=(item.evidence_id,),
+        )
+
+    for raw_position, raw_site in raw_sites.items():
+        try:
+            position = int(raw_position)
+        except (TypeError, ValueError):
+            continue
+        edit = edits.get(position)
+        if edit is None or not isinstance(raw_site, dict):
+            continue
+        mutation_id = f"mutation:{context.protein_id}:{edit.wt}{position}{edit.mutant}"
+        position_id = f"residue:{context.protein_id}:{position}"
+
+        if item.channel == "physchem":
+            property_accessions = raw.get("property_accessions", {})
+            property_accessions = (
+                property_accessions if isinstance(property_accessions, dict) else {}
+            )
+            for residue, values_key in (
+                (edit.wt, "wild_type_values"),
+                (edit.mutant, "mutant_values"),
+            ):
+                residue_id = f"residue-type:{residue}"
+                entities[residue_id] = EntityRecord(
+                    residue_id,
+                    "ResidueType",
+                    KnowledgeLayer.SEQUENCE,
+                    frozenset({Modality.SEQUENCE}),
+                    {"one_letter_code": residue},
+                    ("IUPAC:amino-acid-code",),
+                    "canonical_amino_acid",
+                )
+                values = raw_site.get(values_key, {})
+                if not isinstance(values, dict):
+                    continue
+                for property_name, value in sorted(values.items()):
+                    descriptor_id = stable_record_id(
+                        "physchem-property",
+                        provenance_hash,
+                        property_name,
+                        residue,
+                        value,
+                    )
+                    entities[descriptor_id] = EntityRecord(
+                        descriptor_id,
+                        "PhyschemPropertyValue",
+                        KnowledgeLayer.SEQUENCE,
+                        frozenset({Modality.TABULAR}),
+                        {
+                            "property": property_name,
+                            "value": value,
+                            "residue": residue,
+                            "accession": property_accessions.get(property_name),
+                        },
+                        (item.source_id,),
+                        source_group,
+                        item.confidence,
+                        valid_from_round=valid_from_round,
+                    )
+                    relations.append(
+                        relation(
+                            residue_id,
+                            "HAS_DESCRIPTOR",
+                            descriptor_id,
+                            KnowledgeLayer.SEQUENCE,
+                            Modality.TABULAR,
+                        )
+                    )
+            substitution_id = stable_record_id(
+                "substitution-descriptor",
+                item.evidence_id,
+                mutation_id,
+            )
+            entities[substitution_id] = EntityRecord(
+                substitution_id,
+                "SubstitutionDescriptor",
+                KnowledgeLayer.SEQUENCE,
+                frozenset({Modality.SEQUENCE, Modality.TABULAR}),
+                {
+                    "mutation": edit.hgvs_short,
+                    "deltas": raw_site.get("deltas", {}),
+                    "property_accessions": property_accessions,
+                    "descriptor_only_not_fitness": True,
+                    "evidence_id": item.evidence_id,
+                },
+                (item.source_id,),
+                source_group,
+                item.confidence,
+                valid_from_round=valid_from_round,
+            )
+            relations.extend(
+                (
+                    relation(
+                        mutation_id,
+                        "HAS_PHYSCHEM_DELTA",
+                        substitution_id,
+                        KnowledgeLayer.SEQUENCE,
+                        Modality.TABULAR,
+                    ),
+                    relation(
+                        substitution_id,
+                        "DERIVED_FROM",
+                        evidence_entity_id,
+                        KnowledgeLayer.PROVENANCE,
+                        Modality.TABULAR,
+                    ),
+                )
+            )
+
+        elif item.channel == "conservation":
+            profile_id = stable_record_id(
+                "evolution-profile",
+                item.evidence_id,
+                mutation_id,
+            )
+            entities[profile_id] = EntityRecord(
+                profile_id,
+                "EvolutionProfile",
+                KnowledgeLayer.EVOLUTIONARY,
+                frozenset({Modality.MSA, Modality.TABULAR}),
+                {
+                    **raw_site,
+                    "mutation": edit.hgvs_short,
+                    "sequence_count": raw.get("sequence_count"),
+                    "neff": raw.get("neff"),
+                    "neff_per_length": raw.get("neff_per_length"),
+                    "pseudocount_mode": raw.get("pseudocount_mode"),
+                    "pseudocount_value": raw.get("pseudocount_value"),
+                    "pairwise_enabled": raw.get("pairwise_enabled"),
+                    "pairwise_eligible": raw.get("pairwise_eligible"),
+                    "pairwise_score_method": raw.get("pairwise_score_method"),
+                    "estimated_parameters": raw.get("estimated_parameters", []),
+                    "evolutionary_prior_not_fitness": True,
+                    "evidence_id": item.evidence_id,
+                },
+                (item.source_id,),
+                source_group,
+                item.confidence,
+                valid_from_round=valid_from_round,
+            )
+            relations.extend(
+                (
+                    relation(
+                        mutation_id,
+                        "HAS_EVOLUTIONARY_CONTEXT",
+                        profile_id,
+                        KnowledgeLayer.EVOLUTIONARY,
+                        Modality.MSA,
+                    ),
+                    relation(
+                        position_id,
+                        "HAS_EVOLUTION_PROFILE",
+                        profile_id,
+                        KnowledgeLayer.EVOLUTIONARY,
+                        Modality.MSA,
+                    ),
+                    relation(
+                        profile_id,
+                        "DERIVED_FROM",
+                        evidence_entity_id,
+                        KnowledgeLayer.PROVENANCE,
+                        Modality.MSA,
+                    ),
+                )
+            )
+
+        elif item.channel == "structure" and raw_site.get("status") == "ok":
+            environment_properties = {
+                key: value
+                for key, value in raw_site.items()
+                if key not in {"mutation", "mutant_side_chain_not_modelled"}
+            }
+            environment_id = stable_record_id(
+                "residue-environment",
+                provenance_hash,
+                raw.get("resource_id"),
+                position,
+                environment_properties,
+            )
+            entities[environment_id] = EntityRecord(
+                environment_id,
+                "ResidueEnvironment",
+                KnowledgeLayer.STRUCTURE,
+                frozenset({Modality.STRUCTURE_3D, Modality.TABULAR}),
+                {
+                    **environment_properties,
+                    "protein_position": position,
+                    "resource_id": raw.get("resource_id"),
+                    "static_environment_not_mutant_model": True,
+                },
+                (item.source_id,),
+                source_group,
+                item.confidence,
+                valid_from_round=valid_from_round,
+            )
+            relations.extend(
+                (
+                    relation(
+                        mutation_id,
+                        "OCCURS_IN_ENVIRONMENT",
+                        environment_id,
+                        KnowledgeLayer.STRUCTURE,
+                        Modality.STRUCTURE_3D,
+                    ),
+                    relation(
+                        position_id,
+                        "MAPPED_TO_STRUCTURE",
+                        environment_id,
+                        KnowledgeLayer.STRUCTURE,
+                        Modality.STRUCTURE_3D,
+                    ),
+                    relation(
+                        environment_id,
+                        "DERIVED_FROM",
+                        evidence_entity_id,
+                        KnowledgeLayer.PROVENANCE,
+                        Modality.STRUCTURE_3D,
+                    ),
+                )
+            )
+    return tuple(entities.values()), tuple(relations)
 
 
 class CampaignObservationAdapter:
@@ -210,10 +500,7 @@ class CampaignObservationAdapter:
                     ),
                 )
             )
-            try:
-                mutation_edits = parse_mutation_notation(variant.mutation_notation)
-            except InvalidMutationNotation:
-                mutation_edits = ()
+            mutation_edits = _mutation_edits(variant)
             for edit in mutation_edits:
                 reference = edit.wt
                 position = edit.position
@@ -267,13 +554,7 @@ class CampaignObservationAdapter:
             if observation.variant_id not in variant_lookup:
                 continue
             source_id = f"observation-source:{observation.source}"
-            observation_id = stable_record_id(
-                "observation",
-                context.run_id,
-                observation.variant_id,
-                observation.round_revealed,
-                observation.source,
-            )
+            observation_id = _observation_record_id(context, observation)
             entities[observation_id] = EntityRecord(
                 observation_id,
                 "Observation",
@@ -352,14 +633,20 @@ class CampaignObservationAdapter:
 
 
 class InferenceKnowledgeAdapter:
-    """Convert model outputs and agent evidence/hypotheses into versioned KG records."""
+    """Convert derived effects, model outputs, and agent evidence into versioned KG records."""
 
     name = "inference_records"
 
     def extract(self, context: BuildContext) -> KnowledgeBatch:
+        variants = tuple(context.resources.get("variants", ()))
+        observations = tuple(context.resources.get("observations", ()))
         predictions = tuple(context.resources.get("predictions", ()))
         evidence_items = tuple(context.resources.get("evidence", ()))
         hypotheses = tuple(context.resources.get("hypotheses", ()))
+        if not all(isinstance(item, Variant) for item in variants):
+            raise TypeError("resources['variants'] must contain Variant records")
+        if not all(isinstance(item, FitnessObservation) for item in observations):
+            raise TypeError("resources['observations'] must contain FitnessObservation records")
         if not all(isinstance(item, Prediction) for item in predictions):
             raise TypeError("resources['predictions'] must contain Prediction records")
         if not all(isinstance(item, Evidence) for item in evidence_items):
@@ -432,6 +719,7 @@ class InferenceKnowledgeAdapter:
                 )
             )
 
+        variant_lookup = {item.variant_id: item for item in variants}
         evidence_lookup: dict[str, Evidence] = {}
         for item in evidence_items:
             evidence_lookup[item.evidence_id] = item
@@ -490,6 +778,18 @@ class InferenceKnowledgeAdapter:
                         valid_from_round=item.round_id,
                     )
                 )
+                variant = variant_lookup.get(item.variant_id)
+                if variant is not None:
+                    feature_entities, feature_relations = _feature_semantic_records(
+                        context=context,
+                        item=item,
+                        variant=variant,
+                    )
+                    entities.update(
+                        (feature_entity.entity_id, feature_entity)
+                        for feature_entity in feature_entities
+                    )
+                    relations.extend(feature_relations)
 
         for hypothesis in hypotheses:
             entity_id = f"hypothesis:{hypothesis.hypothesis_id}"
@@ -539,6 +839,286 @@ class InferenceKnowledgeAdapter:
                         valid_from_round=context.round_id,
                     )
                 )
+        latest_observation: dict[str, FitnessObservation] = {}
+        for observation in observations:
+            previous = latest_observation.get(observation.variant_id)
+            if previous is None or (
+                observation.round_revealed,
+                observation.source,
+            ) > (previous.round_revealed, previous.source):
+                latest_observation[observation.variant_id] = observation
+
+        signature_lookup: dict[frozenset[tuple[int, str, str]], Variant] = {}
+        for variant in sorted(variants, key=lambda item: item.variant_id):
+            signature_lookup.setdefault(_mutation_signature(variant), variant)
+
+        def observed_variant(
+            signature: frozenset[tuple[int, str, str]],
+        ) -> tuple[Variant, FitnessObservation] | None:
+            variant = signature_lookup.get(signature)
+            if variant is None:
+                return None
+            observation = latest_observation.get(variant.variant_id)
+            return (variant, observation) if observation is not None else None
+
+        for child in sorted(variants, key=lambda item: item.variant_id):
+            child_observation = latest_observation.get(child.variant_id)
+            child_signature = _mutation_signature(child)
+            if child_observation is None or not child_signature:
+                continue
+            for position, reference, alternate in sorted(child_signature):
+                edit_identity = (position, reference, alternate)
+                background_signature = frozenset(child_signature.difference({edit_identity}))
+                background_record = observed_variant(background_signature)
+                if background_record is None:
+                    continue
+                background, background_observation = background_record
+                visible_round = max(
+                    child_observation.round_revealed,
+                    background_observation.round_revealed,
+                )
+                delta = float(child_observation.fitness - background_observation.fitness)
+                mutation_id = f"mutation:{context.protein_id}:{reference}{position}{alternate}"
+                estimate_id = stable_record_id(
+                    "mutation-effect",
+                    context.run_id,
+                    context.assay_id,
+                    child.variant_id,
+                    background.variant_id,
+                    mutation_id,
+                    _observation_record_id(context, child_observation),
+                    _observation_record_id(context, background_observation),
+                )
+                source_id = (
+                    "derived:matched-background:"
+                    f"{child_observation.source}:{background_observation.source}"
+                )
+                entities[estimate_id] = EntityRecord(
+                    estimate_id,
+                    "MutationEffectEstimate",
+                    KnowledgeLayer.EXPERIMENTAL,
+                    frozenset({Modality.TABULAR, Modality.TIME_SERIES}),
+                    {
+                        "delta_fitness": delta,
+                        "direction": "improves" if delta > 0 else "worsens" if delta < 0 else "neutral",
+                        "method": "matched_background_difference",
+                        "child_variant_id": child.variant_id,
+                        "background_variant_id": background.variant_id,
+                        "requires_visible_pair": True,
+                    },
+                    (source_id,),
+                    "derived_effect",
+                    valid_from_round=visible_round,
+                )
+                context_id = f"variant:{background.variant_id}"
+                for predicate, object_id, layer, modality in (
+                    ("ABOUT_MUTATION", mutation_id, KnowledgeLayer.EXPERIMENTAL, Modality.TABULAR),
+                    (
+                        "IN_BACKGROUND",
+                        f"variant:{background.variant_id}",
+                        KnowledgeLayer.EXPERIMENTAL,
+                        Modality.SEQUENCE,
+                    ),
+                ):
+                    relations.append(
+                        _relation(
+                            self.name,
+                            estimate_id,
+                            predicate,
+                            object_id,
+                            layer,
+                            modality=modality,
+                            source_id=source_id,
+                            source_group="derived_effect",
+                            context_id=context_id,
+                            valid_from_round=visible_round,
+                        )
+                    )
+                if context.assay_id:
+                    relations.append(
+                        _relation(
+                            self.name,
+                            estimate_id,
+                            "MEASURED_IN",
+                            f"assay:{context.assay_id}",
+                            KnowledgeLayer.EXPERIMENTAL,
+                            modality=Modality.TABULAR,
+                            source_id=source_id,
+                            source_group="derived_effect",
+                            context_id=context_id,
+                            valid_from_round=visible_round,
+                        )
+                    )
+                for source_observation in (child_observation, background_observation):
+                    relations.append(
+                        _relation(
+                            self.name,
+                            estimate_id,
+                            "DERIVED_FROM",
+                            _observation_record_id(context, source_observation),
+                            KnowledgeLayer.PROVENANCE,
+                            modality=Modality.TABULAR,
+                            source_id=source_id,
+                            source_group="derived_effect",
+                            context_id=context_id,
+                            valid_from_round=visible_round,
+                        )
+                    )
+
+            if len(child_signature) < 2:
+                continue
+            for first, second in combinations(sorted(child_signature), 2):
+                background_signature = frozenset(child_signature.difference({first, second}))
+                required = (
+                    observed_variant(background_signature),
+                    observed_variant(frozenset((*background_signature, first))),
+                    observed_variant(frozenset((*background_signature, second))),
+                    observed_variant(frozenset((*background_signature, first, second))),
+                )
+                if any(item is None for item in required):
+                    continue
+                base_record, first_record, second_record, double_record = required
+                assert base_record and first_record and second_record and double_record
+                base_variant, base_observation = base_record
+                _, first_observation = first_record
+                _, second_observation = second_record
+                double_variant, double_observation = double_record
+                source_observations = (
+                    base_observation,
+                    first_observation,
+                    second_observation,
+                    double_observation,
+                )
+                visible_round = max(item.round_revealed for item in source_observations)
+                epistasis = float(
+                    double_observation.fitness
+                    - first_observation.fitness
+                    - second_observation.fitness
+                    + base_observation.fitness
+                )
+                mutation_ids = tuple(
+                    f"mutation:{context.protein_id}:{reference}{position}{alternate}"
+                    for position, reference, alternate in (first, second)
+                )
+                interaction_id = stable_record_id(
+                    "mutation-interaction",
+                    context.protein_id,
+                    *mutation_ids,
+                    base_variant.variant_id,
+                )
+                estimate_id = stable_record_id(
+                    "epistasis-effect",
+                    context.run_id,
+                    context.assay_id,
+                    interaction_id,
+                    *(_observation_record_id(context, item) for item in source_observations),
+                )
+                source_id = "derived:complete-four-state-epistasis"
+                entities[interaction_id] = EntityRecord(
+                    interaction_id,
+                    "MutationInteraction",
+                    KnowledgeLayer.EXPERIMENTAL,
+                    frozenset({Modality.SEQUENCE, Modality.TABULAR}),
+                    {
+                        "background_variant_id": base_variant.variant_id,
+                        "double_variant_id": double_variant.variant_id,
+                        "mutation_ids": mutation_ids,
+                    },
+                    (source_id,),
+                    "derived_effect",
+                    valid_from_round=visible_round,
+                )
+                entities[estimate_id] = EntityRecord(
+                    estimate_id,
+                    "EffectEstimate",
+                    KnowledgeLayer.EXPERIMENTAL,
+                    frozenset({Modality.TABULAR, Modality.TIME_SERIES}),
+                    {
+                        "effect_type": "pairwise_epistasis",
+                        "epistasis": epistasis,
+                        "direction": "positive" if epistasis > 0 else "negative" if epistasis < 0 else "additive",
+                        "method": "complete_four_state_difference",
+                        "requires_complete_observation_square": True,
+                    },
+                    (source_id,),
+                    "derived_effect",
+                    valid_from_round=visible_round,
+                )
+                context_id = f"variant:{base_variant.variant_id}"
+                for mutation_id in mutation_ids:
+                    relations.append(
+                        _relation(
+                            self.name,
+                            interaction_id,
+                            "INCLUDES_MUTATION",
+                            mutation_id,
+                            KnowledgeLayer.EXPERIMENTAL,
+                            modality=Modality.SEQUENCE,
+                            source_id=source_id,
+                            source_group="derived_effect",
+                            context_id=context_id,
+                            valid_from_round=visible_round,
+                        )
+                    )
+                relations.extend(
+                    (
+                        _relation(
+                            self.name,
+                            interaction_id,
+                            "HAS_EPISTASIS_ESTIMATE",
+                            estimate_id,
+                            KnowledgeLayer.EXPERIMENTAL,
+                            modality=Modality.TABULAR,
+                            source_id=source_id,
+                            source_group="derived_effect",
+                            context_id=context_id,
+                            valid_from_round=visible_round,
+                        ),
+                        _relation(
+                            self.name,
+                            interaction_id,
+                            "IN_BACKGROUND",
+                            f"variant:{base_variant.variant_id}",
+                            KnowledgeLayer.EXPERIMENTAL,
+                            modality=Modality.SEQUENCE,
+                            source_id=source_id,
+                            source_group="derived_effect",
+                            context_id=context_id,
+                            valid_from_round=visible_round,
+                        ),
+                    )
+                )
+                if context.assay_id:
+                    relations.append(
+                        _relation(
+                            self.name,
+                            estimate_id,
+                            "MEASURED_IN",
+                            f"assay:{context.assay_id}",
+                            KnowledgeLayer.EXPERIMENTAL,
+                            modality=Modality.TABULAR,
+                            source_id=source_id,
+                            source_group="derived_effect",
+                            context_id=context_id,
+                            valid_from_round=visible_round,
+                        )
+                    )
+                for source_observation in source_observations:
+                    relations.append(
+                        _relation(
+                            self.name,
+                            estimate_id,
+                            "DERIVED_FROM",
+                            _observation_record_id(context, source_observation),
+                            KnowledgeLayer.PROVENANCE,
+                            modality=Modality.TABULAR,
+                            source_id=source_id,
+                            source_group="derived_effect",
+                            context_id=context_id,
+                            valid_from_round=visible_round,
+                        )
+                    )
+
         return KnowledgeBatch(self.name, tuple(entities.values()), tuple(relations))
 
 

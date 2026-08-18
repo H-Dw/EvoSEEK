@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fitness_agents.config import KnowledgeConfig, KnowledgeProviderConfig, TaskConfig
+from fitness_agents.config import (
+    KnowledgeConfig,
+    KnowledgeProviderConfig,
+    TaskConfig,
+    load_experiment_config,
+)
 from fitness_agents.contracts.schemas import Evidence, FitnessObservation, Variant
 from fitness_agents.knowledge import KnowledgeEngine
 from fitness_agents.protein_features import (
@@ -85,7 +90,7 @@ def test_msa_profile_is_computed_once_and_content_addressed(tmp_path: Path) -> N
     context = ProteinTaskContext.from_task(_task(tmp_path))
     config = KnowledgeProviderConfig(
         kind="msa_profile",
-        resource_path=alignment,
+        a3m_path=alignment,
         options={
             "identity_threshold": 0.8,
             "pseudocount": 0.5,
@@ -114,6 +119,54 @@ def test_msa_profile_is_computed_once_and_content_addressed(tmp_path: Path) -> N
     assert evidence.raw_features["neff"] > 0
     assert evidence.raw_features["sites"]["4"]["mutant_frequency"] > 0
     assert "evolutionary prior, not assay fitness" in evidence.statement
+    assert evidence.provenance["input_mode"] == "precomputed_a3m"
+    assert evidence.provenance["a3m_path"] == str(alignment)
+
+
+def test_msa_neff_scaled_uniform_prior_does_not_grow_with_state_space(
+    tmp_path: Path,
+) -> None:
+    alignment = tmp_path / "alignment.a3m"
+    alignment.write_text(
+        ">query\nACDE\n>s2\nACDF\n>s3\nACNE\n>s4\nATDF\n",
+        encoding="utf-8",
+    )
+    context = ProteinTaskContext.from_task(_task(tmp_path))
+    provider = MSAProfileProvider(
+        context,
+        KnowledgeProviderConfig(
+            kind="msa_profile",
+            a3m_path=alignment,
+            options={
+                "identity_threshold": 0.8,
+                "pseudocount_mode": "neff_scaled_uniform",
+                "pseudocount_weight": 0.25,
+                "minimum_single_site_neff": 1.0,
+                "minimum_site_effective_count": 1.0,
+                "minimum_sequence_coverage": 0.5,
+                "maximum_sequence_gap_fraction": 0.5,
+                "single_site_aggregation": "sum_log_odds",
+                "pairwise_enabled": True,
+                "pairwise_mode": "marginal_corrected_log_odds",
+                "pairwise_minimum_neff_per_length": 0.0,
+                "estimated_parameters": ["pseudocount_weight"],
+            },
+        ),
+        parameter_set_id="test:v2",
+        cache_dir=tmp_path / "cache",
+    )
+
+    evidence = provider.evaluate(_variant("v1", "CF"), round_id=1)
+    expected_total = 0.25 * provider.profile.neff
+
+    assert provider.profile.settings["single_pseudocount_total"] == expected_total
+    assert provider.profile.settings["pair_pseudocount_total"] == expected_total
+    assert evidence.raw_features["pseudocount_mode"] == "neff_scaled_uniform"
+    assert evidence.raw_features["pairwise_eligible"] is True
+    assert evidence.raw_features["pairwise_frequency_log_odds"] is None
+    assert evidence.raw_features["pairwise_residual_log_odds"] is not None
+    assert evidence.raw_features["sites"]["4"]["effective_count"] > 0
+    assert "pairwise_residual_not_direct_coupling" in evidence.warnings
 
 
 def _pdb_atom(serial: int, name: str, residue: str, number: int, x: float) -> str:
@@ -262,3 +315,58 @@ def test_missing_scientific_resource_is_unavailable_not_neutral_score(
     assert evidence.confidence == 0.0
     assert not evidence.contributes_to_selection
     assert engine.provider_status["conservation"]["status"] == "unavailable"
+
+
+def test_gb1_example_a3m_and_cif_return_usable_typed_evidence(tmp_path: Path) -> None:
+    root = Path(__file__).parents[2]
+    config = load_experiment_config(
+        root / "configs/experiments/knowledge_agent_features.example.yaml"
+    )
+    context = ProteinTaskContext.from_task(config.task)
+    engine = KnowledgeEngine(
+        config.knowledge,
+        graph_path=tmp_path / "gb1.sqlite",
+        structured_graph_path=tmp_path / "gb1-structured.sqlite",
+        assay_id=config.task.assay_id,
+        protein_id=config.task.protein_id,
+        task_context=context,
+        local_knowledge_enabled=False,
+    )
+    variant = Variant(
+        "gb1-demo",
+        "WEGV",
+        context.full_sequence_for_variant("WEGV"),
+        "V39W;D40E",
+        2,
+        "candidate",
+    )
+
+    evidence = engine.evidence_for([variant], round_id=1)[variant.variant_id]
+    by_channel = {item.channel: item for item in evidence}
+
+    assert context.full_sequence == "MTYKLILNGKTLKGETTTEAVDAATAEKVFKQYANDNGVDGEWTYDDATKTFTVTE"
+    assert by_channel["physchem"].quality_status == "ok"
+    assert by_channel["conservation"].quality_status == "ok"
+    assert by_channel["conservation"].provenance["input_mode"] == "precomputed_a3m"
+    assert by_channel["conservation"].provenance["a3m_path"].endswith("non_pairing.a3m")
+    assert by_channel["conservation"].raw_features["sequence_count"] == 39
+    assert by_channel["conservation"].raw_features["neff"] > 12.0
+    assert by_channel["conservation"].raw_features["neff_per_length"] < 0.3
+    assert by_channel["conservation"].raw_features["pairwise_enabled"] is False
+    assert by_channel["conservation"].raw_features["pairwise_eligible"] is False
+    assert by_channel["conservation"].raw_features["pairwise_frequency_log_odds"] is None
+    assert by_channel["conservation"].raw_features["pairwise_residual_log_odds"] is None
+    assert by_channel["conservation"].score == by_channel["conservation"].raw_features[
+        "independent_log_odds"
+    ]
+    assert "pseudocount_weight" in by_channel["conservation"].raw_features[
+        "estimated_parameters"
+    ]
+    assert "pairwise_evolution_disabled_by_config" in by_channel[
+        "conservation"
+    ].warnings
+    assert by_channel["structure"].quality_status == "ok"
+    assert by_channel["structure"].raw_features["resource_id"] == "rcsb:1PGB"
+    assert by_channel["structure"].raw_features["sites"]["39"]["structure_chain"] == "A"
+    assert all(not by_channel[name].contributes_to_selection for name in by_channel if name != "kg")
+    engine.close()

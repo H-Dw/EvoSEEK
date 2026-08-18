@@ -221,6 +221,88 @@ def test_scientist_prompt_keeps_decision_provenance_but_drops_backend_bulk() -> 
     assert "embedding_fingerprint" not in messages[1]["content"]
 
 
+def test_scientist_prompt_keeps_bounded_feature_tool_evidence() -> None:
+    context = {
+        **_context(),
+        "kg_interaction": {
+            "plan_id": "p-features",
+            "packs": [
+                {
+                    "query_id": "q-feature",
+                    "operator": "query_feature_bundle",
+                    "as_of_round": 1,
+                    "facts": [],
+                    "evidence": [
+                        {
+                            "evidence_id": "ev:structure",
+                            "variant_id": "v1",
+                            "channel": "structure",
+                            "statement": "Static environment only.",
+                            "raw_features": {
+                                "sites": {
+                                    "39": {
+                                        "contact_count": 9,
+                                        "relative_sasa": 0.2,
+                                    }
+                                },
+                                "static_context_flag_count": 1,
+                                "resource_id": "rcsb:1PGB",
+                                "backend_coordinate_dump": "x" * 1000,
+                            },
+                            "provenance": {
+                                "provider": "StaticStructureProvider",
+                                "resource_sha256": "abc",
+                                "private_cache_state": "x" * 1000,
+                            },
+                        },
+                        {
+                            "evidence_id": "ev:conservation",
+                            "variant_id": "v1",
+                            "channel": "conservation",
+                            "statement": "Single-site evolutionary prior only.",
+                            "raw_features": {
+                                "sites": {"39": {"effective_count": 15.13}},
+                                "neff": 15.13,
+                                "neff_per_length": 0.27,
+                                "pseudocount_mode": "neff_scaled_uniform",
+                                "pairwise_enabled": False,
+                                "pairwise_eligible": False,
+                                "estimated_parameters": ["pseudocount_weight"],
+                            },
+                            "provenance": {
+                                "provider": "MSAProfileProvider",
+                                "resource_sha256": "msa-hash",
+                            },
+                        }
+                    ],
+                    "provenance": [],
+                }
+            ],
+        },
+    }
+
+    messages = build_scientist_hypothesis_messages(
+        profile="scientist profile",
+        sanitized_context=context,
+        evidence=[],
+        output_schema=HYPOTHESIS_SCHEMA,
+    )
+
+    payload = json.loads(messages[1]["content"])
+    feature = payload["context"]["kg_interaction"]["packs"][0]["evidence"][0]
+    assert feature["raw_features"]["sites"]["39"]["contact_count"] == 9
+    assert feature["raw_features"]["resource_id"] == "rcsb:1PGB"
+    assert feature["provenance"]["resource_sha256"] == "abc"
+    conservation = payload["context"]["kg_interaction"]["packs"][0]["evidence"][1]
+    assert conservation["raw_features"]["neff_per_length"] == 0.27
+    assert conservation["raw_features"]["pairwise_enabled"] is False
+    assert conservation["raw_features"]["estimated_parameters"] == [
+        "pseudocount_weight"
+    ]
+    assert "backend_coordinate_dump" not in messages[1]["content"]
+    assert "private_cache_state" not in messages[1]["content"]
+
+
 def _reflection(variant_id: str) -> dict:
     return {
         "variant_id": variant_id,
