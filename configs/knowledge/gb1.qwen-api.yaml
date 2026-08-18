@@ -6,11 +6,11 @@ soft_weight: 0.20
 legacy_mode: false
 legacy_contributes_to_selection: false
 fusion_mode: independent_features
-parameter_set_id: gb1-knowledge:v2
+parameter_set_id: gb1-knowledge:qwen-api-v1
 local_knowledge:
   enabled: true
-  corpus_index_path: artifacts/local_knowledge/corpus/directed_evolution-v4.sqlite
-  retrieval_overlay_path: artifacts/local_knowledge/overlays/gb1.sqlite
+  corpus_index_path: artifacts/local_knowledge/corpus/directed_evolution-qwen-v4.sqlite
+  retrieval_overlay_path: artifacts/local_knowledge/overlays/gb1-qwen-api.sqlite
   allow_remote_context: true
   roots:
     - path: resources/local_knowledge/directed_evolution
@@ -28,12 +28,9 @@ local_knowledge:
     mode: hybrid
     lexical_backend: sqlite_fts5
     dense_enabled: true
-    embedding_backend: local
-    embedding_model_path: models/embeddings/bge-small-en-v1.5
-    embedding_model_id: BAAI/bge-small-en-v1.5
-    embedding_model_revision: 5c38ec7c405ec4b44b94cc5a9bb96e735b38267a
-    embedding_query_prefix: "Represent this sentence for searching relevant passages: "
-    embedding_document_prefix: ""
+    embedding_backend: api
+    embedding_model_path: null
+    embedding_api_config: configs/knowledge/api/embedding.qwen-v4.yaml
     allow_model_download: false
     fusion: rrf
     top_k: 8
@@ -48,7 +45,10 @@ local_knowledge:
     instruction_content_policy: reject
     dense_search_backend: numpy_exact
     max_exact_dense_chunks: 50000
-    reranker_backend: none
+    reranker_backend: api
+    reranker_model_path: null
+    reranker_api_config: configs/knowledge/api/reranker.qwen3.yaml
+    minimum_reranker_score: null
   kg_update:
     enabled: true
     materialization: retrieved_only
@@ -114,7 +114,7 @@ parameters:
     update_policy: round_boundary_only
     min_evidence: 32
     source: project_prior_pending_calibration
-    version: gb1-knowledge:v2
+    version: gb1-knowledge:qwen-api-v1
   kg.confidence_base:
     value: 0.25
     category: policy
@@ -125,7 +125,7 @@ parameters:
     update_policy: round_boundary_only
     min_evidence: 32
     source: project_prior_pending_calibration
-    version: gb1-knowledge:v2
+    version: gb1-knowledge:qwen-api-v1
   kg.support_gain:
     value: 0.03
     category: policy
@@ -136,7 +136,7 @@ parameters:
     update_policy: round_boundary_only
     min_evidence: 32
     source: project_prior_pending_calibration
-    version: gb1-knowledge:v2
+    version: gb1-knowledge:qwen-api-v1
   kg.confidence_cap:
     value: 0.85
     category: policy
@@ -147,7 +147,7 @@ parameters:
     update_policy: round_boundary_only
     min_evidence: 32
     source: project_prior_pending_calibration
-    version: gb1-knowledge:v2
+    version: gb1-knowledge:qwen-api-v1
 site_profiles:
   "39": {wild_type: V, tolerated: [V, F, W, Y, L, I, M], structure_risk: 0.20}
   "40": {wild_type: D, tolerated: [D, E, N, Q, H, W], structure_risk: 0.35}

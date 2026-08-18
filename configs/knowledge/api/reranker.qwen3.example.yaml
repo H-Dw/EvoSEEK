@@ -1,0 +1,16 @@
+schema_version: reranker-api:v1
+provider: dashscope
+endpoint: "https://<YOUR_WORKSPACE_ID>.cn-beijing.maas.aliyuncs.com/compatible-api/v1/reranks"
+api_key: "${DASHSCOPE_API_KEY}"
+model: qwen3-rerank
+model_family: qwen
+model_revision: "provider-managed:2026-07-01"
+max_input_tokens: 32768
+max_documents: 64
+timeout_seconds: 30
+max_retries: 3
+instruction: "Given an English scientific question about protein engineering, rank passages by whether they directly provide evidence that answers or constrains the question."
+tokenizer_model_path: null
+tokenizer_model_id: Qwen/qwen3-rerank
+tokenizer_revision: "provider-managed:2026-07-01"
+score_kind: probability

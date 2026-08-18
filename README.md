@@ -273,6 +273,90 @@ python scripts/run_demo.py --config configs/experiments/fitness_direct.yaml --se
 `knowledge_graph_queries.json` 支持重放与审计。KG 将实验 observation、模型 prediction、
 理化/保守性/结构 evidence 与 hypothesis 分开存储，避免把计算输出误写成实验事实。
 
+### 4.1 本地 RAG 向量检索与 KG 物化诊断
+
+默认配置使用英文原子事实语料、FTS5 + BGE dense hybrid 检索。通用 corpus/vector index 位于
+`artifacts/local_knowledge/corpus/directed_evolution-v4.sqlite`；GB1 泄漏策略与查询审计单独位于
+`artifacts/local_knowledge/overlays/gb1.sqlite`，不会把目标状态写回通用向量库。首次运行前显式
+安装依赖并下载固定 revision；campaign runtime 不联网：
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -e ".[rag]"
+.\.venv\Scripts\python.exe scripts\setup_local_rag_models.py --model bge-small-en-v1.5
+.\.venv\Scripts\python.exe -m fitness_agents.cli knowledge index `
+  configs\experiments\knowledge_agent.yaml
+.\.venv\Scripts\python.exe -m fitness_agents.cli knowledge inspect `
+  configs\experiments\knowledge_agent.yaml
+
+.\.venv\Scripts\python.exe scripts\rag_diagnostics\simulate_local_rag_to_kg.py `
+  --embedding-model models\embeddings\bge-small-en-v1.5 `
+  --output-dir artifacts\rag-diagnostics\manual-run `
+  --strict
+
+$env:FITNESS_RAG_TEST_MODEL = (Resolve-Path models\embeddings\bge-small-en-v1.5)
+.\.venv\Scripts\python.exe -m pytest -q `
+  tests\integration\test_local_rag_real_embedding_to_kg.py
+```
+
+诊断会输出 `diagnostic.json`、`summary.md`、真实向量 SQLite 和 structured KG SQLite，并比较
+lexical、dense、hybrid 的 gold-query 命中率。`--strict` 还会检查 chunk token budget、模型截断、
+embedding 覆盖率、no-answer 阈值以及从既有 lexical 索引启用 dense 时是否完成向量回填。查询和
+目标数据库统一为英文；模型实际 tokenizer 控制 chunk 上限，禁止静默截断。
+
+新增外部知识时使用项目 skill 并执行 bundle 校验：
+
+```powershell
+.\.venv\Scripts\python.exe `
+  skills\ingest-scientific-knowledge\scripts\validate_knowledge_bundle.py `
+  resources\local_knowledge\directed_evolution `
+  --embedding-model models\embeddings\bge-small-en-v1.5
+```
+
+检索 chunk 只生成 `context:<protein>` 的非排序上下文。若以后开启
+`contributes_to_selection=true`，还必须同时使用 `calibrated_candidate_projection` 和一个
+`status: validated` 的候选级校准文件；draft 示例位于
+`configs/knowledge/local_rag_selection.example.yaml`，默认会被拒绝。
+
+### 4.2 API embedding 与 reranker
+
+远程向量化通过独立 YAML 配置，不在仓库中保存密钥。默认示例是 Qwen
+`text-embedding-v4`；另有 Jina v5、TEI 托管 BGE-M3/E5，以及 Qwen/Jina/BGE reranker
+示例，均位于 `configs/knowledge/api/`。先复制示例、替换 endpoint 中的 workspace/host，
+再通过环境变量提供密钥：
+
+```powershell
+$env:DASHSCOPE_API_KEY = "<YOUR_API_KEY>"
+
+.\.venv\Scripts\python.exe scripts\rag_api_embeddings.py probe `
+  --embedding-config configs\knowledge\api\embedding.default-qwen.example.yaml `
+  --prompt "How does epistasis constrain combinatorial mutation design?" `
+  --document "Epistatic effects make mutation outcomes depend on genetic background."
+
+.\.venv\Scripts\python.exe scripts\rag_api_embeddings.py index `
+  --experiment-config configs\experiments\knowledge_agent.yaml `
+  --embedding-config configs\knowledge\api\embedding.default-qwen.example.yaml `
+  --index-path artifacts\local_knowledge\corpus\directed_evolution-qwen-v4.sqlite
+```
+
+`probe` 分别调用 query/document 编码，并只输出向量维度、范数、哈希与八维预览；`index`
+复用生产解析、原子 chunk、manifest 和 SQLite 写入流程。若需要重排，在两个命令中增加
+`--reranker-config configs\knowledge\api\reranker.qwen3.example.yaml`。默认 20 条原子事实
+语料仍不启用 reranker；先用项目查询集校准 Recall@K、MRR/nDCG、no-answer 和阈值，再决定上线。
+
+若希望 campaign 直接使用 API，在 knowledge YAML 的 `retrieval` 中配置：
+
+```yaml
+embedding_backend: api
+embedding_model_path: null
+embedding_api_config: configs/knowledge/api/embedding.default-qwen.example.yaml
+reranker_backend: api  # 或 none
+reranker_api_config: configs/knowledge/api/reranker.qwen3.example.yaml
+```
+
+API 返回向量会检查数量、顺序、维度、有限值与零向量，并在本地做 L2 归一化；请求禁止服务端
+静默截断。manifest 记录 provider、模型家族、模型/部署版本、endpoint 哈希、task/instruction、
+维度和 tokenizer 策略，但不会记录 API key。
+
 ## 5. 四种规定 baseline
 
 四种模式共享相同 initial/validation/oracle/final split、查询预算、fitness predictor 和 seed。

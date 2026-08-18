@@ -1,0 +1,16 @@
+schema_version: reranker-api:v1
+provider: tei
+endpoint: "https://<YOUR_TEI_HOST>/rerank"
+api_key: "${TEI_API_KEY}"
+model: BAAI/bge-reranker-v2-m3
+model_family: bge
+model_revision: "REPLACE_WITH_PINNED_HF_COMMIT"
+max_input_tokens: 8192
+max_documents: 64
+timeout_seconds: 60
+max_retries: 3
+instruction: null
+tokenizer_model_path: null
+tokenizer_model_id: BAAI/bge-reranker-v2-m3
+tokenizer_revision: "REPLACE_WITH_PINNED_HF_COMMIT"
+score_kind: raw_logit

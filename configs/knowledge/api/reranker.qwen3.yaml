@@ -1,0 +1,2 @@
+api_catalog: configs/api/aliyun-qwen-workspace.yaml
+item: rag_reranker

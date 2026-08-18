@@ -1,0 +1,57 @@
+schema_version: inference-api-catalog:v1
+provider: aliyun-model-studio
+connection:
+  workspace_id: llm-ftroma9pu4h3mv9k
+  region: cn-beijing
+  origin: "https://llm-ftroma9pu4h3mv9k.cn-beijing.maas.aliyuncs.com"
+  api_key: "env:DASHSCOPE_API_KEY"
+items:
+  scientist_llm:
+    kind: llm
+    provider: openai_compatible
+    base_url_path: /compatible-mode/v1
+    model: qwen-plus
+    temperature: 0.0
+    max_tokens: 8192
+    reasoning_effort: null
+    thinking: null
+  rag_embedding:
+    kind: embedding
+    schema_version: embedding-api:v1
+    provider: dashscope
+    endpoint_path: /api/v1/services/embeddings/text-embedding/text-embedding
+    model: text-embedding-v4
+    model_family: qwen
+    model_revision: "provider-managed:model-id:text-embedding-v4"
+    dimension: 1024
+    max_input_tokens: 8192
+    batch_size: 10
+    timeout_seconds: 30
+    max_retries: 3
+    query_task: query
+    document_task: document
+    query_instruction: "Given an English scientific question about protein engineering, retrieve atomic evidence passages that directly support or constrain the question."
+    document_instruction: null
+    query_prefix: ""
+    document_prefix: ""
+    tokenizer_model_path: null
+    tokenizer_model_id: Qwen/text-embedding-v4
+    tokenizer_revision: "provider-managed:model-id:text-embedding-v4"
+    normalize_embeddings: true
+  rag_reranker:
+    kind: reranker
+    schema_version: reranker-api:v1
+    provider: dashscope
+    endpoint_path: /compatible-api/v1/reranks
+    model: qwen3-rerank
+    model_family: qwen
+    model_revision: "provider-managed:model-id:qwen3-rerank"
+    max_input_tokens: 4000
+    max_documents: 64
+    timeout_seconds: 30
+    max_retries: 3
+    instruction: "Given an English scientific question about protein engineering, rank passages by whether they directly provide evidence that answers or constrains the question."
+    tokenizer_model_path: null
+    tokenizer_model_id: Qwen/qwen3-rerank
+    tokenizer_revision: "provider-managed:model-id:qwen3-rerank"
+    score_kind: probability

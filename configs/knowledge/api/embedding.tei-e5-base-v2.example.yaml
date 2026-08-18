@@ -1,0 +1,22 @@
+schema_version: embedding-api:v1
+provider: tei
+endpoint: "https://<YOUR_TEI_HOST>/v1/embeddings"
+api_key: "${TEI_API_KEY}"
+model: intfloat/e5-base-v2
+model_family: e5
+model_revision: "REPLACE_WITH_PINNED_HF_COMMIT"
+dimension: 768
+max_input_tokens: 512
+batch_size: 32
+timeout_seconds: 60
+max_retries: 3
+query_task: null
+document_task: null
+query_instruction: null
+document_instruction: null
+query_prefix: "query: "
+document_prefix: "passage: "
+tokenizer_model_path: null
+tokenizer_model_id: intfloat/e5-base-v2
+tokenizer_revision: "REPLACE_WITH_PINNED_HF_COMMIT"
+normalize_embeddings: true

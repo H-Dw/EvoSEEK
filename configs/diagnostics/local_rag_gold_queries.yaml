@@ -1,0 +1,33 @@
+queries:
+  - id: epistasis_combination
+    query: Why can the effect of a mutation change when it is combined with another mutation?
+    expected_knowledge_type: history_guided_combination
+    expected_terms: [epistasis, genetic background]
+  - id: codon_redundancy_safeguard
+    query: How can reduced codon redundancy lower screening effort in saturation mutagenesis?
+    expected_knowledge_type: sequence_safeguards
+    expected_terms: [codon, screening effort]
+  - id: structure_context
+    query: Why must protein stability design evaluate local packing and hydrogen bonds?
+    expected_knowledge_type: structure_context
+    expected_terms: [packing, structural context]
+  - id: mutation_burden
+    query: How should a combinatorial multi-site library be matched to experimental screening capacity?
+    expected_knowledge_type: mutation_burden
+    expected_terms: [combinatorial, screening capacity]
+  - id: conservative_substitution
+    query: Is a globally conservative amino-acid substitution always tolerated at a constrained site?
+    expected_knowledge_type: substitution_conservativeness
+    expected_terms: [conservative, site-specific]
+  - id: amino_acid_properties
+    query: Can hydropathy or Grantham distance alone predict whether a protein mutation improves fitness?
+    expected_knowledge_type: amino_acid_properties
+    expected_terms: [hydropathy, Grantham]
+  - id: evolution_cycle
+    query: What stages form an iterative directed-evolution learning cycle?
+    expected_knowledge_type: directed_evolution_strategy
+    expected_terms: [diversification, validation]
+  - id: evidence_applicability
+    query: Why must external deep mutational scanning evidence be aligned to the current assay?
+    expected_knowledge_type: evidence_applicability
+    expected_terms: [assay, conditions]

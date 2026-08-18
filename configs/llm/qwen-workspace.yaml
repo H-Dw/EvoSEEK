@@ -1,0 +1,3 @@
+api_catalog: configs/api/aliyun-qwen-workspace.yaml
+item: scientist_llm
+profile: scientific_v1

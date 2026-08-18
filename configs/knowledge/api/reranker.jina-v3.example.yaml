@@ -1,0 +1,16 @@
+schema_version: reranker-api:v1
+provider: jina
+endpoint: "https://api.jina.ai/v1/rerank"
+api_key: "${JINA_API_KEY}"
+model: jina-reranker-v3
+model_family: jina
+model_revision: "provider-managed:2026-08-18"
+max_input_tokens: 131072
+max_documents: 64
+timeout_seconds: 30
+max_retries: 3
+instruction: null
+tokenizer_model_path: null
+tokenizer_model_id: jinaai/jina-reranker-v3
+tokenizer_revision: "provider-managed:2026-08-18"
+score_kind: probability

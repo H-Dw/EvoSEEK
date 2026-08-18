@@ -1,0 +1,22 @@
+schema_version: embedding-api:v1
+provider: dashscope
+endpoint: "https://<YOUR_WORKSPACE_ID>.cn-beijing.maas.aliyuncs.com/api/v1/services/embeddings/text-embedding/text-embedding"
+api_key: "${DASHSCOPE_API_KEY}"
+model: text-embedding-v4
+model_family: qwen
+model_revision: "provider-managed:2026-07-15"
+dimension: 1024
+max_input_tokens: 8192
+batch_size: 10
+timeout_seconds: 30
+max_retries: 3
+query_task: query
+document_task: document
+query_instruction: "Given an English scientific question about protein engineering, retrieve atomic evidence passages that directly support or constrain the question."
+document_instruction: null
+query_prefix: ""
+document_prefix: ""
+tokenizer_model_path: null
+tokenizer_model_id: Qwen/text-embedding-v4
+tokenizer_revision: "provider-managed:2026-07-15"
+normalize_embeddings: true
