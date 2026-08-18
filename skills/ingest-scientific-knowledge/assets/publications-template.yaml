@@ -1,0 +1,16 @@
+schema_version: scientific-publications:v1
+generated_from: replace-with-metadata-source
+verified_on: YYYY-MM-DD
+publications:
+  - publication_id: doi:10.xxxx/example
+    title: Exact publication title
+    authors: [First Author, Second Author]
+    year: 2026
+    venue: Exact venue
+    doi: 10.xxxx/example
+    url: https://doi.org/10.xxxx/example
+    publication_type: journal-article
+    verification:
+      metadata_source: crossref
+      metadata_verified: false
+      full_text_verified: false

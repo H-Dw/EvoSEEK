@@ -1,0 +1,5 @@
+interface:
+  display_name: Ingest Scientific Knowledge
+  short_description: Save verified English atomic claims for RAG and KG
+  default_prompt: Research target-independent scientific knowledge in English, verify primary sources, and save validated atomic claims with normalized Publication and CitationSupport records.
+  allow_implicit_invocation: true

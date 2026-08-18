@@ -56,6 +56,19 @@ def _knowledge_metadata(front_matter: dict[str, object]) -> tuple[str, dict[str,
         "front_matter": front_matter,
     }
     for key in (
+        "schema_version",
+        "record_type",
+        "claim_id",
+        "statement",
+        "subject",
+        "predicate",
+        "object",
+        "polarity",
+        "claim_kind",
+        "confidence",
+        "applicability",
+        "citation_support",
+        "selection_eligible",
         "language",
         "version",
         "evidence_level",
@@ -67,6 +80,17 @@ def _knowledge_metadata(front_matter: dict[str, object]) -> tuple[str, dict[str,
     ):
         if key in front_matter:
             metadata[key] = front_matter[key]
+    if metadata.get("record_type") == "atomic_claim":
+        required = ("schema_version", "claim_id", "statement", "subject", "predicate", "object")
+        missing = [key for key in required if not str(metadata.get(key, "")).strip()]
+        if missing:
+            raise ValueError(f"Atomic claim front matter is missing: {', '.join(missing)}")
+        polarity = str(metadata.get("polarity", "support"))
+        if polarity not in {"support", "contradict", "neutral", "unknown"}:
+            raise ValueError("Atomic claim polarity is invalid")
+        citation_support = metadata.get("citation_support", [])
+        if not isinstance(citation_support, list):
+            raise TypeError("Atomic claim citation_support must be a list")
     return knowledge_type, metadata
 
 

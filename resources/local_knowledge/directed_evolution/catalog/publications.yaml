@@ -1,0 +1,175 @@
+schema_version: scientific-publications:v1
+generated_from: Crossref REST metadata
+verified_on: 2026-08-18
+publications:
+  - publication_id: doi:10.1016/0022-2836(82)90515-0
+    title: A simple method for displaying the hydropathic character of a protein
+    authors: [Jack Kyte, Russell F. Doolittle]
+    year: 1982
+    venue: Journal of Molecular Biology
+    doi: 10.1016/0022-2836(82)90515-0
+    url: https://doi.org/10.1016/0022-2836(82)90515-0
+    publication_type: journal-article
+    verification: {metadata_source: crossref, metadata_verified: true, full_text_verified: false}
+  - publication_id: doi:10.1126/science.185.4154.862
+    title: Amino Acid Difference Formula to Help Explain Protein Evolution
+    authors: [R. Grantham]
+    year: 1974
+    venue: Science
+    doi: 10.1126/science.185.4154.862
+    url: https://doi.org/10.1126/science.185.4154.862
+    publication_type: journal-article
+    verification: {metadata_source: crossref, metadata_verified: true, full_text_verified: false}
+  - publication_id: doi:10.1073/pnas.89.22.10915
+    title: Amino acid substitution matrices from protein blocks
+    authors: [S. Henikoff, J. G. Henikoff]
+    year: 1992
+    venue: Proceedings of the National Academy of Sciences
+    doi: 10.1073/pnas.89.22.10915
+    url: https://doi.org/10.1073/pnas.89.22.10915
+    publication_type: journal-article
+    verification: {metadata_source: crossref, metadata_verified: true, full_text_verified: false}
+  - publication_id: doi:10.1093/nar/gkg509
+    title: "SIFT: predicting amino acid changes that affect protein function"
+    authors: [P. C. Ng, S. Henikoff]
+    year: 2003
+    venue: Nucleic Acids Research
+    doi: 10.1093/nar/gkg509
+    url: https://doi.org/10.1093/nar/gkg509
+    publication_type: journal-article
+    verification: {metadata_source: crossref, metadata_verified: true, full_text_verified: false}
+  - publication_id: doi:10.1038/nmeth.3027
+    title: "Deep mutational scanning: a new style of protein science"
+    authors: [Douglas M. Fowler, Stanley Fields]
+    year: 2014
+    venue: Nature Methods
+    doi: 10.1038/nmeth.3027
+    url: https://doi.org/10.1038/nmeth.3027
+    publication_type: review
+    verification: {metadata_source: crossref, metadata_verified: true, full_text_verified: false}
+  - publication_id: doi:10.1093/nar/gkp410
+    title: "HotSpot Wizard: a web server for identification of hot spots in protein engineering"
+    authors: [A. Pavelka, E. Chovancova, J. Damborsky]
+    year: 2009
+    venue: Nucleic Acids Research
+    doi: 10.1093/nar/gkp410
+    url: https://doi.org/10.1093/nar/gkp410
+    publication_type: journal-article
+    verification: {metadata_source: crossref, metadata_verified: true, full_text_verified: false}
+  - publication_id: doi:10.1146/annurev-biochem-062917-012102
+    title: Principles of Protein Stability and Their Application in Computational Design
+    authors: [Adi Goldenzweig, Sarel J. Fleishman]
+    year: 2018
+    venue: Annual Review of Biochemistry
+    doi: 10.1146/annurev-biochem-062917-012102
+    url: https://doi.org/10.1146/annurev-biochem-062917-012102
+    publication_type: review
+    verification: {metadata_source: crossref, metadata_verified: true, full_text_verified: false}
+  - publication_id: doi:10.1038/nrg3927
+    title: Methods for the directed evolution of proteins
+    authors: [Michael S. Packer, David R. Liu]
+    year: 2015
+    venue: Nature Reviews Genetics
+    doi: 10.1038/nrg3927
+    url: https://doi.org/10.1038/nrg3927
+    publication_type: review
+    verification: {metadata_source: crossref, metadata_verified: true, full_text_verified: false}
+  - publication_id: doi:10.1016/j.jmb.2005.05.023
+    title: Why High-error-rate Random Mutagenesis Libraries are Enriched in Functional and Improved Proteins
+    authors: [D. Allan Drummond, Brent L. Iverson, George Georgiou, Frances H. Arnold]
+    year: 2005
+    venue: Journal of Molecular Biology
+    doi: 10.1016/j.jmb.2005.05.023
+    url: https://doi.org/10.1016/j.jmb.2005.05.023
+    publication_type: journal-article
+    verification: {metadata_source: crossref, metadata_verified: true, full_text_verified: false}
+  - publication_id: doi:10.7554/elife.16965
+    title: Adaptation in protein fitness landscapes is facilitated by indirect paths
+    authors: [Nicholas C. Wu, Lei Dai, C. Anders Olson, James O. Lloyd-Smith, Ren Sun]
+    year: 2016
+    venue: eLife
+    doi: 10.7554/eLife.16965
+    url: https://doi.org/10.7554/eLife.16965
+    publication_type: journal-article
+    verification: {metadata_source: crossref, metadata_verified: true, full_text_verified: false}
+  - publication_id: doi:10.1002/cbic.200800298
+    title: Addressing the Numbers Problem in Directed Evolution
+    authors: [Manfred T. Reetz, Daniel Kahakeaw, Renate Lohmer]
+    year: 2008
+    venue: ChemBioChem
+    doi: 10.1002/cbic.200800298
+    url: https://doi.org/10.1002/cbic.200800298
+    publication_type: journal-article
+    verification: {metadata_source: crossref, metadata_verified: true, full_text_verified: false}
+  - publication_id: doi:10.1021/sb300037w
+    title: Reducing Codon Redundancy and Screening Effort of Combinatorial Protein Libraries Created by Saturation Mutagenesis
+    authors: [Sabrina Kille, Carlos G. Acevedo-Rocha, Loreto P. Parra, Zhi-Gang Zhang, Diederik J. Opperman, Manfred T. Reetz, Juan Pablo Acevedo]
+    year: 2012
+    venue: ACS Synthetic Biology
+    doi: 10.1021/sb300037w
+    url: https://doi.org/10.1021/sb300037w
+    publication_type: journal-article
+    verification: {metadata_source: crossref, metadata_verified: true, full_text_verified: false}
+  - publication_id: doi:10.1146/annurev.biochem.052308.105824
+    title: Adding New Chemistries to the Genetic Code
+    authors: [Chang C. Liu, Peter G. Schultz]
+    year: 2010
+    venue: Annual Review of Biochemistry
+    doi: 10.1146/annurev.biochem.052308.105824
+    url: https://doi.org/10.1146/annurev.biochem.052308.105824
+    publication_type: review
+    verification: {metadata_source: crossref, metadata_verified: true, full_text_verified: false}
+  - publication_id: doi:10.1146/annurev-biochem-062917-012034
+    title: Directed Evolution of Protein Catalysts
+    authors: [Cathleen Zeymer, Donald Hilvert]
+    year: 2018
+    venue: Annual Review of Biochemistry
+    doi: 10.1146/annurev-biochem-062917-012034
+    url: https://doi.org/10.1146/annurev-biochem-062917-012034
+    publication_type: review
+    verification: {metadata_source: crossref, metadata_verified: true, full_text_verified: false}
+  - publication_id: doi:10.1038/nprot.2007.72
+    title: Iterative saturation mutagenesis (ISM) for rapid directed evolution of functional enzymes
+    authors: [Manfred T. Reetz, Jose Daniel Carballeira]
+    year: 2007
+    venue: Nature Protocols
+    doi: 10.1038/nprot.2007.72
+    url: https://doi.org/10.1038/nprot.2007.72
+    publication_type: protocol
+    verification: {metadata_source: crossref, metadata_verified: true, full_text_verified: false}
+  - publication_id: doi:10.1039/c4cs00351a
+    title: "Synthetic biology for the directed evolution of protein biocatalysts: navigating sequence space intelligently"
+    authors: [Andrew Currin, Neil Swainston, Philip J. Day, Douglas B. Kell]
+    year: 2015
+    venue: Chemical Society Reviews
+    doi: 10.1039/C4CS00351A
+    url: https://doi.org/10.1039/C4CS00351A
+    publication_type: review
+    verification: {metadata_source: crossref, metadata_verified: true, full_text_verified: false}
+  - publication_id: doi:10.1002/pro.2897
+    title: Epistasis in protein evolution
+    authors: [Tyler N. Starr, Joseph W. Thornton]
+    year: 2016
+    venue: Protein Science
+    doi: 10.1002/pro.2897
+    url: https://doi.org/10.1002/pro.2897
+    publication_type: review
+    verification: {metadata_source: crossref, metadata_verified: true, full_text_verified: false}
+  - publication_id: doi:10.1016/j.cub.2014.09.072
+    title: A Comprehensive Biophysical Description of Pairwise Epistasis throughout an Entire Protein Domain
+    authors: [C. Anders Olson, Nicholas C. Wu, Ren Sun]
+    year: 2014
+    venue: Current Biology
+    doi: 10.1016/j.cub.2014.09.072
+    url: https://doi.org/10.1016/j.cub.2014.09.072
+    publication_type: journal-article
+    verification: {metadata_source: crossref, metadata_verified: true, full_text_verified: false}
+  - publication_id: doi:10.1038/nrm2805
+    title: Exploring protein fitness landscapes by directed evolution
+    authors: [Philip A. Romero, Frances H. Arnold]
+    year: 2009
+    venue: Nature Reviews Molecular Cell Biology
+    doi: 10.1038/nrm2805
+    url: https://doi.org/10.1038/nrm2805
+    publication_type: review
+    verification: {metadata_source: crossref, metadata_verified: true, full_text_verified: false}
