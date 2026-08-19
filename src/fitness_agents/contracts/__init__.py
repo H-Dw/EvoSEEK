@@ -1,4 +1,11 @@
 from .agent_io import RoleActivationState
+from .batch_review import (
+    AssayControl,
+    BatchDiversityReceipt,
+    BatchReviewContext,
+    ControlFeasibilityReceipt,
+    PredictionReviewCard,
+)
 from .capabilities import PredictorCapabilities
 from .design import (
     RankedSequenceDesign,
@@ -24,6 +31,7 @@ from .interfaces import (
     FitnessPredictor,
     LLMClient,
 )
+from .mutation_evidence import MutationEvidenceBatchMetadata, MutationEvidenceCard
 from .schemas import (
     ApprovedBatch,
     CampaignState,
@@ -42,8 +50,12 @@ __all__ = [
     "AcquisitionPolicy",
     "ApprovedBatch",
     "ApprovedExperimentBackend",
+    "AssayControl",
+    "BatchDiversityReceipt",
+    "BatchReviewContext",
     "CampaignState",
     "CandidateGenerator",
+    "ControlFeasibilityReceipt",
     "CriticClient",
     "CritiqueDecision",
     "DraftBatch",
@@ -59,8 +71,11 @@ __all__ = [
     "Hypothesis",
     "HypothesisAssessment",
     "LLMClient",
+    "MutationEvidenceBatchMetadata",
+    "MutationEvidenceCard",
     "OpenDesignRequestPreview",
     "Prediction",
+    "PredictionReviewCard",
     "PredictorCapabilities",
     "RankedSequenceDesign",
     "ResolvedDesignSpace",

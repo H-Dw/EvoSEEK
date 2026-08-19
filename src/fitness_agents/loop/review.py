@@ -7,6 +7,7 @@ from typing import Any
 from fitness_agents.agents.critic import CriticAgent
 from fitness_agents.agents.output_guards import RevisionConstraints
 from fitness_agents.contracts.agent_io import RoleActivationState
+from fitness_agents.contracts.batch_review import BatchReviewContext, ControlFeasibilityReceipt
 from fitness_agents.contracts.schemas import (
     ApprovedBatch,
     ConflictReport,
@@ -33,6 +34,21 @@ class HypothesisRevisionRequested(ReviewRejected):
     def __init__(self, message: str, *, decisions: Sequence[CritiqueDecision]) -> None:
         super().__init__(message, decisions=decisions)
         self.decision = decisions[-1]
+
+
+class ControlFeasibilityError(ReviewRejected):
+    """Requested controls cannot be assembled from the frozen design universe."""
+
+    def __init__(
+        self,
+        receipt: ControlFeasibilityReceipt,
+        *,
+        decisions: Sequence[CritiqueDecision],
+    ) -> None:
+        super().__init__(
+            f"Control feasibility gate failed: {receipt.reason}", decisions=decisions
+        )
+        self.receipt = receipt
 
 
 @dataclass(frozen=True)
@@ -90,9 +106,23 @@ class RevisionPlanner:
             }:
                 excluded.update(change.target_ids)
             elif change.action is RequiredChangeAction.ADD_CONTROL:
-                constraints = replace(constraints, require_controls=True)
+                requested = change.parameters.get("control_count")
+                constraints = replace(
+                    constraints,
+                    require_controls=True,
+                    required_control_count=(
+                        int(requested) if requested is not None else 2
+                    ),
+                )
             elif change.action is RequiredChangeAction.INCREASE_DIVERSITY:
-                constraints = replace(constraints, increase_diversity=True)
+                requested = change.parameters.get("minimum_batch_distance")
+                constraints = replace(
+                    constraints,
+                    increase_diversity=True,
+                    minimum_batch_distance=(
+                        int(requested) if requested is not None else None
+                    ),
+                )
             elif change.action is RequiredChangeAction.ADD_EXPLORATION_QUOTA:
                 constraints = replace(constraints, add_exploration=True)
             elif change.action is RequiredChangeAction.REDUCE_MUTATION_DEPTH:
@@ -151,6 +181,7 @@ class BoundedReviewLoop:
         context_evidence: Sequence[Evidence] = (),
         hypothesis: Any | None = None,
         activation_state: RoleActivationState | dict[str, Any] | None = None,
+        review_context_provider: Callable[[DraftBatch], BatchReviewContext] | None = None,
         on_attempt: Callable[[DraftBatch, ConflictReport, CritiqueDecision], Any] | None = None,
         on_attempt_start: Callable[[DraftBatch, ConflictReport], Any] | None = None,
     ) -> ReviewLoopResult:
@@ -163,6 +194,11 @@ class BoundedReviewLoop:
                 draft = draft_builder(attempt, parent_id, exclusions, constraints)
             except TypeError:
                 draft = draft_builder(attempt, parent_id, exclusions)
+            review_context = (
+                review_context_provider(draft)
+                if review_context_provider is not None
+                else None
+            )
             report = self.validator.validate(
                 draft,
                 variants=variants,
@@ -172,9 +208,26 @@ class BoundedReviewLoop:
                 pending_ids=pending_ids,
                 allowed_ids=allowed_ids,
                 expected_batch_size=expected_batch_size,
+                prediction_decision_eligible=(
+                    {
+                        variant_id: card.decision_eligible
+                        for variant_id, card in review_context.prediction_status_by_id.items()
+                    }
+                    if review_context is not None
+                    else None
+                ),
             )
             if on_attempt_start is not None:
                 on_attempt_start(draft, report)
+            if (
+                review_context is not None
+                and review_context.review_controls
+                and review_context.control_feasibility is not None
+                and not review_context.control_feasibility.feasible
+            ):
+                raise ControlFeasibilityError(
+                    review_context.control_feasibility, decisions=attempts
+                )
             decision = self.critic.review(
                 draft=draft,
                 variants=variants,
@@ -184,6 +237,7 @@ class BoundedReviewLoop:
                 context_evidence=context_evidence,
                 hypothesis=hypothesis,
                 activation_state=activation_state,
+                batch_review_context=review_context,
             )
             attempts.append(decision)
             if on_attempt is not None:

@@ -27,7 +27,7 @@ from .open_design import (
     resolve_design_space,
 )
 from .quota_acquisition import AgentQuotaBatchAcquisition, AgentQuotaSelection
-from .uncertainty import AgentUncertaintySelector
+from .uncertainty import AgentUncertaintySelector, reserve_hypothesis_negative_controls
 
 __all__ = [
     "AgentQuotaBatchAcquisition",
@@ -51,6 +51,7 @@ __all__ = [
     "normalize_visible_variants",
     "parse_mutation_notation",
     "register_candidate_generator",
+    "reserve_hypothesis_negative_controls",
     "resolve_design_positions",
     "resolve_design_space",
 ]

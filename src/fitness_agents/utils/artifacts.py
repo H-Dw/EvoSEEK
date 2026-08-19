@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from pydantic import BaseModel
 
 from fitness_agents.contracts.schemas import SelectionRecord
 
@@ -21,6 +22,8 @@ LOGGER = logging.getLogger("fitness_agents.progress")
 
 
 def _jsonable(value: Any) -> Any:
+    if isinstance(value, BaseModel):
+        return _jsonable(value.model_dump(mode="json"))
     if is_dataclass(value):
         return _jsonable(asdict(value))
     if isinstance(value, dict):
@@ -164,8 +167,13 @@ class JsonArtifactWriter:
             "profile",
             "system_chars",
             "user_chars",
+            "assistant_chars",
+            "input_chars",
             "field_chars",
             "max_input_chars",
+            "remaining_chars",
+            "utilization_ratio",
+            "budget_band",
             "request_started",
         )
         record = {key: _jsonable(payload.get(key)) for key in allowed}

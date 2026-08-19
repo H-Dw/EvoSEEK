@@ -133,7 +133,9 @@ class BatchHardValidator:
         self.sequence = SequenceConflictDetector(
             ood_warning_threshold=critic.ood_warning_threshold,
             model_disagreement_threshold=critic.model_disagreement_threshold,
-            min_batch_distance=critic.min_batch_distance,
+            min_batch_distance=(
+                critic.min_batch_distance if critic.review_diversity else 0
+            ),
         )
 
     def validate(
@@ -147,6 +149,7 @@ class BatchHardValidator:
         pending_ids: set[str],
         allowed_ids: set[str],
         expected_batch_size: int,
+        prediction_decision_eligible: Mapping[str, bool] | None = None,
     ) -> ConflictReport:
         selected = [variants[item] for item in draft.candidate_ids if item in variants]
         conflicts = self.residue.detect(
@@ -163,6 +166,7 @@ class BatchHardValidator:
                 pending_ids=pending_ids,
                 allowed_ids=allowed_ids,
                 expected_batch_size=expected_batch_size,
+                prediction_decision_eligible=prediction_decision_eligible,
             )
         )
         visible_evidence_ids = {

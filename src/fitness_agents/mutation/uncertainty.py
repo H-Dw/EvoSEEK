@@ -31,6 +31,68 @@ def _hypothesis_score(
     return float(matches / tested) if tested else 0.0
 
 
+def reserve_hypothesis_negative_controls(
+    selected_pool: Sequence[Variant],
+    full_pool: Sequence[Variant],
+    *,
+    hypothesis: Hypothesis | None,
+    position_to_index: Mapping[int, int],
+    strong_threshold: float,
+    required_controls: int,
+    reserve_multiplier: int = 4,
+) -> list[Variant]:
+    """Keep matched hypothesis-negative controls outside a truncated strong pool.
+
+    Candidate generators may legitimately rank every hypothesis-positive sequence ahead of
+    all controls.  This deterministic reserve runs before scoring/LLM review so quota
+    feasibility is a property of the design space, not a request the Critic must invent.
+    """
+
+    selected = list(selected_pool)
+    if required_controls <= 0 or hypothesis is None:
+        return selected
+    selected_ids = {item.variant_id for item in selected}
+    selected_depths = {item.mutation_count for item in selected}
+    existing_controls = [
+        item
+        for item in selected
+        if _hypothesis_score(item, hypothesis, position_to_index) < strong_threshold
+    ]
+    reserve_target = max(0, required_controls * reserve_multiplier - len(existing_controls))
+    if reserve_target == 0:
+        return selected
+
+    def nearest_similarity(candidate: Variant) -> float:
+        if not selected:
+            return 0.0
+        return max(
+            1.0
+            - sum(
+                left != right
+                for left, right in zip(candidate.variant, anchor.variant, strict=True)
+            )
+            / max(len(candidate.variant), 1)
+            for anchor in selected
+        )
+
+    controls = [
+        item
+        for item in full_pool
+        if item.variant_id not in selected_ids
+        and _hypothesis_score(item, hypothesis, position_to_index) < strong_threshold
+    ]
+    controls.sort(
+        key=lambda item: (
+            item.mutation_count in selected_depths,
+            nearest_similarity(item),
+            _hypothesis_score(item, hypothesis, position_to_index),
+            item.variant_id,
+        ),
+        reverse=True,
+    )
+    return [*selected, *controls[:reserve_target]]
+
+
 def _evidence_score(items: Sequence[Evidence]) -> float:
     if not items:
         return 0.0

@@ -12,6 +12,7 @@ import numpy as np
 from fitness_agents.acquisition import create_policy
 from fitness_agents.active_learning import create_active_learning_module
 from fitness_agents.agents.client_registry import create_role_client_bundle
+from fitness_agents.agents.context_projection import approved_analysis_payload
 from fitness_agents.agents.critic import CriticAgent, OpenAICriticClient, RuleBasedCriticClient
 from fitness_agents.agents.hypothesis_graph import HypothesisReviewGraph
 from fitness_agents.agents.llm import create_llm_client
@@ -22,13 +23,23 @@ from fitness_agents.agents.main_hypothesis_critic import (
 from fitness_agents.agents.output_guards import RevisionConstraints, critic_revision_payload
 from fitness_agents.agents.rethink import create_rethink_client
 from fitness_agents.agents.scientist import ScientistAgent
-from fitness_agents.agents.subcritic import RemoteSubCritic, RuleBasedSubCritic
+from fitness_agents.agents.subcritic import (
+    DeterministicSubGateReviewer,
+    RemoteSubCritic,
+    RuleBasedSubCritic,
+)
 from fitness_agents.agents.subscientist import RemoteSubScientist, RuleBasedSubScientist
 from fitness_agents.config import ExperimentConfig
 from fitness_agents.contracts.agent_io import (
     ReThinkContextInput,
     RoleActivationState,
     ScientistContextInput,
+)
+from fitness_agents.contracts.batch_review import (
+    BatchReviewContext,
+    PredictionReviewCard,
+    batch_diversity_receipt,
+    prediction_review_card,
 )
 from fitness_agents.contracts.hypothesis_pipeline import CompletionManifest
 from fitness_agents.contracts.schemas import (
@@ -41,6 +52,7 @@ from fitness_agents.contracts.schemas import (
     ValidationRecord,
     Variant,
 )
+from fitness_agents.contracts.scoring_snapshot import RoundScoringSnapshot
 from fitness_agents.data import (
     load_campaign_fold_bundle,
     load_dataset_bundle,
@@ -76,6 +88,7 @@ from fitness_agents.mutation import (
     AgentQuotaBatchAcquisition,
     AgentUncertaintySelector,
     create_candidate_generator,
+    reserve_hypothesis_negative_controls,
 )
 from fitness_agents.plugin_registry import PluginRegistry
 from fitness_agents.protein_features import ProteinTaskContext
@@ -90,6 +103,80 @@ from .review import BoundedReviewLoop, HypothesisRevisionRequested, ReviewReject
 def _descending_ranks(values: dict[str, float]) -> dict[str, int]:
     ordered = sorted(values, key=lambda key: (values[key], key), reverse=True)
     return {variant_id: rank for rank, variant_id in enumerate(ordered, start=1)}
+
+
+def _prediction_review_cards(
+    *,
+    selection_driver: str,
+    hard_validation_by_id: dict[str, Prediction],
+    working_by_id: dict[str, Prediction],
+    active_calibration_status: str | None,
+) -> dict[str, PredictionReviewCard]:
+    if selection_driver == "active_learning":
+        source_predictions = working_by_id
+        source_kind = "active_posterior"
+        calibration_status = (
+            "calibrated" if active_calibration_status == "calibrated" else "uncalibrated"
+        )
+        decision_eligible = True
+    elif selection_driver == "predictor":
+        source_predictions = working_by_id
+        source_kind = "real_model"
+        calibration_status = "unknown"
+        decision_eligible = True
+    else:
+        source_predictions = hard_validation_by_id
+        source_kind = "dry_validation"
+        calibration_status = "unknown"
+        decision_eligible = False
+    output: dict[str, PredictionReviewCard] = {}
+    for variant_id, prediction in source_predictions.items():
+        placeholder = "placeholder" in prediction.model_version.casefold()
+        output[variant_id] = prediction_review_card(
+            prediction,
+            source_kind="placeholder" if placeholder else source_kind,
+            decision_eligible=decision_eligible and not placeholder,
+            calibration_status="not_applicable" if placeholder else calibration_status,
+        )
+    return output
+
+
+def _round_scoring_snapshot(
+    *,
+    hypothesis: Hypothesis | None,
+    version: int,
+    eligible: Sequence[Variant],
+    design_score_by_id: dict[str, DesignScore],
+    prediction_by_id: dict[str, Prediction],
+    all_scores: dict[str, float],
+) -> RoundScoringSnapshot:
+    eligible_tuple = tuple(eligible)
+    eligible_ids = {item.variant_id for item in eligible_tuple}
+    snapshot = RoundScoringSnapshot(
+        hypothesis_id=hypothesis.hypothesis_id if hypothesis is not None else None,
+        version=version,
+        eligible=eligible_tuple,
+        design_score_by_id=dict(design_score_by_id),
+        prediction_by_id=dict(prediction_by_id),
+        model_ranks=_descending_ranks(
+            {
+                variant_id: prediction.fitness_mean
+                for variant_id, prediction in prediction_by_id.items()
+                if variant_id in eligible_ids
+            }
+        ),
+        all_scores=dict(all_scores),
+        acquisition_ranks=_descending_ranks(dict(all_scores)),
+        eligible_ranks=_descending_ranks(
+            {
+                variant_id: all_scores[variant_id]
+                for variant_id in eligible_ids
+                if variant_id in all_scores
+            }
+        ),
+    )
+    snapshot.assert_eligible_coverage()
+    return snapshot
 
 
 def _flatten_evidence(evidence: dict[str, list[Any]], limit: int = 120) -> list[Any]:
@@ -307,7 +394,13 @@ class CampaignRunner:
             "reasoning_effort": self.config.llm.reasoning_effort,
             "thinking": self.config.llm.thinking,
             "max_transport_retries": self.config.llm.max_transport_retries,
-            "max_output_retries": self.config.llm.max_output_retries,
+            "max_truncation_retries": self.config.llm.max_truncation_retries,
+            "max_syntax_retries": self.config.llm.max_syntax_retries,
+            "max_schema_retries": self.config.llm.max_schema_retries,
+            "max_semantic_retries": self.config.llm.max_semantic_retries,
+            "max_unknown_evidence_retries": (
+                self.config.llm.max_unknown_evidence_retries
+            ),
             "retry_backoff_seconds": self.config.llm.retry_backoff_seconds,
             "request_timeout_seconds": self.config.llm.request_timeout_seconds,
             "allow_unknown_evidence_stripping": (
@@ -318,6 +411,14 @@ class CampaignRunner:
         role_clients = create_role_client_bundle(
             self.config.llm.provider,
             profile=self.config.llm.profile,
+            rethink_options={
+                "reasoning_batch_size": (
+                    self.config.llm.rethink_reasoning_batch_size
+                ),
+                "max_parallel_batches": (
+                    self.config.llm.rethink_max_parallel_batches
+                ),
+            },
             **llm_runtime_settings,
         )
         main_scientist_client = role_clients.scientist
@@ -396,7 +497,12 @@ class CampaignRunner:
             channels = ("physchem", "conservation", "structure")
             if config.llm.provider == "mock":
                 child_scientists = {channel: RuleBasedSubScientist() for channel in channels}
-                child_critics = {channel: RuleBasedSubCritic() for channel in channels}
+                child_critic_factory = (
+                    DeterministicSubGateReviewer
+                    if config.hierarchical_hypothesis.subcritic_mode == "deterministic_gate"
+                    else RuleBasedSubCritic
+                )
+                child_critics = {channel: child_critic_factory() for channel in channels}
                 main_hypothesis_critic = RuleBasedMainHypothesisCritic()
             else:
                 child_scientists = {
@@ -407,25 +513,12 @@ class CampaignRunner:
                             config.hierarchical_hypothesis.child_max_input_chars
                             or config.llm.max_input_chars
                         ),
-                        **{
-                            key: value
-                            for key, value in llm_runtime_settings.items()
-                            if key not in {"max_tokens", "max_input_chars"}
-                        },
-                        provider=config.llm.provider,
-                    )
-                    for channel in channels
-                }
-                child_critics = {
-                    channel: RemoteSubCritic(
-                        profile=config.hierarchical_hypothesis.child_critic_profiles[channel],
-                        max_tokens=config.hierarchical_hypothesis.child_critic_max_tokens,
-                        max_input_chars=(
-                            config.hierarchical_hypothesis.critic_max_input_chars
-                            or config.llm.max_input_chars
+                        sample_batch_size=(
+                            config.hierarchical_hypothesis.child_sample_batch_size
                         ),
-                        thinking="disabled",
-                        reasoning_effort=None,
+                        max_parallel_batches=(
+                            config.hierarchical_hypothesis.child_max_parallel_batches
+                        ),
                         **{
                             key: value
                             for key, value in llm_runtime_settings.items()
@@ -437,10 +530,42 @@ class CampaignRunner:
                                 "reasoning_effort",
                             }
                         },
+                        thinking="disabled",
+                        reasoning_effort=None,
                         provider=config.llm.provider,
                     )
                     for channel in channels
                 }
+                if config.hierarchical_hypothesis.subcritic_mode == "deterministic_gate":
+                    child_critics = {
+                        channel: DeterministicSubGateReviewer() for channel in channels
+                    }
+                else:
+                    child_critics = {
+                        channel: RemoteSubCritic(
+                            profile=config.hierarchical_hypothesis.child_critic_profiles[channel],
+                            max_tokens=config.hierarchical_hypothesis.child_critic_max_tokens,
+                            max_input_chars=(
+                                config.hierarchical_hypothesis.critic_max_input_chars
+                                or config.llm.max_input_chars
+                            ),
+                            thinking="disabled",
+                            reasoning_effort=None,
+                            **{
+                                key: value
+                                for key, value in llm_runtime_settings.items()
+                                if key
+                                not in {
+                                    "max_tokens",
+                                    "max_input_chars",
+                                    "thinking",
+                                    "reasoning_effort",
+                                }
+                            },
+                            provider=config.llm.provider,
+                        )
+                        for channel in channels
+                    }
                 main_hypothesis_critic = RemoteMainHypothesisCritic(
                     profile=config.hierarchical_hypothesis.main_critic_profile,
                     max_tokens=config.hierarchical_hypothesis.main_critic_max_tokens,
@@ -451,8 +576,16 @@ class CampaignRunner:
                     **{
                         key: value
                         for key, value in llm_runtime_settings.items()
-                        if key not in {"max_tokens", "max_input_chars"}
+                        if key
+                        not in {
+                            "max_tokens",
+                            "max_input_chars",
+                            "thinking",
+                            "reasoning_effort",
+                        }
                     },
+                    thinking="disabled",
+                    reasoning_effort=None,
                     provider=config.llm.provider,
                 )
             self.hypothesis_graph = HypothesisReviewGraph(
@@ -478,11 +611,17 @@ class CampaignRunner:
                     base_url=config.critic.base_url,
                     provider=config.critic.provider,
                     max_tokens=config.critic.max_tokens,
-                    reasoning_effort=config.critic.reasoning_effort,
-                    thinking=config.critic.thinking,
+                    reasoning_effort=None,
+                    thinking="disabled",
                     api_key=config.critic.api_key,
                     max_transport_retries=config.critic.max_model_retries,
-                    max_output_retries=config.critic.max_output_retries,
+                    max_truncation_retries=config.critic.max_truncation_retries,
+                    max_syntax_retries=config.critic.max_syntax_retries,
+                    max_schema_retries=config.critic.max_schema_retries,
+                    max_semantic_retries=config.critic.max_semantic_retries,
+                    max_unknown_evidence_retries=(
+                        config.critic.max_unknown_evidence_retries
+                    ),
                     retry_backoff_seconds=config.critic.retry_backoff_seconds,
                     request_timeout_seconds=config.critic.request_timeout_seconds,
                     max_input_chars=config.critic.max_input_chars,
@@ -545,6 +684,24 @@ class CampaignRunner:
         if selection_driver == "agent_uq":
             return self.config.generation.use_fitness_predictors
         return selection_driver in {"active_learning", "predictor"}
+
+    def _reserve_agent_uq_controls(
+        self,
+        eligible: Sequence[Variant],
+        remaining: Sequence[Variant],
+        hypothesis: Hypothesis | None,
+    ) -> list[Variant]:
+        quota = self.config.generation.quota_allocation
+        if self._selection_driver() != "agent_uq" or not quota.enabled:
+            return list(eligible)
+        return reserve_hypothesis_negative_controls(
+            eligible,
+            remaining,
+            hypothesis=hypothesis,
+            position_to_index=self.task_context.position_to_variant_index,
+            strong_threshold=quota.strong_hypothesis_threshold,
+            required_controls=quota.matched_control,
+        )
 
     def _role_activation_state(
         self,
@@ -992,13 +1149,25 @@ class CampaignRunner:
                 "reasoning_effort": self.config.llm.reasoning_effort,
                 "thinking": self.config.llm.thinking,
                 "max_transport_retries": self.config.llm.max_transport_retries,
-                "max_output_retries": self.config.llm.max_output_retries,
+                "output_retry_budgets": {
+                    "truncated": self.config.llm.max_truncation_retries,
+                    "syntax": self.config.llm.max_syntax_retries,
+                    "schema": self.config.llm.max_schema_retries,
+                    "semantic": self.config.llm.max_semantic_retries,
+                    "unknown_evidence": self.config.llm.max_unknown_evidence_retries,
+                },
                 "retry_backoff_seconds": self.config.llm.retry_backoff_seconds,
                 "request_timeout_seconds": self.config.llm.request_timeout_seconds,
                 "allow_unknown_evidence_stripping": (
                     self.config.llm.allow_unknown_evidence_stripping
                 ),
                 "max_input_chars": self.config.llm.max_input_chars,
+                "rethink_reasoning_batch_size": (
+                    self.config.llm.rethink_reasoning_batch_size
+                ),
+                "rethink_max_parallel_batches": (
+                    self.config.llm.rethink_max_parallel_batches
+                ),
                 "trace_role": "observability_only",
                 "scientific_state_source": "wet_dry_kg_artifact",
                 "api_key_ref": self.config.llm.api_key
@@ -1015,8 +1184,19 @@ class CampaignRunner:
                 "base_url": self.config.critic.base_url,
                 "max_revision_attempts": self.config.critic.max_revision_attempts,
                 "max_transport_retries": self.config.critic.max_model_retries,
-                "max_output_retries": self.config.critic.max_output_retries,
+                "output_retry_budgets": {
+                    "truncated": self.config.critic.max_truncation_retries,
+                    "syntax": self.config.critic.max_syntax_retries,
+                    "schema": self.config.critic.max_schema_retries,
+                    "semantic": self.config.critic.max_semantic_retries,
+                    "unknown_evidence": (
+                        self.config.critic.max_unknown_evidence_retries
+                    ),
+                },
                 "fallback_policy": self.config.critic.fallback_policy,
+                "review_controls": self.config.critic.review_controls,
+                "review_diversity": self.config.critic.review_diversity,
+                "min_batch_distance": self.config.critic.min_batch_distance,
                 "api_key_ref": self.config.critic.api_key
                 if isinstance(self.config.critic.api_key, str)
                 and self.config.critic.api_key.startswith("env:")
@@ -1110,6 +1290,12 @@ class CampaignRunner:
                 "max_parallel_branches": (
                     self.config.hierarchical_hypothesis.max_parallel_branches
                 ),
+                "child_sample_batch_size": (
+                    self.config.hierarchical_hypothesis.child_sample_batch_size
+                ),
+                "child_max_parallel_batches": (
+                    self.config.hierarchical_hypothesis.child_max_parallel_batches
+                ),
                 "max_child_revision_attempts": (
                     self.config.hierarchical_hypothesis.max_child_revision_attempts
                 ),
@@ -1119,6 +1305,7 @@ class CampaignRunner:
                 "formal_fail_closed": (
                     self.config.hierarchical_hypothesis.formal_fail_closed
                 ),
+                "subcritic_mode": self.config.hierarchical_hypothesis.subcritic_mode,
                 "main_scientist_profile": (
                     self.config.hierarchical_hypothesis.main_scientist_profile
                 ),
@@ -1576,7 +1763,7 @@ class CampaignRunner:
                             kg_interaction=base_interaction,
                             activation_state=_scientist_activation,
                             approved_subhypotheses=[
-                                item.model_dump(mode="json")
+                                approved_analysis_payload(item)
                                 for item in approved_subhypotheses
                             ],
                             cross_channel_conflicts=[
@@ -1597,6 +1784,23 @@ class CampaignRunner:
                         f"round_{round_id:02d}/hypothesis_pipeline.json",
                         pipeline_result.model_dump(mode="json"),
                     )
+                    for branch in pipeline_result.branches:
+                        for artifact in branch.review_attempts:
+                            self.writer.write_json(
+                                (
+                                    f"round_{round_id:02d}/subreviews/{branch.channel}/"
+                                    f"attempt_{artifact.attempt + 1:02d}.json"
+                                ),
+                                artifact.model_dump(mode="json"),
+                            )
+                    for artifact in pipeline_result.main_review_attempts:
+                        self.writer.write_json(
+                            (
+                                f"round_{round_id:02d}/main_reviews/"
+                                f"attempt_{artifact.hypothesis_attempt + 1:02d}.json"
+                            ),
+                            artifact.model_dump(mode="json"),
+                        )
                     self.writer.event(
                         "hypothesis_pipeline_completed",
                         {
@@ -1660,6 +1864,7 @@ class CampaignRunner:
                 evidence,
                 self.config.candidate_limit,
             )
+            eligible = self._reserve_agent_uq_controls(eligible, remaining, hypothesis)
             if not eligible:
                 raise RuntimeError("Candidate generator returned an empty pool")
             self._progress(
@@ -1680,6 +1885,7 @@ class CampaignRunner:
             generation_prediction_sets: list[list[Prediction]] = []
             active_score_result = None
             active_knowledge_scores: dict[str, float] = {}
+            active_calibration_status: str | None = None
             agent_quota_selection = None
 
             if selection_driver == "agent_uq":
@@ -1737,6 +1943,7 @@ class CampaignRunner:
                     self.state.observed,
                     eligible,
                 )
+                active_calibration_status = posterior_result.calibration.status
                 selection_posterior = posterior_result
                 if self.config.score_shuffle:
                     selection_posterior = replace(
@@ -2005,6 +2212,21 @@ class CampaignRunner:
             else:
                 original_predictions = [working_by_id[item.variant_id] for item in predict_targets]
             prediction_by_id = {item.variant_id: item for item in original_predictions}
+            prediction_status_by_id = _prediction_review_cards(
+                selection_driver=selection_driver,
+                hard_validation_by_id=prediction_by_id,
+                working_by_id=working_by_id,
+                active_calibration_status=active_calibration_status,
+            )
+            scoring_snapshot_version = 1
+            scoring_snapshot = _round_scoring_snapshot(
+                hypothesis=hypothesis,
+                version=scoring_snapshot_version,
+                eligible=eligible,
+                design_score_by_id=design_score_by_id,
+                prediction_by_id=prediction_by_id,
+                all_scores=all_scores,
+            )
             self._progress(
                 "dry_validation_completed",
                 f"round {round_id}/{self.config.rounds} dry validation ready",
@@ -2047,6 +2269,9 @@ class CampaignRunner:
                 "agent_quota_selection": agent_quota_selection,
                 "predictor": validation_predictors[0] if validation_predictors else None,
                 "prediction_by_id": prediction_by_id,
+                "prediction_status_by_id": prediction_status_by_id,
+                "design_score_by_id": design_score_by_id,
+                "scoring_snapshot": scoring_snapshot,
                 "round_id": round_id,
                 "evidence": evidence,
                 "hypothesis": hypothesis,
@@ -2059,7 +2284,6 @@ class CampaignRunner:
                 exclusions: set[str],
                 constraints: RevisionConstraints | None = None,
                 _context: dict[str, Any] = draft_context,
-                _design_score_by_id: dict[str, DesignScore] = design_score_by_id,
             ):
                 _context["revision_constraints"] = constraints
                 if review_attempt == 0:
@@ -2068,6 +2292,7 @@ class CampaignRunner:
                     revised_eligible = [
                         item for item in _context["eligible"] if item.variant_id not in exclusions
                     ]
+                    _context["scoring_snapshot"].assert_eligible_coverage()
                     if selection_driver == "active_learning":
                         if self.active_learning is None or _context["active_score_result"] is None:
                             raise AssertionError(
@@ -2090,7 +2315,7 @@ class CampaignRunner:
                             revised_eligible,
                             [
                                 replace(
-                                    _design_score_by_id[item.variant_id],
+                                    _context["design_score_by_id"][item.variant_id],
                                     utility=_context["all_scores"][item.variant_id],
                                 )
                                 for item in revised_eligible
@@ -2115,17 +2340,45 @@ class CampaignRunner:
                             min(_context["expected_batch_size"], len(revised_eligible)),
                             diversity,
                         )
+                previous_diversity = _context.get("last_diversity_receipt")
+                required_distance = self.config.critic.min_batch_distance
+                if constraints is not None and constraints.minimum_batch_distance is not None:
+                    required_distance = constraints.minimum_batch_distance
+                diversity_receipt = batch_diversity_receipt(
+                    selected_ids=candidate_ids,
+                    candidate_pool_ids=[
+                        item.variant_id for item in _context["eligible"]
+                    ],
+                    variants_by_id=public_by_id,
+                    required_minimum_batch_distance=required_distance,
+                    hypothesis=_context["hypothesis"],
+                    position_to_index=self.task_context.position_to_variant_index,
+                    previous=previous_diversity,
+                )
+                quota_selection = _context.get("agent_quota_selection")
+                review_context = BatchReviewContext(
+                    prediction_status_by_id={
+                        variant_id: _context["prediction_status_by_id"][variant_id]
+                        for variant_id in candidate_ids
+                    },
+                    review_controls=self.config.critic.review_controls,
+                    review_diversity=self.config.critic.review_diversity,
+                    control_feasibility=(
+                        quota_selection.control_feasibility
+                        if quota_selection is not None
+                        and self.config.critic.review_controls
+                        else None
+                    ),
+                    diversity=(
+                        diversity_receipt
+                        if self.config.critic.review_diversity
+                        else None
+                    ),
+                )
+                _context["last_diversity_receipt"] = diversity_receipt
+                _context["batch_review_context"] = review_context
+                _context["scoring_snapshot"].assert_selection_coverage(candidate_ids)
                 candidate_variants = [public_by_id[item] for item in candidate_ids]
-                missing_predictions = [
-                    item
-                    for item in candidate_variants
-                    if item.variant_id not in _context["prediction_by_id"]
-                ]
-                if missing_predictions and _context["predictor"] is not None:
-                    refreshed_predictions = _context["predictor"].predict(missing_predictions)
-                    _context["prediction_by_id"].update(
-                        {item.variant_id: item for item in refreshed_predictions}
-                    )
                 if self.config.knowledge_enabled:
                     refreshed_evidence = self.knowledge.evidence_for(
                         candidate_variants,
@@ -2159,7 +2412,12 @@ class CampaignRunner:
                     rationale_claims=_context["rationale_claims"],
                 )
 
-            def record_review_start(draft, report, _round_id: int = round_id) -> None:
+            def record_review_start(
+                draft,
+                report,
+                _round_id: int = round_id,
+                _draft_context: dict[str, Any] = draft_context,
+            ) -> None:
                 folder = f"round_{_round_id:02d}"
                 self._progress(
                     "review_attempt_started",
@@ -2211,6 +2469,10 @@ class CampaignRunner:
                 )
                 self.writer.write_json(
                     f"{folder}/hard_validation_attempt_{draft.review_attempt}.json", report
+                )
+                self.writer.write_json(
+                    f"{folder}/batch_review_context_attempt_{draft.review_attempt}.json",
+                    _draft_context["batch_review_context"].model_dump(mode="json"),
                 )
                 self._progress(
                     "critique_started",
@@ -2276,6 +2538,9 @@ class CampaignRunner:
                         local_evidence=local_evidence,
                         interaction_result=interaction_result,
                     ),
+                    review_context_provider=lambda _draft, _context=draft_context: _context[
+                        "batch_review_context"
+                    ],
                     on_attempt=record_review_attempt,
                     on_attempt_start=record_review_start,
                 )
@@ -2300,6 +2565,9 @@ class CampaignRunner:
                         hypothesis,
                         evidence,
                         self.config.candidate_limit,
+                    )
+                    eligible = self._reserve_agent_uq_controls(
+                        eligible, remaining, hypothesis
                     )
                     if not eligible:
                         raise RuntimeError("Candidate generator returned an empty pool")
@@ -2342,27 +2610,170 @@ class CampaignRunner:
                                 expected_batch_size,
                                 self.config.diversity_lambda,
                             )
-                    else:
+                    elif selection_driver == "active_learning":
+                        if self.active_learning is None:
+                            raise AssertionError(
+                                "Active-learning selection is unavailable after hypothesis revision"
+                            )
+                        validation_prior_scores = self.knowledge.validation_prior_scores(
+                            eligible, round_id=round_id
+                        )
+                        active_knowledge_scores = {
+                            item.variant_id: knowledge_scores.get(item.variant_id, 0.0)
+                            + self.config.active_learning.acquisition.validation_prior_weight
+                            * validation_prior_scores.get(item.variant_id, 0.0)
+                            for item in eligible
+                        }
+                        posterior_result = self.active_learning.fit_predict(
+                            observed_variants, self.state.observed, eligible
+                        )
+                        active_calibration_status = posterior_result.calibration.status
+                        active_score_result = self.active_learning.score(
+                            posterior_result, active_knowledge_scores
+                        )
+                        working_predictions = list(posterior_result.predictions)
+                        all_scores = active_score_result.composite_by_id()
+                        active_scores_by_id = active_score_result.by_id()
+                        working_by_id = {
+                            item.variant_id: item for item in working_predictions
+                        }
+                        design_scores = [
+                            DesignScore(
+                                item.variant_id,
+                                all_scores[item.variant_id],
+                                item.fitness_std,
+                                0.0,
+                                knowledge_scores.get(item.variant_id, 0.0),
+                                validation_prior_scores.get(item.variant_id, 0.0),
+                                item.fitness_mean,
+                                f"active_learning:{self.config.active_learning.module}",
+                                (
+                                    "Recomputed after hypothesis revision; "
+                                    f"exploitation="
+                                    f"{active_scores_by_id[item.variant_id].exploitation:.3f}; "
+                                    f"exploration="
+                                    f"{active_scores_by_id[item.variant_id].exploration:.3f}."
+                                ),
+                            )
+                            for item in working_predictions
+                        ]
+                        revised_selection = self.active_learning.select(
+                            eligible,
+                            active_score_result,
+                            expected_batch_size,
+                            knowledge_scores=active_knowledge_scores,
+                        )
+                        selected_ids = list(revised_selection.selected_ids)
+                        agent_quota_selection = None
+                    elif selection_driver == "random":
+                        design_scores = [
+                            DesignScore(
+                                item.variant_id,
+                                0.0,
+                                1.0,
+                                0.0,
+                                0.0,
+                                0.0,
+                                0.0,
+                                "random",
+                                "Random baseline rescored after hypothesis revision.",
+                            )
+                            for item in eligible
+                        ]
+                        design_predictions = self.agent_selector.as_predictions(design_scores)
+                        all_scores = self.policy.score(design_predictions, {}, self.rng)
+                        working_by_id = {
+                            item.variant_id: item for item in design_predictions
+                        }
                         selected_ids = self.policy.select(
                             eligible,
-                            [
-                                working_by_id[item.variant_id]
-                                for item in eligible
-                                if item.variant_id in working_by_id
-                            ],
+                            [working_by_id[item.variant_id] for item in eligible],
                             all_scores,
                             expected_batch_size,
                             self.config.diversity_lambda,
                         )
+                        agent_quota_selection = None
+                    else:
+                        if predictor is None:
+                            raise AssertionError(
+                                "Predictor selection is unavailable after hypothesis revision"
+                            )
+                        generation_predictions = predictor.predict(eligible)
+                        working_predictions = (
+                            _shuffle_prediction_scores(generation_predictions, self.rng)
+                            if self.config.score_shuffle
+                            else generation_predictions
+                        )
+                        all_scores = self.policy.score(
+                            working_predictions, knowledge_scores, self.rng
+                        )
+                        working_by_id = {
+                            item.variant_id: item for item in working_predictions
+                        }
+                        design_scores = [
+                            DesignScore(
+                                item.variant_id,
+                                all_scores[item.variant_id],
+                                item.fitness_std,
+                                0.0,
+                                knowledge_scores.get(item.variant_id, 0.0),
+                                0.0,
+                                item.fitness_mean,
+                                "predictor",
+                                "Fitness-direct score recomputed after hypothesis revision.",
+                            )
+                            for item in working_predictions
+                        ]
+                        selected_ids = self.policy.select(
+                            eligible,
+                            [working_by_id[item.variant_id] for item in eligible],
+                            all_scores,
+                            expected_batch_size,
+                            self.config.diversity_lambda,
+                        )
+                        agent_quota_selection = None
+                    design_score_by_id = {
+                        item.variant_id: item for item in design_scores
+                    }
+                    revised_predictions = (
+                        validation_predictors[0].predict(eligible)
+                        if validation_predictors
+                        else [working_by_id[item.variant_id] for item in eligible]
+                    )
+                    original_predictions = list(revised_predictions)
+                    prediction_by_id = {
+                        item.variant_id: item for item in original_predictions
+                    }
+                    prediction_status_by_id = _prediction_review_cards(
+                        selection_driver=selection_driver,
+                        hard_validation_by_id=prediction_by_id,
+                        working_by_id=working_by_id,
+                        active_calibration_status=active_calibration_status,
+                    )
+                    scoring_snapshot_version += 1
+                    scoring_snapshot = _round_scoring_snapshot(
+                        hypothesis=hypothesis,
+                        version=scoring_snapshot_version,
+                        eligible=eligible,
+                        design_score_by_id=design_score_by_id,
+                        prediction_by_id=prediction_by_id,
+                        all_scores=all_scores,
+                    )
                     draft_context.update(
                         {
                             "hypothesis": hypothesis,
                             "eligible": eligible,
                             "working_by_id": working_by_id,
                             "all_scores": all_scores,
+                            "active_score_result": active_score_result,
+                            "active_knowledge_scores": active_knowledge_scores,
                             "expected_batch_size": expected_batch_size,
                             "agent_quota_selection": agent_quota_selection,
                             "initial_selected_ids": tuple(selected_ids),
+                            "prediction_by_id": prediction_by_id,
+                            "prediction_status_by_id": prediction_status_by_id,
+                            "design_score_by_id": design_score_by_id,
+                            "scoring_snapshot": scoring_snapshot,
                             "rationale_claims": {
                                 item.variant_id: item.reason for item in design_scores
                             },
@@ -2396,6 +2807,9 @@ class CampaignRunner:
                             local_evidence=local_evidence,
                             interaction_result=interaction_result,
                         ),
+                        review_context_provider=lambda _draft, _context=draft_context: _context[
+                            "batch_review_context"
+                        ],
                         on_attempt=record_review_attempt,
                         on_attempt_start=record_review_start,
                     )
@@ -2430,6 +2844,8 @@ class CampaignRunner:
                         "hypothesis": hypothesis,
                         "round_id": round_id,
                         "prediction_by_id": prediction_by_id,
+                        "design_score_by_id": design_score_by_id,
+                        "scoring_snapshot": draft_context["scoring_snapshot"],
                         "evidence": evidence,
                     }
 
@@ -2439,11 +2855,11 @@ class CampaignRunner:
                         exclusions: set[str],
                         _fallback_ids: tuple[str, ...] = fallback_ids,
                         _context: dict[str, Any] = fallback_context,
-                        _design_score_by_id: dict[str, DesignScore] = design_score_by_id,
                     ):
                         candidate_ids = tuple(
                             item for item in _fallback_ids if item not in exclusions
                         )
+                        _context["scoring_snapshot"].assert_selection_coverage(candidate_ids)
                         fallback_spec = (
                             preregister_batch_median_test(
                                 hypothesis_id=_context["hypothesis"].hypothesis_id,
@@ -2469,9 +2885,8 @@ class CampaignRunner:
                             falsification_spec=fallback_spec,
                             parent_draft_batch_id=parent_draft_batch_id,
                             rationale_claims={
-                                item: _design_score_by_id[item].reason
+                                item: _context["design_score_by_id"][item].reason
                                 for item in candidate_ids
-                                if item in _design_score_by_id
                             },
                         )
 
@@ -2549,13 +2964,14 @@ class CampaignRunner:
             self.writer.write_json(f"round_{round_id:02d}/approved_batch.json", approved_batch)
             self.writer.event("batch_approved", approved_batch.__dict__)
 
-            model_ranks = _descending_ranks(
-                {item.variant_id: item.fitness_mean for item in original_predictions}
-            )
-            acquisition_ranks = _descending_ranks(all_scores)
-            eligible_ranks = _descending_ranks(
-                {item.variant_id: all_scores[item.variant_id] for item in eligible}
-            )
+            final_snapshot: RoundScoringSnapshot = draft_context["scoring_snapshot"]
+            final_snapshot.assert_selection_coverage(selected_ids)
+            prediction_by_id = dict(final_snapshot.prediction_by_id)
+            design_score_by_id = dict(final_snapshot.design_score_by_id)
+            all_scores = dict(final_snapshot.all_scores)
+            model_ranks = dict(final_snapshot.model_ranks)
+            acquisition_ranks = dict(final_snapshot.acquisition_ranks)
+            eligible_ranks = dict(final_snapshot.eligible_ranks)
             intervention_tags = tuple(
                 tag
                 for enabled, tag in (

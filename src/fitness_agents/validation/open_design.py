@@ -72,7 +72,9 @@ class OpenDesignHardValidator:
         self.sequence = SequenceConflictDetector(
             ood_warning_threshold=critic.ood_warning_threshold,
             model_disagreement_threshold=critic.model_disagreement_threshold,
-            min_batch_distance=critic.min_batch_distance,
+            min_batch_distance=(
+                critic.min_batch_distance if critic.review_diversity else 0
+            ),
         )
 
     def _candidate_conflicts(self, variant: Variant) -> list[MutationConflict]:
@@ -169,6 +171,7 @@ class OpenDesignHardValidator:
         pending_ids: set[str],
         allowed_ids: set[str],
         expected_batch_size: int,
+        prediction_decision_eligible: Mapping[str, bool] | None = None,
     ) -> ConflictReport:
         detector = f"open_design_contract:{self.version}"
         conflicts: list[MutationConflict] = []
@@ -204,6 +207,7 @@ class OpenDesignHardValidator:
                 pending_ids=pending_ids,
                 allowed_ids=allowed_ids,
                 expected_batch_size=expected_batch_size,
+                prediction_decision_eligible=prediction_decision_eligible,
             )
         )
 

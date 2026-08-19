@@ -5,6 +5,10 @@ from dataclasses import dataclass
 
 from fitness_agents.agents.output_guards import RevisionConstraints
 from fitness_agents.config import AgentQuotaAllocationConfig
+from fitness_agents.contracts.batch_review import (
+    ControlFeasibilityReceipt,
+    control_feasibility_receipt,
+)
 from fitness_agents.contracts.schemas import DesignScore, Variant
 
 ARMS = (
@@ -21,6 +25,10 @@ def _sequence_similarity(left: str, right: str) -> float:
     return 1.0 - distance / length
 
 
+def _sequence_distance(left: str, right: str) -> int:
+    return sum(a != b for a, b in zip(left, right, strict=True))
+
+
 @dataclass(frozen=True)
 class AgentQuotaSelection:
     plugin: str
@@ -32,6 +40,7 @@ class AgentQuotaSelection:
     fallback_ids: tuple[str, ...]
     strong_hypothesis_candidate_count: int
     matched_control_candidate_count: int
+    control_feasibility: ControlFeasibilityReceipt
 
     def arm_by_id(self) -> dict[str, str]:
         output = {
@@ -100,7 +109,10 @@ class AgentQuotaBatchAcquisition:
         quotas = dict(self.config.quotas())
         if constraints is not None:
             if constraints.require_controls:
-                quotas["matched_control"] = max(quotas["matched_control"], 2)
+                quotas["matched_control"] = max(
+                    quotas["matched_control"],
+                    constraints.required_control_count or 2,
+                )
             if constraints.add_exploration:
                 quotas["coverage_exploration"] = quotas["coverage_exploration"] + 2
             if constraints.increase_diversity:
@@ -109,6 +121,11 @@ class AgentQuotaBatchAcquisition:
         selected_by_arm: dict[str, list[str]] = {arm: [] for arm in ARMS}
         matched_control_pairs: dict[str, str] = {}
         available = set(by_id)
+        minimum_batch_distance = (
+            constraints.minimum_batch_distance
+            if constraints is not None and constraints.increase_diversity
+            else None
+        )
 
         strong = {
             variant_id
@@ -137,6 +154,21 @@ class AgentQuotaBatchAcquisition:
                 eligible = candidates.intersection(available)
                 if not eligible:
                     break
+                if minimum_batch_distance is not None and selected:
+                    distance_eligible = {
+                        variant_id
+                        for variant_id in eligible
+                        if min(
+                            _sequence_distance(
+                                by_id[variant_id].variant,
+                                by_id[chosen].variant,
+                            )
+                            for chosen in selected
+                        )
+                        >= minimum_batch_distance
+                    }
+                    if distance_eligible:
+                        eligible = distance_eligible
                 choice = max(
                     eligible,
                     key=lambda variant_id: (
@@ -258,4 +290,9 @@ class AgentQuotaBatchAcquisition:
             fallback_ids=tuple(fallback_ids),
             strong_hypothesis_candidate_count=len(strong),
             matched_control_candidate_count=len(controls),
+            control_feasibility=control_feasibility_receipt(
+                requested_controls=quotas["matched_control"],
+                available_control_ids=tuple(controls),
+                selected_control_ids=tuple(selected_by_arm["matched_control"]),
+            ),
         )

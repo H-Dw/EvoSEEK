@@ -139,6 +139,7 @@ class SequenceConflictDetector:
         pending_ids: set[str],
         allowed_ids: set[str],
         expected_batch_size: int,
+        prediction_decision_eligible: Mapping[str, bool] | None = None,
     ) -> list[MutationConflict]:
         conflicts: list[MutationConflict] = []
         ids = [item.variant_id for item in variants]
@@ -189,8 +190,14 @@ class SequenceConflictDetector:
                     )
                 )
                 continue
+            prediction_is_eligible = (
+                True
+                if prediction_decision_eligible is None
+                else bool(prediction_decision_eligible.get(variant.variant_id, False))
+            )
             if (
-                self.ood_warning_threshold is not None
+                prediction_is_eligible
+                and self.ood_warning_threshold is not None
                 and prediction.ood_score >= self.ood_warning_threshold
             ):
                 conflicts.append(
@@ -207,7 +214,8 @@ class SequenceConflictDetector:
                 )
             components = list(prediction.component_scores.values())
             if (
-                self.model_disagreement_threshold is not None
+                prediction_is_eligible
+                and self.model_disagreement_threshold is not None
                 and len(components) >= 2
                 and float(np.std(components)) >= self.model_disagreement_threshold
             ):

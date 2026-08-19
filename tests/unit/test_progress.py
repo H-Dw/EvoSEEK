@@ -6,9 +6,23 @@ from pathlib import Path
 import pytest
 
 from fitness_agents.agents.remote_llm import RemoteLLMCompletionError, complete_json
+from fitness_agents.contracts.batch_review import control_feasibility_receipt
 from fitness_agents.loop import run_campaign
 from fitness_agents.utils.artifacts import JsonArtifactWriter
 from fitness_agents.utils.progress import bind_progress, reset_progress
+
+
+def test_artifact_writer_serializes_typed_pydantic_receipts(tmp_path: Path) -> None:
+    writer = JsonArtifactWriter(tmp_path, "typed-receipt-run")
+    receipt = control_feasibility_receipt(
+        requested_controls=2,
+        available_control_ids=("control:1", "control:2"),
+        selected_control_ids=("control:1", "control:2"),
+    )
+    path = writer.write_json("receipt.json", receipt)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["reason"] == "FEASIBLE"
+    assert payload["selected_controls"] == 2
 
 
 def test_status_json_tracks_heartbeat_without_trace_noise(tmp_path: Path) -> None:
@@ -187,11 +201,20 @@ def test_prompt_budget_artifact_contains_only_size_metadata(tmp_path: Path) -> N
         "profile",
         "system_chars",
         "user_chars",
+        "assistant_chars",
+        "input_chars",
         "field_chars",
         "max_input_chars",
+        "remaining_chars",
+        "utilization_ratio",
+        "budget_band",
         "request_started",
     }
     assert records[0]["request_started"] is True
+    assert records[0]["budget_band"] == "normal"
+    assert records[0]["input_chars"] == (
+        records[0]["system_chars"] + records[0]["user_chars"]
+    )
     assert records[0]["field_chars"]["user.context"] > 0
     assert "do-not-persist" not in path.read_text(encoding="utf-8")
 
@@ -223,3 +246,32 @@ def test_prompt_budget_artifact_marks_preflight_rejection_without_request(tmp_pa
     records = json.loads(path.read_text(encoding="utf-8"))
     assert records[0]["request_started"] is False
     assert records[0]["user_chars"] > records[0]["max_input_chars"]
+    assert records[0]["budget_band"] == "exceeded"
+
+
+def test_prompt_budget_high_water_emits_size_only_warning(tmp_path: Path) -> None:
+    writer = JsonArtifactWriter(tmp_path, "prompt-budget-warning")
+    writer.write_status(message="round active", phase="llm_hypothesis", round_id=3)
+    token = bind_progress(writer)
+    try:
+        complete_json(
+            client=_FakeClient(),
+            model="unit-test-model",
+            messages=[{"role": "user", "content": '{"context":"' + "x" * 820 + '"}'}],
+            max_input_chars=1000,
+            trace_context={"role": "scientist", "round_id": 3},
+        )
+    finally:
+        reset_progress(token)
+
+    events = [
+        json.loads(line)
+        for line in (tmp_path / "prompt-budget-warning" / "trace.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    warning = next(
+        item for item in events if item["event_type"] == "llm_prompt_budget_high_water"
+    )
+    assert warning["payload"]["budget_band"] == "warning"
+    assert "x" * 20 not in json.dumps(warning)

@@ -15,3 +15,5 @@ rationale_visibility: structured_claims_only
 ood_warning_threshold: null
 model_disagreement_threshold: null
 min_batch_distance: 1
+review_controls: false
+review_diversity: false

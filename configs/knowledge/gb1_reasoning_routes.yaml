@@ -27,13 +27,30 @@ local_knowledge:
     follow_symlinks: false
     extract_archives: false
   retrieval:
-    mode: lexical
+    mode: hybrid
     lexical_backend: sqlite_fts5
-    dense_enabled: false
+    dense_enabled: true
+    embedding_backend: api
+    embedding_model_path: null
+    embedding_api_config: configs/knowledge/api/embedding.qwen-v4.yaml
     allow_model_download: false
     fusion: rrf
     top_k: 8
+    lexical_candidates: 32
+    dense_candidates: 32
     token_budget: 5000
+    max_chunks_per_document: 1
+    query_language: en
+    strict_query_language: true
+    minimum_dense_similarity: 0.50
+    require_dense_match_for_hybrid: true
+    instruction_content_policy: reject
+    dense_search_backend: numpy_exact
+    max_exact_dense_chunks: 50000
+    reranker_backend: api
+    reranker_model_path: null
+    reranker_api_config: configs/knowledge/api/reranker.qwen3.yaml
+    minimum_reranker_score: null
   kg_update:
     enabled: true
     materialization: retrieved_only

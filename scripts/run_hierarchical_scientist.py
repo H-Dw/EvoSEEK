@@ -2,7 +2,7 @@
 """Run hierarchical Scientist and base-KG ablations across folds of one task.
 
 Same-task folds are isolated processes. Default matrix is 4 conditions x 3 folds
-= 12 jobs; --max-parallel 6 completes them in two waves. Hierarchical jobs fan
+= 12 jobs; --max-parallel 4 completes them in three waves. Hierarchical jobs fan
 out 3 child LLM calls; kg_base* jobs do not. Use --max-parallel 2 if DeepSeek
 contends. RAG sqlite paths are per condition/fold so parallel jobs do not share
 a writer.
@@ -24,6 +24,8 @@ from typing import Any
 
 from fitness_agents.agents.remote_llm import load_project_env, resolve_secret
 from fitness_agents.config import load_experiment_config, project_root
+from fitness_agents.contracts.capabilities import PredictorCapabilities
+from fitness_agents.contracts.schemas import Prediction
 from fitness_agents.reporting import aggregate_runs
 
 REQUIRED_CHANNELS = ("physchem", "conservation", "structure")
@@ -110,6 +112,44 @@ CONDITION_SPECS: dict[str, ConditionSpec] = {
 ALLOWED_CONDITIONS = tuple(CONDITION_SPECS)
 DEFAULT_CONDITIONS = ("kg_base", "kg_base_rag", "kg_base_al", "kg_3features_rag")
 _RAG_LOCAL_TEMPLATE = None
+
+
+class _CanaryPlaceholderPredictor:
+    """Deterministic no-training predictor for API/prompt canaries only."""
+
+    capabilities = PredictorCapabilities()
+
+    def __init__(self, *, seed: int) -> None:
+        self.seed = seed
+        self.model_version = f"placeholder-canary-sha256-seed{seed}"
+
+    def fit(self, *_args: Any, **_kwargs: Any) -> _CanaryPlaceholderPredictor:
+        return self
+
+    def predict(self, variants: Any) -> list[Prediction]:
+        predictions = []
+        for variant in variants:
+            digest = hashlib.sha256(
+                f"{self.seed}|{variant.variant_id}".encode()
+            ).digest()
+            mean = (int.from_bytes(digest[:8], "big") / float(2**64 - 1)) * 2.0 - 1.0
+            std = 0.25
+            predictions.append(
+                Prediction(
+                    variant_id=variant.variant_id,
+                    fitness_mean=mean,
+                    fitness_std=std,
+                    interval_90=(mean - 1.645 * std, mean + 1.645 * std),
+                    ood_score=0.5,
+                    component_scores={"placeholder_hash": mean},
+                    model_version=self.model_version,
+                )
+            )
+        return predictions
+
+
+def _canary_placeholder_predictor_factory(_config: Any, *, seed: int) -> Any:
+    return _CanaryPlaceholderPredictor(seed=seed)
 
 
 @dataclass(frozen=True)
@@ -529,12 +569,15 @@ def _build_jobs(
     expected_budget: int,
     output_root: Path,
     python_executable: str,
+    placeholder_predictor: bool = False,
+    disable_batch_control_review: bool = False,
+    disable_batch_diversity_review: bool = False,
 ) -> list[HierarchicalJob]:
     jobs: list[HierarchicalJob] = []
-    # Condition-major: kg_base, kg_base_rag, kg_base_al, then kg_3features_rag.
-    # With 3 folds and --max-parallel 6 that is two waves of six jobs.
-    for condition in conditions:
-        for fold in folds:
+    # Fold-major keeps each four-job wave paired on one fold and limits each wave
+    # to one hierarchical job, whose three child branches fan out internally.
+    for fold in folds:
+        for condition in conditions:
             command = (
                 python_executable,
                 str(script_path),
@@ -548,7 +591,15 @@ def _build_jobs(
                 str(seed),
                 "--worker-output-root",
                 str(output_root),
+                "--worker-rounds",
+                str(expected_rounds),
             )
+            if placeholder_predictor:
+                command = (*command, "--worker-placeholder-predictor")
+            if disable_batch_control_review:
+                command = (*command, "--disable-batch-control-review")
+            if disable_batch_diversity_review:
+                command = (*command, "--disable-batch-diversity-review")
             jobs.append(
                 HierarchicalJob(
                     index=len(jobs),
@@ -736,7 +787,7 @@ def _worker(args: argparse.Namespace) -> None:
         raise SystemExit(f"Unknown condition {args.worker_condition!r}")
     if args.worker_output_root is None:
         raise SystemExit("Worker requires --worker-output-root")
-    from fitness_agents.loop import run_campaign
+    from fitness_agents.loop import CampaignRunner, run_campaign
 
     config = apply_condition(
         load_experiment_config(config_path),
@@ -745,7 +796,34 @@ def _worker(args: argparse.Namespace) -> None:
         seed=seed,
         output_root=args.worker_output_root.resolve(),
     )
-    print(json.dumps(run_campaign(config), indent=2))
+    if args.worker_rounds is not None:
+        if args.worker_rounds < 1:
+            raise SystemExit("Worker rounds must be positive")
+        config = replace(config, rounds=args.worker_rounds)
+    if args.disable_batch_control_review or args.disable_batch_diversity_review:
+        config = replace(
+            config,
+            critic=replace(
+                config.critic,
+                review_controls=(
+                    config.critic.review_controls
+                    and not args.disable_batch_control_review
+                ),
+                review_diversity=(
+                    config.critic.review_diversity
+                    and not args.disable_batch_diversity_review
+                ),
+            ),
+        )
+    summary = (
+        CampaignRunner(
+            config,
+            predictor_factory=_canary_placeholder_predictor_factory,
+        ).run()
+        if args.worker_placeholder_predictor
+        else run_campaign(config)
+    )
+    print(json.dumps(summary, indent=2))
 
 
 def parse_args() -> argparse.Namespace:
@@ -754,7 +832,7 @@ def parse_args() -> argparse.Namespace:
         description=(
             "Run kg_base, kg_base_rag, kg_base_al, then kg_3features_rag across "
             "folds of one GB1 AL96 task. Default 4 conditions x 3 folds = 12 jobs; "
-            "--max-parallel 6 runs two waves. kg_3features_rag fans out three "
+            "--max-parallel 4 runs three waves. kg_3features_rag fans out three "
             "child LLM calls; --max-parallel 2 is the rate-limit fallback."
         )
     )
@@ -773,13 +851,42 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--seed", type=int)
-    parser.add_argument("--max-parallel", type=int, default=6)
+    parser.add_argument(
+        "--rounds",
+        type=int,
+        help="Override campaign rounds (used by bounded canary runs)",
+    )
+    parser.add_argument("--max-parallel", type=int, default=4)
     parser.add_argument("--timeout-seconds", type=float, default=0.0)
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--placeholder-predictor",
+        action="store_true",
+        help="Use deterministic hash predictions; intended only for API/prompt canaries",
+    )
+    parser.add_argument(
+        "--disable-batch-control-review",
+        action="store_true",
+        help=(
+            "Temporarily remove control-feasibility issues/actions from Batch Critic scope; "
+            "candidate acquisition quotas are unchanged"
+        ),
+    )
+    parser.add_argument(
+        "--disable-batch-diversity-review",
+        action="store_true",
+        help=(
+            "Temporarily remove diversity metrics/issues/actions from Batch Critic scope"
+        ),
+    )
     parser.add_argument("--worker-fold", type=int, help=argparse.SUPPRESS)
     parser.add_argument("--worker-condition", help=argparse.SUPPRESS)
     parser.add_argument("--worker-output-root", type=Path, help=argparse.SUPPRESS)
+    parser.add_argument("--worker-rounds", type=int, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--worker-placeholder-predictor", action="store_true", help=argparse.SUPPRESS
+    )
     return parser.parse_args()
 
 
@@ -794,6 +901,9 @@ def main() -> None:
         raise SystemExit("--max-parallel must be at least 1")
     conditions = _parse_conditions(args.conditions)
     config = load_experiment_config(config_path)
+    expected_rounds = config.rounds if args.rounds is None else args.rounds
+    if expected_rounds < 1:
+        raise SystemExit("--rounds must be positive")
     if config.task.split_root is None:
         raise SystemExit("Hierarchical fold runner requires a manifest-backed task with split_root")
     manifest_path = config.task.split_root / "manifest.public.json"
@@ -815,10 +925,13 @@ def main() -> None:
         conditions=conditions,
         folds=folds,
         seed=seed,
-        expected_rounds=config.rounds,
+        expected_rounds=expected_rounds,
         expected_budget=config.budget_per_round,
         output_root=(output_dir / "runs").resolve(),
         python_executable=sys.executable,
+        placeholder_predictor=args.placeholder_predictor,
+        disable_batch_control_review=args.disable_batch_control_review,
+        disable_batch_diversity_review=args.disable_batch_diversity_review,
     )
     schedule = {
         "schema_version": "hierarchical-scientist-schedule:v1",
@@ -832,8 +945,19 @@ def main() -> None:
         "seed": seed,
         "max_parallel": args.max_parallel,
         "expected_waves": (len(jobs) + args.max_parallel - 1) // args.max_parallel,
-        "expected_rounds": config.rounds,
+        "expected_rounds": expected_rounds,
         "expected_budget": config.budget_per_round,
+        "placeholder_predictor": args.placeholder_predictor,
+        "batch_review_scope": {
+            "controls": (
+                config.critic.review_controls
+                and not args.disable_batch_control_review
+            ),
+            "diversity": (
+                config.critic.review_diversity
+                and not args.disable_batch_diversity_review
+            ),
+        },
         "jobs": [asdict(job) for job in jobs],
     }
     if args.dry_run:

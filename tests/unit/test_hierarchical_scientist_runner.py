@@ -49,6 +49,7 @@ def _passing_pipeline() -> dict:
         ],
         "conflicts": [],
         "main_review": {
+            "review_scope": "main",
             "decision_id": "mainreview:test",
             "verdict": "APPROVE",
             "issues": [],
@@ -161,17 +162,22 @@ def test_hierarchical_scientist_config_matches_formal_al96_protocol() -> None:
     assert config.task.split_root is not None
     assert config.llm.model == "deepseek-v4-flash"
     assert config.llm.api_key == "env:DEEPSEEK_API_KEY"
+    assert config.critic.review_controls is False
+    assert config.critic.review_diversity is False
     assert config.knowledge.local_knowledge.enabled is False
     assert hierarchy.enabled is True
     assert hierarchy.required_channels == ("physchem", "conservation", "structure")
     assert hierarchy.max_parallel_branches == 3
+    assert hierarchy.child_sample_batch_size == 8
+    assert hierarchy.child_max_parallel_batches == 2
     assert hierarchy.max_child_revision_attempts == 1
-    assert hierarchy.max_main_revision_attempts == 1
+    assert hierarchy.max_main_revision_attempts == 2
     assert config.kg_interaction.max_tool_calls == 15
     assert config.scientist_prompt_evidence_limit == 32
-    assert hierarchy.main_max_input_chars == 80000
-    assert hierarchy.child_max_input_chars == 60000
-    assert hierarchy.critic_max_input_chars == 60000
+    assert hierarchy.main_max_input_chars == 160000
+    assert hierarchy.child_max_input_chars == 120000
+    assert hierarchy.critic_max_input_chars == 120000
+    assert hierarchy.subcritic_mode == "remote"
     assert config.kg_interaction.feature_channels == ("physchem", "conservation", "structure")
     assert config.generation.quota_allocation.quotas() == {
         "hypothesis_target": 8,
@@ -179,6 +185,25 @@ def test_hierarchical_scientist_config_matches_formal_al96_protocol() -> None:
         "coverage_exploration": 3,
         "matched_control": 2,
     }
+
+
+def test_canary_placeholder_predictor_is_deterministic_and_explicitly_labeled() -> None:
+    runner = _load_runner()
+    variants = [
+        type("Variant", (), {"variant_id": "v1"})(),
+        type("Variant", (), {"variant_id": "v2"})(),
+    ]
+    first = runner._canary_placeholder_predictor_factory(None, seed=11)
+    second = runner._canary_placeholder_predictor_factory(None, seed=11)
+
+    first_predictions = first.predict(variants)
+    second_predictions = second.predict(variants)
+
+    assert first_predictions == second_predictions
+    assert all(
+        item.model_version == "placeholder-canary-sha256-seed11"
+        for item in first_predictions
+    )
 
 
 def test_parse_folds_and_conditions_reject_invalid_values() -> None:
@@ -432,7 +457,9 @@ def test_apply_condition_configures_base_kg_modes_without_feature_tools(tmp_path
         )
 
 
-def test_default_matrix_is_twelve_jobs_in_two_waves_of_six(tmp_path, monkeypatch, capsys) -> None:
+def test_default_matrix_is_twelve_jobs_in_three_waves_of_four(
+    tmp_path, monkeypatch, capsys
+) -> None:
     runner = _load_runner()
     split_root = tmp_path / "split"
     split_root.mkdir()
@@ -458,27 +485,92 @@ def test_default_matrix_is_twelve_jobs_in_two_waves_of_six(tmp_path, monkeypatch
     schedule = json.loads(capsys.readouterr().out)
     assert schedule["conditions"] == list(runner.DEFAULT_CONDITIONS)
     assert schedule["folds"] == [0, 1, 2]
-    assert schedule["max_parallel"] == 6
-    assert schedule["expected_waves"] == 2
+    assert schedule["max_parallel"] == 4
+    assert schedule["expected_waves"] == 3
+    assert schedule["batch_review_scope"] == {
+        "controls": False,
+        "diversity": False,
+    }
     jobs = schedule["jobs"]
     assert len(jobs) == 12
     assert [job["condition"] for job in jobs] == [
         "kg_base",
-        "kg_base",
-        "kg_base",
         "kg_base_rag",
-        "kg_base_rag",
-        "kg_base_rag",
-        "kg_base_al",
-        "kg_base_al",
         "kg_base_al",
         "kg_3features_rag",
+        "kg_base",
+        "kg_base_rag",
+        "kg_base_al",
         "kg_3features_rag",
+        "kg_base",
+        "kg_base_rag",
+        "kg_base_al",
         "kg_3features_rag",
     ]
-    assert [job["fold_index"] for job in jobs[:3]] == [0, 1, 2]
+    assert [job["fold_index"] for job in jobs] == [
+        0,
+        0,
+        0,
+        0,
+        1,
+        1,
+        1,
+        1,
+        2,
+        2,
+        2,
+        2,
+    ]
     assert {job["condition"] for job in jobs} == set(runner.DEFAULT_CONDITIONS)
     assert {job["fold_index"] for job in jobs} == {0, 1, 2}
+
+
+def test_batch_review_scope_flags_are_audited_and_forwarded(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    runner = _load_runner()
+    split_root = tmp_path / "split"
+    split_root.mkdir()
+    (split_root / "manifest.public.json").write_text(
+        json.dumps(
+            {
+                "n_folds": 5,
+                "strategy": "al96_closed_loop",
+                "protocol_version": "GB1-AL96-5CV-v1",
+            }
+        ),
+        encoding="utf-8",
+    )
+    base = load_experiment_config(
+        "configs/experiments/hierarchical_scientist.deepseek.yaml"
+    )
+
+    def fake_load(path, overrides=None):
+        del path, overrides
+        return replace(base, task=replace(base.task, split_root=split_root))
+
+    monkeypatch.setattr(runner, "load_experiment_config", fake_load)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_hierarchical_scientist.py",
+            "--dry-run",
+            "--disable-batch-control-review",
+            "--disable-batch-diversity-review",
+        ],
+    )
+    runner.main()
+    schedule = json.loads(capsys.readouterr().out)
+    assert schedule["batch_review_scope"] == {
+        "controls": False,
+        "diversity": False,
+    }
+    assert all(
+        "--disable-batch-control-review" in job["command"]
+        and "--disable-batch-diversity-review" in job["command"]
+        for job in schedule["jobs"]
+    )
 
 
 def test_six_way_parallelism_runs_a_full_wave(tmp_path, monkeypatch) -> None:

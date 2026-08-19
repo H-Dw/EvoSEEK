@@ -10,6 +10,7 @@ from fitness_agents.agents.critic import (
     _compact_critic_context,
     load_critic_profile,
 )
+from fitness_agents.contracts.batch_review import BatchReviewContext
 from fitness_agents.contracts.schemas import (
     CritiqueDecision,
     Evidence,
@@ -404,6 +405,48 @@ class _RegenerateHypothesis:
         )
 
 
+def test_disabled_control_review_rejects_out_of_scope_add_control(
+    experiment_config,
+) -> None:
+    variant = _variant("VDGA", "a")
+    prediction = _prediction("a", 1.0)
+    draft = build_draft_batch(
+        round_id=1,
+        review_attempt=0,
+        candidate_ids=("a",),
+        variants={"a": variant},
+        predictions={"a": prediction},
+        evidence={},
+        hypothesis_id=None,
+        falsification_spec=None,
+    )
+    report = BatchHardValidator(
+        experiment_config.task,
+        replace(experiment_config.critic, review_controls=False),
+    ).validate(
+        draft,
+        variants={"a": variant},
+        predictions={"a": prediction},
+        evidence={},
+        revealed_ids=set(),
+        pending_ids=set(),
+        allowed_ids={"a"},
+        expected_batch_size=1,
+    )
+    with pytest.raises(RuntimeError, match="without a configured safe fallback"):
+        CriticAgent(_AddControlThenApprove(), max_retries=0).review(
+            draft=draft,
+            variants={"a": variant},
+            predictions={"a": prediction},
+            evidence={},
+            conflict_report=report,
+            batch_review_context=BatchReviewContext(
+                prediction_status_by_id={},
+                review_controls=False,
+            ),
+        )
+
+
 def test_add_control_revise_rebuilds_batch_instead_of_aborting(experiment_config):
     from fitness_agents.agents.output_guards import RevisionConstraints
     from fitness_agents.loop.review import BoundedReviewLoop
@@ -553,7 +596,7 @@ def test_review_loop_passes_hypothesis_snapshot(experiment_config):
     assert snapshot["preferred_residues"]["39"] == ["W"]
 
 
-def test_compact_critic_context_keeps_channel_sites():
+def test_compact_critic_context_uses_typed_structure_card_without_mutating_evidence():
     evidence = Evidence(
         evidence_id="ev:struct:1",
         variant_id="a",
@@ -564,8 +607,17 @@ def test_compact_critic_context_keeps_channel_sites():
         confidence=0.0,
         round_id=1,
         raw_features={
-            "sites": {"39": {"contact_count": 4, "sasa": 12.0}},
+            "sites": {
+                "39": {
+                    "status": "ok",
+                    "contact_count": 4,
+                    "relative_sasa": 0.2,
+                    "secondary_structure": "loop",
+                    "missing_backbone_atoms": [],
+                }
+            },
             "static_context_flag_count": 1,
+            "resource_id": "rcsb:1PGB",
             "cache_status": "hit",
             "property_accessions": ["unused"],
         },
@@ -573,8 +625,73 @@ def test_compact_critic_context_keeps_channel_sites():
     compacted = _compact_critic_context(
         {"evidence": {"a": [evidence]}, "context_evidence": [evidence]}
     )
-    features = compacted["evidence"]["a"][0]["raw_features"]
-    assert features["sites"]["39"]["contact_count"] == 4
+    card = compacted["evidence"]["a"][0]
+    features = card["features"]
+    assert features["kind"] == "structure"
+    assert features["sites"][0]["position"] == 39
+    assert features["sites"][0]["contact_count"] == 4
+    assert features["sites"][0]["relative_sasa"] == 0.2
     assert "cache_status" not in features
     assert "property_accessions" not in features
-    assert compacted["context_evidence"][0]["raw_features"]["sites"]
+    assert "raw_features" not in card
+    assert compacted["context_evidence"][0]["features"]["sites"]
+    assert compacted["evidence_batch_metadata"]["structure_resource_ids"] == [
+        "rcsb:1PGB"
+    ]
+    assert evidence.raw_features["sites"]["39"]["contact_count"] == 4
+    assert evidence.raw_features["property_accessions"] == ["unused"]
+
+
+def test_compact_critic_context_hoists_repeated_draft_and_conflict_state():
+    candidate_ids = ["a", "b"]
+    compacted = _compact_critic_context(
+        {
+            "draft": {
+                "candidate_ids": candidate_ids,
+                "design_rationales": [
+                    {"candidate_id": item, "intended_test": "shared test"}
+                    for item in candidate_ids
+                ],
+                "falsification_spec": {
+                    "criteria": [
+                        {
+                            "criterion_id": "criterion:1",
+                            "target_variant_ids": candidate_ids,
+                            "comparator_variant_ids": [f"control:{index}" for index in range(64)],
+                            "metric": "batch_median",
+                        }
+                    ]
+                },
+            },
+            "conflict_report": {
+                "report_id": "report:1",
+                "conflicts": [
+                    {
+                        "conflict_id": f"conflict:{item}",
+                        "code": "EVIDENCE_POLARITY_CONFLICT",
+                        "scope": "evidence",
+                        "severity": "warning",
+                        "message": "Visible evidence is mixed.",
+                        "hard": False,
+                        "detector": "detector:v1",
+                        "candidate_ids": [item],
+                        "evidence_ids": [f"ev:{item}"],
+                    }
+                    for item in candidate_ids
+                ],
+            },
+        }
+    )
+
+    draft = compacted["draft"]
+    criterion = draft["falsification_spec"]["criteria"][0]
+    assert draft["shared_intended_test"] == "shared test"
+    assert all("intended_test" not in item for item in draft["design_rationales"])
+    assert criterion["target_variant_scope"] == "draft_candidate_ids"
+    assert criterion["target_variant_count"] == 2
+    assert criterion["comparator_variant_count"] == 64
+    assert "comparator_variant_ids" not in criterion
+    report = compacted["conflict_report"]
+    assert len(report["conflict_templates"]) == 1
+    assert len(report["conflicts"]) == 2
+    assert all("message" not in item for item in report["conflicts"])
