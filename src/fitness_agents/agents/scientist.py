@@ -232,6 +232,8 @@ class ScientistAgent:
         kg_interaction: Any | None = None,
         *,
         activation_state: RoleActivationState | dict[str, Any] | None = None,
+        approved_subhypotheses: Sequence[dict[str, Any]] = (),
+        cross_channel_conflicts: Sequence[dict[str, Any]] = (),
         critic_revision: dict[str, Any] | None = None,
         hypothesis_attempt: int = 0,
     ) -> Hypothesis:
@@ -240,6 +242,14 @@ class ScientistAgent:
             context["expected_hypothesis_id"] = (
                 f"hyp:{state.run_id}:r{state.round_id}:a{hypothesis_attempt}"
             )
+        if approved_subhypotheses:
+            approved_payload = list(approved_subhypotheses)
+            assert_sanitized(approved_payload, "context.approved_subhypotheses")
+            context["approved_subhypotheses"] = approved_payload
+        if cross_channel_conflicts:
+            conflict_payload = list(cross_channel_conflicts)
+            assert_sanitized(conflict_payload, "context.cross_channel_conflicts")
+            context["cross_channel_conflicts"] = conflict_payload
         if critic_revision is not None:
             assert_sanitized(critic_revision, "context.critic_revision")
             context["critic_revision"] = critic_revision

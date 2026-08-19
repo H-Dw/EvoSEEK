@@ -115,7 +115,7 @@ When `context.critic_revision` is present:
 
 Copy `context.expected_hypothesis_id` exactly. Return one JSON object containing exactly:
 `hypothesis_id`, `statement`, `preferred_residues`, `evidence_ids`, `expected_outcome`,
-`falsification_criterion`, and `parent_hypothesis_id`.
+`falsification_criterion`, `parent_hypothesis_id`, and `explanation`.
 
 - Keep `statement`, `expected_outcome`, and `falsification_criterion` at or under 400 characters.
 - Cite at most 12 identifiers that occur in the supplied evidence or visible KG packs.
@@ -126,6 +126,9 @@ Copy `context.expected_hypothesis_id` exactly. Return one JSON object containing
   `max_preferred_positions`.
 - Use non-empty arrays of canonical one-letter residues as values.
 - Copy the supplied parent identifier or use null.
+- When `approved_subhypotheses` is present, use `explanation` to summarize each channel's
+  contribution, unresolved conflicts, and limitations without exposing hidden reasoning. Otherwise
+  return null.
 - Return JSON only, without Markdown fences or hidden reasoning.
 
 ## 7. Prohibited behavior

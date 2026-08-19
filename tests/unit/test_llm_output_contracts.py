@@ -115,7 +115,8 @@ def test_exhausted_missing_key_is_validation_error_not_key_error() -> None:
             output_schema=HYPOTHESIS_SCHEMA,
         )
 
-    assert remote.calls == 3
+    # Formal runtime permits one output-repair request (two total calls).
+    assert remote.calls == 2
     assert isinstance(captured.value.__cause__, ValidationError)
 
 
@@ -140,7 +141,7 @@ def test_unknown_evidence_ids_are_stripped_after_retries() -> None:
         output_schema=HYPOTHESIS_SCHEMA,
     )
 
-    assert remote.calls == 3
+    assert remote.calls == 2
     assert hypothesis.evidence_ids == ()
 
 

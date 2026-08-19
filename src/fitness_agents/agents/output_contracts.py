@@ -106,6 +106,27 @@ class PreferredResiduesOutput(BaseModel):
         return output
 
 
+class ChannelContributionOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    channel: Literal["physchem", "conservation", "structure"]
+    sub_hypothesis_id: NonEmptyText
+    claim: HypothesisText
+    evidence_ids: Annotated[list[NonEmptyText], Field(max_length=EVIDENCE_ID_MAX)]
+    uncertainty: HypothesisText
+
+
+class HypothesisExplanationOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    summary: HypothesisText
+    channel_contributions: Annotated[
+        list[ChannelContributionOutput], Field(min_length=1, max_length=3)
+    ]
+    conflicts: Annotated[list[dict[str, Any]], Field(max_length=12)]
+    limitations: Annotated[list[HypothesisText], Field(min_length=1, max_length=8)]
+
+
 class HypothesisOutput(BaseModel):
     """Strict model-facing contract converted to the existing Hypothesis dataclass."""
 
@@ -118,6 +139,7 @@ class HypothesisOutput(BaseModel):
     expected_outcome: HypothesisText
     falsification_criterion: HypothesisText
     parent_hypothesis_id: NonEmptyText | None
+    explanation: HypothesisExplanationOutput | None = None
 
     @model_validator(mode="after")
     def validate_identifier_relationships(self) -> HypothesisOutput:
@@ -180,6 +202,11 @@ class HypothesisOutput(BaseModel):
             expected_outcome=self.expected_outcome,
             falsification_criterion=self.falsification_criterion,
             parent_hypothesis_id=parent_hypothesis_id,
+            explanation=(
+                self.explanation.model_dump(mode="json")
+                if self.explanation is not None
+                else None
+            ),
         )
 
 

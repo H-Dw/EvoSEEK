@@ -168,6 +168,7 @@ class Hypothesis:
     expected_outcome: str
     falsification_criterion: str
     parent_hypothesis_id: str | None = None
+    explanation: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)

@@ -11,15 +11,20 @@ import os
 import re
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fitness_agents.utils.progress import TimedHeartbeat, report_event
 
 from .output_guards import (
+    ContentFilteredError,
     EmptyLLMOutputError,
     OutputTruncatedError,
+    PromptBudgetExceededError,
+    ProviderResourceError,
     TokenBudgetPolicy,
+    UnexpectedFinishReasonError,
     UnknownEvidenceIdsError,
     classify_output_failure,
     json_salvage,
@@ -116,7 +121,13 @@ def uses_deepseek(model: str, base_url: str | None) -> bool:
     return "deepseek" in blob
 
 
-def create_openai_client(*, api_key: str | None = None, base_url: str | None = None, provider: str | None = None):
+def create_openai_client(
+    *,
+    api_key: str | None = None,
+    base_url: str | None = None,
+    provider: str | None = None,
+    request_timeout_seconds: float = 120.0,
+):
     try:
         from openai import OpenAI
     except ImportError as error:
@@ -124,7 +135,55 @@ def create_openai_client(*, api_key: str | None = None, base_url: str | None = N
     return OpenAI(
         api_key=resolve_api_key(api_key),
         base_url=resolve_base_url(base_url, provider=provider),
+        max_retries=0,
+        timeout=request_timeout_seconds,
     )
+
+
+@dataclass(frozen=True)
+class RequestFailureDisposition:
+    """Whether a provider/transport failure can consume the transport budget."""
+
+    category: Literal["transport", "output"]
+    retryable: bool
+    status_code: int | None = None
+
+
+_RETRYABLE_HTTP_STATUS = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
+_NON_RETRYABLE_HTTP_STATUS = frozenset({400, 401, 402, 403, 404, 405, 422})
+
+
+def _exception_status_code(error: Exception) -> int | None:
+    value = getattr(error, "status_code", None)
+    if value is None:
+        value = getattr(getattr(error, "response", None), "status_code", None)
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def classify_request_failure(error: Exception) -> RequestFailureDisposition:
+    """Classify API/transport failures without conflating them with JSON repair."""
+
+    if isinstance(
+        error,
+        (ContentFilteredError, PromptBudgetExceededError, UnexpectedFinishReasonError),
+    ):
+        return RequestFailureDisposition("output", False, None)
+    status_code = _exception_status_code(error)
+    if status_code is not None:
+        if status_code in _RETRYABLE_HTTP_STATUS or status_code >= 500:
+            return RequestFailureDisposition("transport", True, status_code)
+        if status_code in _NON_RETRYABLE_HTTP_STATUS or 400 <= status_code < 500:
+            return RequestFailureDisposition("transport", False, status_code)
+    error_name = type(error).__name__.lower()
+    if isinstance(error, (TimeoutError, ConnectionError)) or any(
+        marker in error_name
+        for marker in ("timeout", "connection", "ratelimit", "internalserver")
+    ):
+        return RequestFailureDisposition("transport", True, status_code)
+    return RequestFailureDisposition("output", True, status_code)
 
 
 def extract_json_object(text: str) -> dict[str, Any]:
@@ -203,6 +262,11 @@ def complete_json(
     reasoning_effort: str | None = None,
     thinking: str | None = None,
     retries: int = 2,
+    transport_retries: int | None = None,
+    output_retries: int | None = None,
+    retry_backoff_seconds: float = 0.0,
+    allow_unknown_evidence_stripping: bool = True,
+    max_input_chars: int | None = None,
     validator: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
     trace_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -229,19 +293,47 @@ def complete_json(
         effort = reasoning_effort
         thinking_mode = thinking
 
+    if retries < 0:
+        raise ValueError("retries must be non-negative")
+    transport_retry_limit = retries if transport_retries is None else transport_retries
+    output_retry_limit = retries if output_retries is None else output_retries
+    if transport_retry_limit < 0 or output_retry_limit < 0:
+        raise ValueError("transport_retries and output_retries must be non-negative")
+    if retry_backoff_seconds < 0:
+        raise ValueError("retry_backoff_seconds must be non-negative")
+
     last_error: Exception | None = None
     policy = TokenBudgetPolicy(budget=token_budget, thinking=thinking_mode, effort=effort)
     current_messages = list(messages)
     trace_fields = dict(trace_context or {})
-    for attempt in range(retries + 1):
+    transport_retries_used = 0
+    output_retries_used = 0
+    request_attempt = 0
+    max_external_attempts = 1 + transport_retry_limit + output_retry_limit
+    while request_attempt < max_external_attempts:
+        input_chars = sum(len(str(item.get("content", ""))) for item in current_messages)
+        if max_input_chars is not None and input_chars > max_input_chars:
+            last_error = PromptBudgetExceededError(
+                f"projected prompt has {input_chars} characters; limit is {max_input_chars}"
+            )
+            report_event(
+                "llm_prompt_budget_exceeded",
+                message=f"LLM request {model} exceeded prompt preflight budget",
+                model=model,
+                input_chars=input_chars,
+                max_input_chars=max_input_chars,
+                **trace_fields,
+            )
+            break
         kwargs: dict[str, Any] = {
             "model": model,
             "messages": current_messages,
             "stream": False,
-            "temperature": temperature,
             "max_tokens": policy.budget,
             "response_format": {"type": "json_object"},
         }
+        if not (deepseek and policy.thinking == "enabled"):
+            kwargs["temperature"] = temperature
         extra_body: dict[str, Any] = {}
         if deepseek and policy.effort:
             kwargs["reasoning_effort"] = policy.effort
@@ -251,11 +343,15 @@ def complete_json(
             kwargs["extra_body"] = extra_body
         report_event(
             "llm_request_started",
-            message=f"LLM request {model} attempt {attempt + 1}/{retries + 1}",
+            message=(
+                f"LLM request {model} attempt {request_attempt + 1}/"
+                f"{max_external_attempts}"
+            ),
             model=model,
-            attempt=attempt,
+            attempt=request_attempt,
             thinking=policy.thinking,
             max_tokens=policy.budget,
+            input_chars=input_chars,
             reasoning_effort=policy.effort,
             **trace_fields,
         )
@@ -264,7 +360,7 @@ def complete_json(
         content = ""
         usage: dict[str, Any] = {}
         try:
-            with TimedHeartbeat(f"LLM {model} attempt {attempt + 1}"):
+            with TimedHeartbeat(f"LLM {model} attempt {request_attempt + 1}"):
                 response = (
                     transport.create_chat_completion(**kwargs)
                     if transport is not None
@@ -274,24 +370,35 @@ def complete_json(
             finish_reason = getattr(choice, "finish_reason", None)
             usage = _usage_payload(response)
             content = _message_content(choice.message)
+            normalized_finish = str(finish_reason or "").lower()
+            if normalized_finish in {"length", "max_tokens", "max_output_tokens"}:
+                raise OutputTruncatedError(
+                    f"Remote LLM hit {finish_reason}; partial output is never accepted"
+                )
+            if normalized_finish == "content_filter":
+                raise ContentFilteredError("Remote LLM completion was content-filtered")
+            if normalized_finish == "insufficient_system_resource":
+                raise ProviderResourceError(
+                    "Remote LLM reported insufficient system resources"
+                )
+            if normalized_finish in {"tool_calls", "function_call"}:
+                raise UnexpectedFinishReasonError(
+                    f"JSON-only role returned unexpected finish_reason={finish_reason}"
+                )
+            if normalized_finish and normalized_finish != "stop":
+                raise UnexpectedFinishReasonError(
+                    f"Unsupported finish_reason={finish_reason}"
+                )
             if not content:
                 raise EmptyLLMOutputError("Remote LLM returned empty message content")
-            if str(finish_reason or "").lower() in {"length", "max_tokens", "max_output_tokens"}:
-                try:
-                    payload = extract_json_object(content)
-                except (json.JSONDecodeError, ValueError, TypeError) as parse_error:
-                    raise OutputTruncatedError(
-                        f"Remote LLM hit {finish_reason} before completing JSON"
-                    ) from parse_error
-            else:
-                payload = extract_json_object(content)
+            payload = extract_json_object(content)
             if validator is not None:
                 payload = validator(payload)
             report_event(
                 "llm_request_completed",
                 message=f"LLM request {model} completed",
                 model=model,
-                attempt=attempt,
+                attempt=request_attempt,
                 thinking=policy.thinking,
                 latency_s=round(time.perf_counter() - started, 3),
                 finish_reason=finish_reason,
@@ -301,17 +408,34 @@ def complete_json(
             return payload
         except Exception as error:  # noqa: BLE001 - retry JSON/thinking failures
             last_error = error
+            disposition = classify_request_failure(error)
             failure = classify_output_failure(
                 error, finish_reason=finish_reason, content=content, usage=usage
             )
+            will_retry = (
+                disposition.retryable
+                and (
+                    transport_retries_used < transport_retry_limit
+                    if disposition.category == "transport"
+                    else output_retries_used < output_retry_limit
+                )
+            )
             report_event(
-                "llm_request_retry",
-                message=f"LLM request {model} retry ({failure.kind}:{type(error).__name__})",
+                "llm_request_retry" if will_retry else "llm_request_rejected",
+                message=(
+                    f"LLM request {model} "
+                    f"{'retry' if will_retry else 'rejected'} "
+                    f"({failure.kind}:{type(error).__name__})"
+                ),
                 model=model,
-                attempt=attempt,
+                attempt=request_attempt,
                 thinking=policy.thinking,
                 error_type=type(error).__name__,
                 failure_kind=failure.kind,
+                failure_category=disposition.category,
+                retryable=disposition.retryable,
+                will_retry=will_retry,
+                status_code=disposition.status_code,
                 finish_reason=finish_reason,
                 content_length=failure.content_length,
                 braces_balanced=failure.braces_balanced,
@@ -323,7 +447,8 @@ def complete_json(
             if (
                 isinstance(error, UnknownEvidenceIdsError)
                 and error.stripped_payload is not None
-                and attempt >= retries
+                and allow_unknown_evidence_stripping
+                and output_retries_used >= output_retry_limit
             ):
                 report_event(
                     "llm_output_warning",
@@ -334,10 +459,21 @@ def complete_json(
                     **trace_fields,
                 )
                 return error.stripped_payload
-            if deepseek and policy.thinking == "enabled":
-                policy.thinking = "disabled"
-            policy.apply(failure, deepseek=deepseek)
-            if attempt < retries:
+            if disposition.category == "transport":
+                if not will_retry:
+                    break
+                transport_retries_used += 1
+                if retry_backoff_seconds:
+                    time.sleep(
+                        retry_backoff_seconds * (2 ** (transport_retries_used - 1))
+                    )
+            else:
+                if not will_retry:
+                    break
+                output_retries_used += 1
+                if deepseek and policy.thinking == "enabled":
+                    policy.thinking = "disabled"
+                policy.apply(failure, deepseek=deepseek)
                 current_messages = [
                     *messages,
                     {
@@ -345,7 +481,9 @@ def complete_json(
                         "content": retry_instruction(failure, error=error),
                     },
                 ]
+            request_attempt += 1
             continue
+        request_attempt += 1
     report_event(
         "llm_request_failed",
         message=f"LLM request {model} failed",

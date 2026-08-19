@@ -73,6 +73,7 @@ def hypothesis_snapshot(hypothesis: Any | None) -> dict[str, Any] | None:
             "evidence_ids": list(hypothesis.get("evidence_ids") or ()),
             "expected_outcome": hypothesis.get("expected_outcome"),
             "falsification_criterion": hypothesis.get("falsification_criterion"),
+            "explanation": hypothesis.get("explanation"),
         }
     return {
         "hypothesis_id": getattr(hypothesis, "hypothesis_id", None),
@@ -81,6 +82,7 @@ def hypothesis_snapshot(hypothesis: Any | None) -> dict[str, Any] | None:
         "evidence_ids": list(getattr(hypothesis, "evidence_ids", ()) or ()),
         "expected_outcome": getattr(hypothesis, "expected_outcome", None),
         "falsification_criterion": getattr(hypothesis, "falsification_criterion", None),
+        "explanation": getattr(hypothesis, "explanation", None),
     }
 
 
@@ -450,14 +452,28 @@ class OpenAICriticClient:
         reasoning_effort: str | None = None,
         thinking: str | None = None,
         api_key: str | None = None,
+        max_transport_retries: int = 2,
+        max_output_retries: int = 1,
+        retry_backoff_seconds: float = 1.0,
+        request_timeout_seconds: float = 120.0,
+        max_input_chars: int | None = None,
     ) -> None:
         self.model = resolve_model(model, provider=provider)
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.reasoning_effort = reasoning_effort
         self.thinking = thinking
+        self.max_transport_retries = max_transport_retries
+        self.max_output_retries = max_output_retries
+        self.retry_backoff_seconds = retry_backoff_seconds
+        self.max_input_chars = max_input_chars
         self.profile = load_critic_profile(profile)
-        self.client = create_openai_client(api_key=api_key, base_url=base_url, provider=provider)
+        self.client = create_openai_client(
+            api_key=api_key,
+            base_url=base_url,
+            provider=provider,
+            request_timeout_seconds=request_timeout_seconds,
+        )
 
     def review(
         self,
@@ -504,6 +520,11 @@ class OpenAICriticClient:
             max_tokens=self.max_tokens,
             reasoning_effort=self.reasoning_effort,
             thinking=self.thinking,
+            retries=0,
+            transport_retries=self.max_transport_retries,
+            output_retries=self.max_output_retries,
+            retry_backoff_seconds=self.retry_backoff_seconds,
+            max_input_chars=self.max_input_chars,
             validator=_validate,
         )
         return _decision_from_payload(payload)
@@ -586,6 +607,7 @@ class CriticAgent:
         self.client = client
         self.max_retries = max_retries
         self.fallback = fallback
+        self.fallback_count = 0
         self.validator = CritiqueDecisionValidator()
 
     def review(
@@ -662,6 +684,7 @@ class CriticAgent:
                     critic_provider=getattr(self.client, "provider_name", None),
                 )
         if self.fallback is not None:
+            self.fallback_count += 1
             report_event(
                 "critic_model_fallback",
                 message="remote critic failed; using rule fallback",

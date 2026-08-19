@@ -13,15 +13,29 @@ from fitness_agents.acquisition import create_policy
 from fitness_agents.active_learning import create_active_learning_module
 from fitness_agents.agents.client_registry import create_role_client_bundle
 from fitness_agents.agents.critic import CriticAgent, OpenAICriticClient, RuleBasedCriticClient
+from fitness_agents.agents.hypothesis_graph import HypothesisReviewGraph
+from fitness_agents.agents.llm import create_llm_client
+from fitness_agents.agents.main_hypothesis_critic import (
+    RemoteMainHypothesisCritic,
+    RuleBasedMainHypothesisCritic,
+)
 from fitness_agents.agents.output_guards import RevisionConstraints, critic_revision_payload
 from fitness_agents.agents.rethink import create_rethink_client
 from fitness_agents.agents.scientist import ScientistAgent
+from fitness_agents.agents.subcritic import RemoteSubCritic, RuleBasedSubCritic
+from fitness_agents.agents.subscientist import RemoteSubScientist, RuleBasedSubScientist
 from fitness_agents.config import ExperimentConfig
-from fitness_agents.contracts.agent_io import ReThinkContextInput, RoleActivationState
+from fitness_agents.contracts.agent_io import (
+    ReThinkContextInput,
+    RoleActivationState,
+    ScientistContextInput,
+)
+from fitness_agents.contracts.hypothesis_pipeline import CompletionManifest
 from fitness_agents.contracts.schemas import (
     CampaignPhase,
     CampaignState,
     DesignScore,
+    Hypothesis,
     Prediction,
     SelectionRecord,
     ValidationRecord,
@@ -284,19 +298,40 @@ class CampaignRunner:
             if config.knowledge_enabled and config.knowledge.kg and not config.evidence_deletion
             else None
         )
+        llm_runtime_settings = {
+            "model": self.config.llm.model,
+            "base_url": self.config.llm.base_url,
+            "api_key": self.config.llm.api_key,
+            "temperature": self.config.llm.temperature,
+            "max_tokens": self.config.llm.max_tokens,
+            "reasoning_effort": self.config.llm.reasoning_effort,
+            "thinking": self.config.llm.thinking,
+            "max_transport_retries": self.config.llm.max_transport_retries,
+            "max_output_retries": self.config.llm.max_output_retries,
+            "retry_backoff_seconds": self.config.llm.retry_backoff_seconds,
+            "request_timeout_seconds": self.config.llm.request_timeout_seconds,
+            "allow_unknown_evidence_stripping": (
+                self.config.llm.allow_unknown_evidence_stripping
+            ),
+            "max_input_chars": self.config.llm.max_input_chars,
+        }
         role_clients = create_role_client_bundle(
             self.config.llm.provider,
             profile=self.config.llm.profile,
-            model=self.config.llm.model,
-            base_url=self.config.llm.base_url,
-            api_key=self.config.llm.api_key,
-            temperature=self.config.llm.temperature,
-            max_tokens=self.config.llm.max_tokens,
-            reasoning_effort=self.config.llm.reasoning_effort,
-            thinking=self.config.llm.thinking,
+            **llm_runtime_settings,
         )
+        main_scientist_client = role_clients.scientist
+        if (
+            config.hierarchical_hypothesis.enabled
+            and config.llm.provider != "mock"
+        ):
+            main_scientist_client = create_llm_client(
+                config.llm.provider,
+                profile=config.hierarchical_hypothesis.main_scientist_profile,
+                **llm_runtime_settings,
+            )
         self.agent = agent or ScientistAgent(
-            role_clients.scientist,
+            main_scientist_client,
             task_context=self.task_context,
             objective=config.task.objective,
             knowledge_graph=graph_tool,
@@ -350,6 +385,65 @@ class CampaignRunner:
                 ),
             )
         self.rethink_client = role_clients.rethink
+        self.hypothesis_graph = None
+        if config.hierarchical_hypothesis.enabled:
+            channels = ("physchem", "conservation", "structure")
+            if config.llm.provider == "mock":
+                child_scientists = {channel: RuleBasedSubScientist() for channel in channels}
+                child_critics = {channel: RuleBasedSubCritic() for channel in channels}
+                main_hypothesis_critic = RuleBasedMainHypothesisCritic()
+            else:
+                child_scientists = {
+                    channel: RemoteSubScientist(
+                        profile=config.hierarchical_hypothesis.child_scientist_profiles[channel],
+                        max_tokens=config.hierarchical_hypothesis.child_max_tokens,
+                        **{
+                            key: value
+                            for key, value in llm_runtime_settings.items()
+                            if key != "max_tokens"
+                        },
+                        provider=config.llm.provider,
+                    )
+                    for channel in channels
+                }
+                child_critics = {
+                    channel: RemoteSubCritic(
+                        profile=config.hierarchical_hypothesis.child_critic_profiles[channel],
+                        max_tokens=config.hierarchical_hypothesis.child_critic_max_tokens,
+                        thinking="disabled",
+                        reasoning_effort=None,
+                        **{
+                            key: value
+                            for key, value in llm_runtime_settings.items()
+                            if key not in {"max_tokens", "thinking", "reasoning_effort"}
+                        },
+                        provider=config.llm.provider,
+                    )
+                    for channel in channels
+                }
+                main_hypothesis_critic = RemoteMainHypothesisCritic(
+                    profile=config.hierarchical_hypothesis.main_critic_profile,
+                    max_tokens=config.hierarchical_hypothesis.main_critic_max_tokens,
+                    **{
+                        key: value
+                        for key, value in llm_runtime_settings.items()
+                        if key != "max_tokens"
+                    },
+                    provider=config.llm.provider,
+                )
+            self.hypothesis_graph = HypothesisReviewGraph(
+                child_scientists=child_scientists,
+                child_critics=child_critics,
+                main_critic=main_hypothesis_critic,
+                required_channels=config.hierarchical_hypothesis.required_channels,
+                max_parallel_branches=config.hierarchical_hypothesis.max_parallel_branches,
+                max_child_revision_attempts=(
+                    config.hierarchical_hypothesis.max_child_revision_attempts
+                ),
+                max_main_revision_attempts=(
+                    config.hierarchical_hypothesis.max_main_revision_attempts
+                ),
+            )
         if critic_agent is None:
             rule_critic = RuleBasedCriticClient()
             if config.critic.mode == "remote" and config.critic.enabled:
@@ -363,10 +457,18 @@ class CampaignRunner:
                     reasoning_effort=config.critic.reasoning_effort,
                     thinking=config.critic.thinking,
                     api_key=config.critic.api_key,
+                    max_transport_retries=config.critic.max_model_retries,
+                    max_output_retries=config.critic.max_output_retries,
+                    retry_backoff_seconds=config.critic.retry_backoff_seconds,
+                    request_timeout_seconds=config.critic.request_timeout_seconds,
+                    max_input_chars=config.critic.max_input_chars,
                 )
                 critic_agent = CriticAgent(
                     critic_client,
-                    max_retries=config.critic.max_model_retries,
+                    # Provider/output retries are already owned by the client
+                    # runtime.  Keeping this wrapper at zero prevents N x N
+                    # request multiplication.
+                    max_retries=0,
                     fallback=rule_critic if config.critic.fallback_policy == "rule" else None,
                 )
             else:
@@ -401,6 +503,8 @@ class CampaignRunner:
             knowledge_weight=knowledge_weight,
         )
         self.state = CampaignState(run_id=self.run_id, mode=config.mode, seed=config.seed)
+        self._required_node_failures: list[str] = []
+        self._fallback_nodes: list[str] = []
         self.validation_records: list[ValidationRecord] = []
 
     def _selection_driver(self) -> str:
@@ -844,6 +948,14 @@ class CampaignRunner:
                 "max_tokens": self.config.llm.max_tokens,
                 "reasoning_effort": self.config.llm.reasoning_effort,
                 "thinking": self.config.llm.thinking,
+                "max_transport_retries": self.config.llm.max_transport_retries,
+                "max_output_retries": self.config.llm.max_output_retries,
+                "retry_backoff_seconds": self.config.llm.retry_backoff_seconds,
+                "request_timeout_seconds": self.config.llm.request_timeout_seconds,
+                "allow_unknown_evidence_stripping": (
+                    self.config.llm.allow_unknown_evidence_stripping
+                ),
+                "max_input_chars": self.config.llm.max_input_chars,
                 "trace_role": "observability_only",
                 "scientific_state_source": "wet_dry_kg_artifact",
                 "api_key_ref": self.config.llm.api_key
@@ -859,6 +971,8 @@ class CampaignRunner:
                 "profile": self.config.critic.profile,
                 "base_url": self.config.critic.base_url,
                 "max_revision_attempts": self.config.critic.max_revision_attempts,
+                "max_transport_retries": self.config.critic.max_model_retries,
+                "max_output_retries": self.config.critic.max_output_retries,
                 "fallback_policy": self.config.critic.fallback_policy,
                 "api_key_ref": self.config.critic.api_key
                 if isinstance(self.config.critic.api_key, str)
@@ -943,6 +1057,30 @@ class CampaignRunner:
                 "max_tool_calls": self.config.kg_interaction.max_tool_calls,
                 "max_rows": self.config.kg_interaction.max_rows,
                 "stop_when_sufficient": self.config.kg_interaction.stop_when_sufficient,
+            },
+            "hierarchical_hypothesis": {
+                "enabled": self.config.hierarchical_hypothesis.enabled,
+                "required_channels": list(
+                    self.config.hierarchical_hypothesis.required_channels
+                ),
+                "max_parallel_branches": (
+                    self.config.hierarchical_hypothesis.max_parallel_branches
+                ),
+                "max_child_revision_attempts": (
+                    self.config.hierarchical_hypothesis.max_child_revision_attempts
+                ),
+                "max_main_revision_attempts": (
+                    self.config.hierarchical_hypothesis.max_main_revision_attempts
+                ),
+                "formal_fail_closed": (
+                    self.config.hierarchical_hypothesis.formal_fail_closed
+                ),
+                "main_scientist_profile": (
+                    self.config.hierarchical_hypothesis.main_scientist_profile
+                ),
+                "main_critic_profile": (
+                    self.config.hierarchical_hypothesis.main_critic_profile
+                ),
             },
             "evaluation": {
                 "metrics": list(self.config.evaluation.metrics),
@@ -1346,22 +1484,100 @@ class CampaignRunner:
                     model=self.config.llm.model or self.config.llm.provider,
                 )
                 round_evidence = self._flatten_round_evidence(evidence)
-                hypothesis = self.agent.propose_hypothesis(
-                    self.state,
-                    observed_variants,
-                    self.state.observed,
-                    [
-                        *(local_evidence if self._scientist_local_context_allowed else ()),
-                        *round_evidence,
-                    ],
-                    kg_interaction=interaction_result,
-                    activation_state=self._role_activation_state(
-                        "scientist",
-                        evidence=round_evidence,
-                        local_evidence=local_evidence,
-                        interaction_result=interaction_result,
-                    ),
+                scientist_evidence = [
+                    *(local_evidence if self._scientist_local_context_allowed else ()),
+                    *round_evidence,
+                ]
+                scientist_activation = self._role_activation_state(
+                    "scientist",
+                    evidence=round_evidence,
+                    local_evidence=local_evidence,
+                    interaction_result=interaction_result,
                 )
+                if self.hypothesis_graph is not None:
+                    base_context = self.agent.sanitized_context(
+                        self.state, observed_variants, self.state.observed
+                    )
+                    base_context["activation_state"] = scientist_activation.model_dump(
+                        mode="json"
+                    )
+
+                    def propose_main_hypothesis(
+                        *,
+                        approved_subhypotheses,
+                        cross_channel_conflicts,
+                        base_interaction,
+                        base_evidence,
+                        critic_revision,
+                        hypothesis_attempt,
+                        _scientist_activation=scientist_activation,
+                    ):
+                        return self.agent.propose_hypothesis(
+                            self.state,
+                            observed_variants,
+                            self.state.observed,
+                            base_evidence,
+                            kg_interaction=base_interaction,
+                            activation_state=_scientist_activation,
+                            approved_subhypotheses=[
+                                item.model_dump(mode="json")
+                                for item in approved_subhypotheses
+                            ],
+                            cross_channel_conflicts=[
+                                item.model_dump(mode="json")
+                                for item in cross_channel_conflicts
+                            ],
+                            critic_revision=critic_revision,
+                            hypothesis_attempt=hypothesis_attempt,
+                        )
+
+                    pipeline_result = self.hypothesis_graph.run(
+                        base_context=ScientistContextInput.model_validate(base_context),
+                        evidence=scientist_evidence,
+                        interaction=interaction_result,
+                        main_proposer=propose_main_hypothesis,
+                    )
+                    self.writer.write_json(
+                        f"round_{round_id:02d}/hypothesis_pipeline.json",
+                        pipeline_result.model_dump(mode="json"),
+                    )
+                    self.writer.event(
+                        "hypothesis_pipeline_completed",
+                        {
+                            "round_id": round_id,
+                            "status": pipeline_result.status,
+                            "failure_code": pipeline_result.failure_code,
+                            "branch_status": {
+                                item.channel: item.status for item in pipeline_result.branches
+                            },
+                            "main_attempts": pipeline_result.main_attempts,
+                        },
+                    )
+                    if pipeline_result.status != "SUCCEEDED":
+                        failure = pipeline_result.failure_code or "HYPOTHESIS_PIPELINE_FAILED"
+                        self._required_node_failures.append(f"round_{round_id}:{failure}")
+                        rounds_aborted += 1
+                        self._progress(
+                            None,
+                            f"round {round_id} aborted by hypothesis review graph",
+                            phase=CampaignPhase.ROUND_ABORTED,
+                            persist=False,
+                        )
+                        self.writer.event(
+                            "round_aborted",
+                            {"round_id": round_id, "reason": failure, "decision_ids": []},
+                        )
+                        break
+                    hypothesis = Hypothesis(**(pipeline_result.main_hypothesis or {}))
+                else:
+                    hypothesis = self.agent.propose_hypothesis(
+                        self.state,
+                        observed_variants,
+                        self.state.observed,
+                        scientist_evidence,
+                        kg_interaction=interaction_result,
+                        activation_state=scientist_activation,
+                    )
                 self.state.hypotheses.append(hypothesis)
                 self.knowledge.graph.add_hypothesis(
                     hypothesis.hypothesis_id,
@@ -2397,12 +2613,31 @@ class CampaignRunner:
                         "rethink",
                         interaction_result=interaction_result,
                     ).model_dump(mode="json"),
+                    "approved_hypothesis": (
+                        {
+                            "hypothesis_id": hypothesis.hypothesis_id,
+                            "statement": hypothesis.statement,
+                            "expected_outcome": hypothesis.expected_outcome,
+                            "falsification_criterion": hypothesis.falsification_criterion,
+                            "evidence_ids": list(hypothesis.evidence_ids),
+                            "explanation": hypothesis.explanation,
+                        }
+                        if hypothesis is not None
+                        else None
+                    ),
+                    "final_critic_decision": {
+                        "decision_id": review_result.decision.decision_id,
+                        "verdict": review_result.decision.verdict.value,
+                        "summary": review_result.decision.summary,
+                        "cited_evidence_ids": list(
+                            review_result.decision.cited_evidence_ids
+                        ),
+                    },
                     "candidates": [
                         {
                             "variant_id": variant_id,
                             "mutation_notation": public_by_id[variant_id].mutation_notation,
                             "agent_reason": selection_by_id[variant_id].reason,
-                            "hypothesis": hypothesis.statement if hypothesis else None,
                             "evidence_ids": list(selection_by_id[variant_id].evidence_ids),
                             "wet_value": revealed_by_id[variant_id].fitness,
                             "dry_validations": [
@@ -2426,6 +2661,7 @@ class CampaignRunner:
                     if {item.variant_id for item in reflections} != set(selected_ids):
                         raise ValueError("ReThink output did not cover every selected variant")
                 except Exception as error:  # noqa: BLE001 - provider boundary must degrade safely
+                    self._fallback_nodes.append(f"round_{round_id}:rethink")
                     self.writer.event(
                         "rethink_fallback_used",
                         {"round_id": round_id, "error": str(error)},
@@ -2660,6 +2896,29 @@ class CampaignRunner:
             round_metrics=round_metrics,
             validation_records=self.validation_records,
         )
+        if getattr(self.critic_agent, "fallback_count", 0):
+            self._fallback_nodes.append("batch_critic")
+        required_node_failures = tuple(dict.fromkeys(self._required_node_failures))
+        fallback_nodes = tuple(dict.fromkeys(self._fallback_nodes))
+        completed_rounds = len(round_metrics)
+        run_completed = (
+            rounds_aborted == 0
+            and completed_rounds == self.config.rounds
+            and not required_node_failures
+        )
+        pass_eligible = run_completed and not fallback_nodes
+        completion_manifest = CompletionManifest(
+            artifact_finalized=True,
+            run_status="completed" if run_completed else "failed",
+            experiment_status="completed" if run_completed else "failed",
+            evaluation_status="eligible" if pass_eligible else "not_evaluated",
+            pass_eligible=pass_eligible,
+            expected_rounds=self.config.rounds,
+            completed_rounds=completed_rounds,
+            aborted_rounds=rounds_aborted,
+            required_node_failures=required_node_failures,
+            fallback_nodes=fallback_nodes,
+        )
         summary = {
             "run_id": self.run_id,
             "mode": self.config.mode,
@@ -2685,6 +2944,13 @@ class CampaignRunner:
                 else None
             ),
             "rounds_aborted": rounds_aborted,
+            "artifact_finalized": completion_manifest.artifact_finalized,
+            "run_status": completion_manifest.run_status,
+            "experiment_status": completion_manifest.experiment_status,
+            "evaluation_status": completion_manifest.evaluation_status,
+            "pass_eligible": completion_manifest.pass_eligible,
+            "required_node_failures": list(required_node_failures),
+            "fallback_nodes": list(fallback_nodes),
             "finalized": True,
             "data_source": self._data_source_record,
             "run_dir": str(self.writer.run_dir),
@@ -2696,6 +2962,9 @@ class CampaignRunner:
         self.writer.write_json(
             "knowledge_graph_queries.json",
             self.knowledge.graph.export_agent_queries(),
+        )
+        self.writer.write_json(
+            "completion_manifest.json", completion_manifest.model_dump(mode="json")
         )
         self.writer.write_json("summary.json", summary)
         self._progress(

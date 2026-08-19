@@ -1114,7 +1114,13 @@ class CriticConfig:
     model: str | None = None
     temperature: float = 0.0
     max_revision_attempts: int = 2
+    # One runtime owns provider/output retries.  Scientific revisions above
+    # are a separate budget and never multiply this value in CriticAgent.
     max_model_retries: int = 2
+    max_output_retries: int = 1
+    retry_backoff_seconds: float = 1.0
+    request_timeout_seconds: float = 120.0
+    max_input_chars: int = 80000
     on_reject: str = "abort_round"
     on_exhausted: str = "abort_round"
     fallback_policy: str = "rule"
@@ -1135,8 +1141,16 @@ class CriticConfig:
             raise ValueError("critic.mode must be 'rule' or 'remote'")
         if self.max_revision_attempts not in {0, 1, 2}:
             raise ValueError("critic.max_revision_attempts must be between 0 and 2")
-        if self.max_model_retries < 0:
-            raise ValueError("critic.max_model_retries must be non-negative")
+        if self.max_model_retries not in {0, 1, 2}:
+            raise ValueError("critic.max_model_retries must be between 0 and 2")
+        if self.max_output_retries not in {0, 1}:
+            raise ValueError("critic.max_output_retries must be 0 or 1")
+        if self.retry_backoff_seconds < 0:
+            raise ValueError("critic.retry_backoff_seconds must be non-negative")
+        if self.request_timeout_seconds <= 0:
+            raise ValueError("critic.request_timeout_seconds must be positive")
+        if self.max_input_chars < 4096:
+            raise ValueError("critic.max_input_chars must be at least 4096")
         if self.on_reject not in {"abort_round", "safe_fallback"}:
             raise ValueError("critic.on_reject must be abort_round or safe_fallback")
         if self.on_exhausted not in {"abort_round", "safe_fallback"}:
@@ -1154,6 +1168,73 @@ class LLMConfig:
     max_tokens: int | None = None
     reasoning_effort: str | None = None
     thinking: str | None = None
+    max_transport_retries: int = 2
+    max_output_retries: int = 1
+    retry_backoff_seconds: float = 1.0
+    request_timeout_seconds: float = 120.0
+    allow_unknown_evidence_stripping: bool = False
+    max_input_chars: int = 80000
+
+    def __post_init__(self) -> None:
+        if self.max_transport_retries not in {0, 1, 2}:
+            raise ValueError("llm.max_transport_retries must be between 0 and 2")
+        if self.max_output_retries not in {0, 1}:
+            raise ValueError("llm.max_output_retries must be 0 or 1")
+        if self.retry_backoff_seconds < 0:
+            raise ValueError("llm.retry_backoff_seconds must be non-negative")
+        if self.request_timeout_seconds <= 0:
+            raise ValueError("llm.request_timeout_seconds must be positive")
+        if self.max_input_chars < 4096:
+            raise ValueError("llm.max_input_chars must be at least 4096")
+
+
+@dataclass
+class HierarchicalHypothesisConfig:
+    enabled: bool = False
+    required_channels: tuple[str, ...] = ("physchem", "conservation", "structure")
+    max_parallel_branches: int = 3
+    max_child_revision_attempts: int = 1
+    max_main_revision_attempts: int = 1
+    formal_fail_closed: bool = True
+    child_scientist_profiles: dict[str, str] = field(
+        default_factory=lambda: {
+            "physchem": "physchem_v1",
+            "conservation": "conservation_v1",
+            "structure": "structure_v1",
+        }
+    )
+    child_critic_profiles: dict[str, str] = field(
+        default_factory=lambda: {
+            "physchem": "physchem_v1",
+            "conservation": "conservation_v1",
+            "structure": "structure_v1",
+        }
+    )
+    main_scientist_profile: str = "synthesis_v1"
+    main_critic_profile: str = "hypothesis_v1"
+    child_max_tokens: int = 4096
+    child_critic_max_tokens: int = 2048
+    main_critic_max_tokens: int = 4096
+
+    def __post_init__(self) -> None:
+        allowed = {"physchem", "conservation", "structure"}
+        if not self.required_channels or set(self.required_channels).difference(allowed):
+            raise ValueError("hierarchical_hypothesis.required_channels is invalid")
+        if self.max_parallel_branches not in {1, 2, 3}:
+            raise ValueError("hierarchical_hypothesis.max_parallel_branches must be 1..3")
+        if self.max_child_revision_attempts not in {0, 1, 2}:
+            raise ValueError("max_child_revision_attempts must be between 0 and 2")
+        if self.max_main_revision_attempts not in {0, 1, 2}:
+            raise ValueError("max_main_revision_attempts must be between 0 and 2")
+        for profiles in (self.child_scientist_profiles, self.child_critic_profiles):
+            if set(profiles) != allowed or any(not value for value in profiles.values()):
+                raise ValueError("hierarchical child profiles must cover all three channels")
+        if min(
+            self.child_max_tokens,
+            self.child_critic_max_tokens,
+            self.main_critic_max_tokens,
+        ) < 512:
+            raise ValueError("hierarchical role token budgets must be at least 512")
 
 
 @dataclass
@@ -1179,6 +1260,9 @@ class ExperimentConfig:
     evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
     kg_interaction: KGInteractionRuntimeConfig = field(default_factory=KGInteractionRuntimeConfig)
+    hierarchical_hypothesis: HierarchicalHypothesisConfig = field(
+        default_factory=HierarchicalHypothesisConfig
+    )
     llm_provider: str = "mock"
     knowledge_enabled: bool = False
     score_shuffle: bool = False
@@ -1531,6 +1615,14 @@ def load_experiment_config(
             str(item) for item in interaction_raw["truncation_audit_items"]
         )
     kg_interaction = _dataclass_from_mapping(KGInteractionRuntimeConfig, interaction_raw)
+    hierarchical_raw = dict(raw.get("hierarchical_hypothesis", {}) or {})
+    if "required_channels" in hierarchical_raw:
+        hierarchical_raw["required_channels"] = tuple(
+            str(item) for item in hierarchical_raw["required_channels"]
+        )
+    hierarchical_hypothesis = _dataclass_from_mapping(
+        HierarchicalHypothesisConfig, hierarchical_raw
+    )
     critic_raw: dict[str, Any] = {}
     if raw.get("critic_config"):
         critic_raw.update(read_yaml(raw["critic_config"], root))
@@ -1575,6 +1667,7 @@ def load_experiment_config(
         evaluation=evaluation,
         output=output,
         kg_interaction=kg_interaction,
+        hierarchical_hypothesis=hierarchical_hypothesis,
         output_root=root / raw.get("output_root", "artifacts/runs"),
         llm_provider=llm.provider,
         knowledge_enabled=bool(raw.get("knowledge_enabled", False)),

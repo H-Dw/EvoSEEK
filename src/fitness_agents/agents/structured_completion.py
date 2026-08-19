@@ -26,6 +26,11 @@ def complete_structured(
     reasoning_effort: str | None = None,
     thinking: str | None = None,
     retries: int = 2,
+    transport_retries: int | None = None,
+    output_retries: int | None = None,
+    retry_backoff_seconds: float = 0.0,
+    allow_unknown_evidence_stripping: bool = True,
+    max_input_chars: int | None = None,
     trace_context: dict[str, Any] | None = None,
 ) -> OutputT:
     """Parse, validate and context-check inside one bounded retry boundary."""
@@ -45,6 +50,11 @@ def complete_structured(
         reasoning_effort=reasoning_effort,
         thinking=thinking,
         retries=retries,
+        transport_retries=transport_retries,
+        output_retries=output_retries,
+        retry_backoff_seconds=retry_backoff_seconds,
+        allow_unknown_evidence_stripping=allow_unknown_evidence_stripping,
+        max_input_chars=max_input_chars,
         validator=validate,
         trace_context=trace_context,
     )

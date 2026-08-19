@@ -14,6 +14,11 @@ each candidate, distinguish revealed measurements, dry outputs, selection ration
 text, and evidence identifiers. Treat configured, executed, visible, and present as different
 states. Do not infer evidence content from an identifier or tool name alone.
 
+The input is limited to the final approved hypothesis, the final structured Critic decision,
+selected-candidate rationale and evidence IDs, dry validation summaries, revealed wet observations,
+and the visible pre-round baseline. Do not request raw KG packs, rejected drafts, other Critic
+histories, hidden reasoning, or unselected candidates.
+
 ## 3. Activation-state routing
 
 ### 3.1 Design route

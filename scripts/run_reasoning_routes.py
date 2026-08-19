@@ -186,9 +186,23 @@ def audit_run(
     run_dir = Path(summary["run_dir"])
     config = json.loads((run_dir / "config.json").read_text(encoding="utf-8"))
     state = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
+    completion_path = run_dir / "completion_manifest.json"
+    completion = (
+        json.loads(completion_path.read_text(encoding="utf-8"))
+        if completion_path.is_file()
+        else {}
+    )
     round_dirs = sorted(path for path in run_dir.glob("round_*") if path.is_dir())
     checks = [
         _check("campaign_finalized", summary.get("finalized") is True),
+        _check("completion_manifest_present", completion_path.is_file()),
+        _check("artifact_finalized", completion.get("artifact_finalized") is True),
+        _check("run_status_completed", completion.get("run_status") == "completed"),
+        _check(
+            "experiment_status_completed",
+            completion.get("experiment_status") == "completed",
+        ),
+        _check("formal_pass_eligible", completion.get("pass_eligible") is True),
         _check("condition_matches_route", summary.get("condition") == spec.route_id),
         _check(
             "fold_matches_schedule",

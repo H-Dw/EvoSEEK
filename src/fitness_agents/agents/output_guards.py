@@ -26,6 +26,22 @@ class EmptyLLMOutputError(ValueError):
     """Remote LLM returned no visible message content."""
 
 
+class ContentFilteredError(RuntimeError):
+    """Provider blocked the visible completion; retrying the same request is unsafe."""
+
+
+class UnexpectedFinishReasonError(RuntimeError):
+    """The provider ended in a state incompatible with a JSON-only role call."""
+
+
+class ProviderResourceError(TimeoutError):
+    """Provider declared a transient resource shortage."""
+
+
+class PromptBudgetExceededError(RuntimeError):
+    """Projected prompt exceeded the configured preflight character budget."""
+
+
 class UnknownEvidenceIdsError(ValueError):
     """Hypothesis cited evidence IDs that are not visible to the role."""
 
@@ -68,7 +84,11 @@ class TokenBudgetPolicy:
             return
         if deepseek:
             self.thinking = "disabled"
-            self.effort = "low"
+            # DeepSeek maps low/medium reasoning effort back to high.  Once a
+            # completion is truncated, disable thinking and omit the effort
+            # field altogether so the compact retry cannot silently re-enable
+            # an expensive reasoning path.
+            self.effort = None
         raised = max(self.budget + 4096, int(self.budget * 1.5))
         self.budget = min(self.max_budget, raised)
 
@@ -112,37 +132,8 @@ def _braces_balanced(text: str) -> bool:
     return depth_obj == 0 and depth_arr == 0 and not in_string
 
 
-def _close_truncated_json(fragment: str) -> str | None:
-    depth_obj = 0
-    depth_arr = 0
-    in_string = False
-    escape = False
-    for char in fragment:
-        if in_string:
-            if escape:
-                escape = False
-            elif char == "\\":
-                escape = True
-            elif char == '"':
-                in_string = False
-            continue
-        if char == '"':
-            in_string = True
-        elif char == "{":
-            depth_obj += 1
-        elif char == "}":
-            depth_obj -= 1
-        elif char == "[":
-            depth_arr += 1
-        elif char == "]":
-            depth_arr -= 1
-    if in_string or depth_obj < 0 or depth_arr < 0:
-        return None
-    return fragment + ("]" * depth_arr) + ("}" * depth_obj)
-
-
 def json_salvage(text: str) -> dict[str, Any] | None:
-    """Conservative repair: fences, trailing commas, and truncated close-braces only."""
+    """Repair cosmetic JSON only; never synthesize closure for truncated output."""
 
     payload = strip_markdown_fences(text)
     if not payload:
@@ -164,15 +155,7 @@ def json_salvage(text: str) -> dict[str, Any] | None:
         return parsed if isinstance(parsed, dict) else None
 
     parsed = _load(stripped_commas)
-    if parsed is not None:
-        return parsed
-    start = stripped_commas.find("{")
-    if start < 0:
-        return None
-    closed = _close_truncated_json(stripped_commas[start:])
-    if closed is None:
-        return None
-    return _load(closed)
+    return parsed
 
 
 def classify_output_failure(
@@ -291,7 +274,7 @@ class RevisionConstraints:
     reduce_mutation_depth: bool = False
     regenerate_hypothesis: bool = False
 
-    def merge(self, other: "RevisionConstraints") -> "RevisionConstraints":
+    def merge(self, other: RevisionConstraints) -> RevisionConstraints:
         return RevisionConstraints(
             require_controls=self.require_controls or other.require_controls,
             increase_diversity=self.increase_diversity or other.increase_diversity,

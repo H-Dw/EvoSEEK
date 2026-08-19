@@ -355,17 +355,33 @@ class NativeScientistClient:
         thinking: str | None = None,
         api_key: str | None = None,
         profile: str = "scientific_v1",
+        max_transport_retries: int = 2,
+        max_output_retries: int = 1,
+        retry_backoff_seconds: float = 1.0,
+        request_timeout_seconds: float = 120.0,
+        allow_unknown_evidence_stripping: bool = True,
+        max_input_chars: int | None = None,
     ) -> None:
         self.model = resolve_model(model, provider=provider)
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.reasoning_effort = reasoning_effort
         self.thinking = thinking
+        self.max_transport_retries = max_transport_retries
+        self.max_output_retries = max_output_retries
+        self.retry_backoff_seconds = retry_backoff_seconds
+        self.allow_unknown_evidence_stripping = allow_unknown_evidence_stripping
+        self.max_input_chars = max_input_chars
         self.profile_name = profile
         role_profile = load_role_profile("scientist", profile)
         self.profile = role_profile.instructions
         self.profile_sha256 = role_profile.sha256
-        self.client = create_openai_client(api_key=api_key, base_url=base_url, provider=provider)
+        self.client = create_openai_client(
+            api_key=api_key,
+            base_url=base_url,
+            provider=provider,
+            request_timeout_seconds=request_timeout_seconds,
+        )
         self.transport = OpenAICompatibleChatTransport(self.client)
 
     def generate_hypothesis(
@@ -389,6 +405,11 @@ class NativeScientistClient:
             for item in pack.get("evidence", ())
             if isinstance(item, dict) and item.get("evidence_id")
         }
+        context_evidence_ids.update(
+            str(evidence_id)
+            for item in context.get("approved_subhypotheses", ())
+            for evidence_id in (item.get("hypothesis", {}) or {}).get("evidence_ids", ())
+        )
         allowed_evidence_ids = frozenset(
             {entry.evidence_id for entry in evidence}.union(context_evidence_ids)
         )
@@ -416,6 +437,14 @@ class NativeScientistClient:
             max_tokens=self.max_tokens,
             reasoning_effort=self.reasoning_effort,
             thinking=self.thinking,
+            retries=0,
+            transport_retries=getattr(self, "max_transport_retries", 2),
+            output_retries=getattr(self, "max_output_retries", 1),
+            retry_backoff_seconds=getattr(self, "retry_backoff_seconds", 0.0),
+            allow_unknown_evidence_stripping=getattr(
+                self, "allow_unknown_evidence_stripping", True
+            ),
+            max_input_chars=getattr(self, "max_input_chars", None),
             contextual_validator=lambda value: validate_hypothesis_payload(
                 value,
                 expected_hypothesis_id=expected_id,

@@ -102,6 +102,8 @@ class ScientistContextInput(BaseModel):
     previous_hypothesis_assessment: dict[str, Any] | None
     knowledge_graph: dict[str, Any] | None = None
     kg_interaction: dict[str, Any] | None = None
+    approved_subhypotheses: tuple[dict[str, Any], ...] = ()
+    cross_channel_conflicts: tuple[dict[str, Any], ...] = ()
     critic_revision: dict[str, Any] | None = None
 
     @field_validator("mutable_positions", mode="before")
@@ -112,6 +114,11 @@ class ScientistContextInput(BaseModel):
     @field_validator("allowed_mutation_positions", mode="before")
     @classmethod
     def normalize_allowed_positions(cls, value: Any) -> Any:
+        return tuple(value) if isinstance(value, list) else value
+
+    @field_validator("approved_subhypotheses", "cross_channel_conflicts", mode="before")
+    @classmethod
+    def normalize_hierarchical_payloads(cls, value: Any) -> Any:
         return tuple(value) if isinstance(value, list) else value
 
     @model_validator(mode="after")
@@ -140,6 +147,8 @@ class ReThinkContextInput(BaseModel):
     activation_state: RoleActivationState = Field(
         default_factory=lambda: RoleActivationState(role="rethink")
     )
+    approved_hypothesis: dict[str, Any] | None = None
+    final_critic_decision: dict[str, Any] | None = None
     candidates: list[dict[str, Any]]
 
     @model_validator(mode="after")

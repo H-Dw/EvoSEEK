@@ -124,6 +124,24 @@ def _write_run(tmp_path: Path, *, rounds_aborted: int, completed_rounds: int) ->
         "selection_driver": "agent_uq",
         "data_source": {"fold_index": 1},
     }
+    completed = rounds_aborted == 0 and completed_rounds == 3
+    (run_dir / "completion_manifest.json").write_text(
+        json.dumps(
+            {
+                "artifact_finalized": True,
+                "run_status": "completed" if completed else "failed",
+                "experiment_status": "completed" if completed else "failed",
+                "evaluation_status": "eligible" if completed else "not_evaluated",
+                "pass_eligible": completed,
+                "expected_rounds": 3,
+                "completed_rounds": completed_rounds,
+                "aborted_rounds": rounds_aborted,
+                "required_node_failures": [],
+                "fallback_nodes": [],
+            }
+        ),
+        encoding="utf-8",
+    )
     return summary
 
 
@@ -142,6 +160,7 @@ def test_incomplete_run_is_not_audit_passed(tmp_path: Path) -> None:
     assert audit["passed"] is False
     assert "rounds_aborted_is_zero" in failed
     assert "completed_rounds_match_config" in failed
+    assert "formal_pass_eligible" in failed
 
 
 def test_complete_three_round_run_can_pass_completion_checks(tmp_path: Path) -> None:

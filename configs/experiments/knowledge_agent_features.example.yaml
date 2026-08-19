@@ -22,6 +22,26 @@ validation:
   enabled: true
   predictor_models: []
   rethink_enabled: true
+hierarchical_hypothesis:
+  enabled: true
+  required_channels: [physchem, conservation, structure]
+  max_parallel_branches: 3
+  max_child_revision_attempts: 1
+  max_main_revision_attempts: 1
+  formal_fail_closed: true
+  child_scientist_profiles:
+    physchem: physchem_v1
+    conservation: conservation_v1
+    structure: structure_v1
+  child_critic_profiles:
+    physchem: physchem_v1
+    conservation: conservation_v1
+    structure: structure_v1
+  main_scientist_profile: synthesis_v1
+  main_critic_profile: hypothesis_v1
+  child_max_tokens: 4096
+  child_critic_max_tokens: 2048
+  main_critic_max_tokens: 4096
 kg_interaction:
   enabled: true
   enabled_operators:
