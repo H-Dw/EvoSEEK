@@ -67,6 +67,39 @@ def _knowledge_command(argv: list[str]) -> None:
         knowledge.close()
 
 
+def _design_command(argv: list[str]) -> None:
+    from fitness_agents.interaction import EvolutionApplicationService
+
+    parser = argparse.ArgumentParser(description="Preview or run an open sequence design")
+    parser.add_argument("config", help="Trusted open-design experiment YAML")
+    parser.add_argument("--prompt", required=True, help="Natural-language design objective")
+    parser.add_argument("--fasta", type=Path, help="Optional reference FASTA/plain sequence")
+    parser.add_argument(
+        "--confirm",
+        action="store_true",
+        help="Run after printing the validated preview; otherwise preview only",
+    )
+    args = parser.parse_args(argv)
+    sequence_text = args.fasta.read_text(encoding="utf-8") if args.fasta else None
+    service = EvolutionApplicationService(args.config)
+    preview = service.preview(args.prompt, sequence_text=sequence_text)
+    print(json.dumps(preview.model_dump(mode="json"), ensure_ascii=False, indent=2))
+    if args.confirm:
+        result = service.run(preview.preview_id, confirmed=True)
+        print(json.dumps(result.model_dump(mode="json"), ensure_ascii=False, indent=2))
+
+
+def _serve_command(argv: list[str]) -> None:
+    from fitness_agents.interaction.gradio_app import launch_app
+
+    parser = argparse.ArgumentParser(description="Launch the local open-design interface")
+    parser.add_argument("config", help="Trusted open-design experiment YAML")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=7860)
+    args = parser.parse_args(argv)
+    launch_app(args.config, host=args.host, port=args.port)
+
+
 def _apply_local_knowledge_paths(config, *, index_path: Path | None, overlay_path: Path | None):
     if index_path is None and overlay_path is None:
         return config
@@ -87,6 +120,12 @@ def _apply_local_knowledge_paths(config, *, index_path: Path | None, overlay_pat
 def main() -> None:
     if len(sys.argv) > 1 and sys.argv[1] == "knowledge":
         _knowledge_command(sys.argv[2:])
+        return
+    if len(sys.argv) > 1 and sys.argv[1] == "design":
+        _design_command(sys.argv[2:])
+        return
+    if len(sys.argv) > 1 and sys.argv[1] == "serve":
+        _serve_command(sys.argv[2:])
         return
     parser = argparse.ArgumentParser(description="Low-level fitness-agents campaign entry point")
     parser.add_argument("config", help="Experiment YAML path")

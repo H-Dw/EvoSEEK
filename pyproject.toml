@@ -23,6 +23,7 @@ dependencies = [
 llm = ["openai>=1.40,<4"]
 rag = ["sentence-transformers>=3,<6"]
 rag-docs = ["docling>=2,<3"]
+ui = ["gradio>=6,<7"]
 kermut = [
   "torch>=2.2,<3",
   "gpytorch>=1.11,<2",

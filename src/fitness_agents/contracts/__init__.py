@@ -6,6 +6,13 @@ from .design import (
     SequenceEdit,
     SequenceProposal,
 )
+from .interaction import (
+    EvolutionEvent,
+    EvolutionIntent,
+    EvolutionRunResult,
+    OpenDesignRequestPreview,
+    UserConstraintIntent,
+)
 from .interfaces import (
     AcquisitionPolicy,
     ApprovedExperimentBackend,
@@ -42,6 +49,9 @@ __all__ = [
     "DraftBatch",
     "Evidence",
     "EvidenceProvider",
+    "EvolutionEvent",
+    "EvolutionIntent",
+    "EvolutionRunResult",
     "ExperimentBackend",
     "FeatureProvider",
     "FitnessObservation",
@@ -49,6 +59,7 @@ __all__ = [
     "Hypothesis",
     "HypothesisAssessment",
     "LLMClient",
+    "OpenDesignRequestPreview",
     "Prediction",
     "PredictorCapabilities",
     "RankedSequenceDesign",
@@ -57,5 +68,6 @@ __all__ = [
     "SelectionRecord",
     "SequenceEdit",
     "SequenceProposal",
+    "UserConstraintIntent",
     "Variant",
 ]
