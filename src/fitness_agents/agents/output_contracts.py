@@ -8,11 +8,18 @@ from pydantic import (
     AfterValidator,
     BaseModel,
     ConfigDict,
+    Field,
+    StringConstraints,
     field_validator,
     model_validator,
 )
 
+from fitness_agents.agents.output_guards import UnknownEvidenceIdsError
 from fitness_agents.contracts.schemas import Hypothesis, ReThinkReflection
+
+HYPOTHESIS_TEXT_MAX = 400
+RETHINK_TEXT_MAX = 400
+EVIDENCE_ID_MAX = 12
 
 
 def _non_empty_text(value: str) -> str:
@@ -23,6 +30,14 @@ def _non_empty_text(value: str) -> str:
 
 
 NonEmptyText = Annotated[str, AfterValidator(_non_empty_text)]
+HypothesisText = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=HYPOTHESIS_TEXT_MAX),
+]
+ReThinkText = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=RETHINK_TEXT_MAX),
+]
 CANONICAL_RESIDUES = frozenset("ACDEFGHIKLMNPQRSTVWY")
 _UNSET = object()
 _VARIANT_ID_PREFIX = "sha256:"
@@ -31,6 +46,8 @@ _VARIANT_ID_PREFIX = "sha256:"
 def visible_evidence_ids(
     evidence_ids: Sequence[str],
     allowed_evidence_ids: frozenset[str] | None,
+    *,
+    on_unknown: Literal["error", "strip"] = "error",
 ) -> tuple[str, ...]:
     """Keep cited evidence IDs that the role can see; drop variant hashes.
 
@@ -50,10 +67,8 @@ def visible_evidence_ids(
             continue
         else:
             unknown.append(item)
-    if unknown:
-        raise ValueError(
-            f"evidence_ids contains identifiers not visible to the role: {sorted(unknown)}"
-        )
+    if unknown and on_unknown == "error":
+        raise UnknownEvidenceIdsError(unknown, allowed_evidence_ids)
     return tuple(kept)
 
 
@@ -97,11 +112,11 @@ class HypothesisOutput(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     hypothesis_id: NonEmptyText
-    statement: NonEmptyText
+    statement: HypothesisText
     preferred_residues: dict[str, list[NonEmptyText]]
-    evidence_ids: list[NonEmptyText]
-    expected_outcome: NonEmptyText
-    falsification_criterion: NonEmptyText
+    evidence_ids: Annotated[list[NonEmptyText], Field(max_length=EVIDENCE_ID_MAX)]
+    expected_outcome: HypothesisText
+    falsification_criterion: HypothesisText
     parent_hypothesis_id: NonEmptyText | None
 
     @model_validator(mode="after")
@@ -117,17 +132,22 @@ class HypothesisOutput(BaseModel):
         expected_parent_hypothesis_id: str | None | object = _UNSET,
         allowed_evidence_ids: frozenset[str] | None = None,
         expected_positions: tuple[int, ...] | None = None,
+        on_unknown_evidence: Literal["error", "strip"] = "error",
     ) -> Hypothesis:
-        if expected_hypothesis_id is not None and self.hypothesis_id != expected_hypothesis_id:
-            raise ValueError(
-                f"hypothesis_id must equal CampaignRunner ID {expected_hypothesis_id!r}"
-            )
-        if (
-            expected_parent_hypothesis_id is not _UNSET
-            and self.parent_hypothesis_id != expected_parent_hypothesis_id
-        ):
-            raise ValueError("parent_hypothesis_id must match the current CampaignRunner context")
-        evidence_ids = visible_evidence_ids(self.evidence_ids, allowed_evidence_ids)
+        hypothesis_id = self.hypothesis_id
+        if expected_hypothesis_id is not None:
+            # CampaignRunner owns this identifier; do not fail the round on a copy error.
+            hypothesis_id = expected_hypothesis_id
+        parent_hypothesis_id = self.parent_hypothesis_id
+        if expected_parent_hypothesis_id is not _UNSET:
+            parent_hypothesis_id = expected_parent_hypothesis_id
+        if parent_hypothesis_id == hypothesis_id:
+            raise ValueError("parent_hypothesis_id must differ from hypothesis_id")
+        evidence_ids = visible_evidence_ids(
+            self.evidence_ids,
+            allowed_evidence_ids,
+            on_unknown=on_unknown_evidence,
+        )
         preferred = PreferredResiduesOutput(residues=self.preferred_residues).residues
         if expected_positions is not None:
             expected = {str(item) for item in expected_positions}
@@ -138,7 +158,7 @@ class HypothesisOutput(BaseModel):
                     f"missing={sorted(expected - actual)}, unexpected={sorted(actual - expected)}"
                 )
         return Hypothesis(
-            hypothesis_id=self.hypothesis_id,
+            hypothesis_id=hypothesis_id,
             statement=self.statement,
             preferred_residues={
                 int(site): tuple(residues) for site, residues in preferred.items()
@@ -146,7 +166,7 @@ class HypothesisOutput(BaseModel):
             evidence_ids=evidence_ids,
             expected_outcome=self.expected_outcome,
             falsification_criterion=self.falsification_criterion,
-            parent_hypothesis_id=self.parent_hypothesis_id,
+            parent_hypothesis_id=parent_hypothesis_id,
         )
 
 
@@ -155,11 +175,11 @@ class ReThinkItemOutput(BaseModel):
 
     variant_id: NonEmptyText
     verdict: Literal["support", "conflict", "mixed", "inconclusive"]
-    summary: NonEmptyText
+    summary: ReThinkText
     positive_findings: list[NonEmptyText]
     negative_findings: list[NonEmptyText]
-    revised_reason: NonEmptyText
-    next_round_advice: NonEmptyText
+    revised_reason: ReThinkText
+    next_round_advice: ReThinkText
 
 
 class ReThinkOutput(BaseModel):
@@ -206,15 +226,34 @@ def validate_hypothesis_payload(
     expected_parent_hypothesis_id: str | None | object = _UNSET,
     allowed_evidence_ids: frozenset[str] | None = None,
     expected_positions: tuple[int, ...] | None = None,
+    on_unknown_evidence: Literal["error", "strip"] = "error",
 ) -> dict[str, Any]:
     model = HypothesisOutput.model_validate(payload)
-    hypothesis = model.to_hypothesis(
-        expected_hypothesis_id=expected_hypothesis_id,
-        expected_parent_hypothesis_id=expected_parent_hypothesis_id,
-        allowed_evidence_ids=allowed_evidence_ids,
-        expected_positions=expected_positions,
-    )
+    try:
+        hypothesis = model.to_hypothesis(
+            expected_hypothesis_id=expected_hypothesis_id,
+            expected_parent_hypothesis_id=expected_parent_hypothesis_id,
+            allowed_evidence_ids=allowed_evidence_ids,
+            expected_positions=expected_positions,
+            on_unknown_evidence=on_unknown_evidence,
+        )
+    except UnknownEvidenceIdsError as error:
+        stripped = model.to_hypothesis(
+            expected_hypothesis_id=expected_hypothesis_id,
+            expected_parent_hypothesis_id=expected_parent_hypothesis_id,
+            allowed_evidence_ids=allowed_evidence_ids,
+            expected_positions=expected_positions,
+            on_unknown_evidence="strip",
+        )
+        dumped = model.model_dump(mode="json", by_alias=True)
+        dumped["hypothesis_id"] = stripped.hypothesis_id
+        dumped["parent_hypothesis_id"] = stripped.parent_hypothesis_id
+        dumped["evidence_ids"] = list(stripped.evidence_ids)
+        error.stripped_payload = dumped
+        raise
     dumped = model.model_dump(mode="json", by_alias=True)
+    dumped["hypothesis_id"] = hypothesis.hypothesis_id
+    dumped["parent_hypothesis_id"] = hypothesis.parent_hypothesis_id
     dumped["evidence_ids"] = list(hypothesis.evidence_ids)
     return dumped
 

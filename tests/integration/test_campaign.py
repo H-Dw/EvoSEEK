@@ -179,8 +179,8 @@ def test_agent_selection_precedes_dry_validation_and_writes_full_kg_outputs(conf
     interaction = json.loads((run_dir / "round_01/kg_interaction.json").read_text())
     assert [item["operator"] for item in interaction["packs"]] == [
         "hypothesis_context",
+        "query_assay_association",
         "explain_variant",
-        "compare_variants",
     ]
     matrix = json.loads((run_dir / "round_01/validation_matrix.json").read_text())
     assert {item["validation_type"] for item in matrix} == {"wet", "dry"}

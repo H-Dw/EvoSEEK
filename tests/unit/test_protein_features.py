@@ -15,6 +15,7 @@ from fitness_agents.protein_features import (
     PhyschemDescriptorProvider,
     ProteinTaskContext,
     StaticStructureProvider,
+    SubstitutionFeatureStore,
 )
 from fitness_agents.protein_features.calibration import calibrate_visible_evidence
 
@@ -229,6 +230,117 @@ def test_static_structure_provider_uses_coordinates_and_reports_limitations(
     assert site["sasa_angstrom2"] >= 0
     assert site["mutant_side_chain_not_modelled"] is True
     assert "no folding or affinity claim" in evidence.statement
+
+
+def test_substitution_features_are_shared_across_combinatorial_variants(
+    tmp_path: Path,
+) -> None:
+    root = Path(__file__).parents[2]
+    context = ProteinTaskContext.from_task(_task(tmp_path))
+    physchem = PhyschemDescriptorProvider(
+        context,
+        KnowledgeProviderConfig(
+            kind="aaindex_delta",
+            resource_path=root / "configs/resources/aaindex_minimal.yaml",
+        ),
+        parameter_set_id="test:v1",
+    )
+    alignment = tmp_path / "alignment.a3m"
+    alignment.write_text(
+        ">query\nACDE\n>s2\nACDF\n>s3\nACNE\n>s4\nACDE\n",
+        encoding="utf-8",
+    )
+    conservation = MSAProfileProvider(
+        context,
+        KnowledgeProviderConfig(
+            kind="msa_profile",
+            a3m_path=alignment,
+            options={
+                "identity_threshold": 0.8,
+                "pseudocount": 0.5,
+                "minimum_neff": 1.0,
+                "minimum_sequence_coverage": 0.5,
+                "maximum_sequence_gap_fraction": 0.5,
+                "pairwise_enabled": False,
+            },
+        ),
+        parameter_set_id="test:v1",
+        cache_dir=tmp_path / "cache",
+    )
+    first = physchem.evaluate(_variant("combo-a", "AF"), round_id=1)
+    second = physchem.evaluate(_variant("combo-b", "CF"), round_id=2)
+    first_cons = conservation.evaluate(_variant("combo-a", "AF"), round_id=1)
+    second_cons = conservation.evaluate(_variant("combo-b", "CF"), round_id=2)
+
+    assert first.raw_features["sites"]["4"] == second.raw_features["sites"]["4"]
+    assert first_cons.raw_features["sites"]["4"]["log_odds_vs_wild_type"] == (
+        second_cons.raw_features["sites"]["4"]["log_odds_vs_wild_type"]
+    )
+    assert first_cons.raw_features["sites"]["4"]["mutant_frequency"] == (
+        second_cons.raw_features["sites"]["4"]["mutant_frequency"]
+    )
+    assert first.evidence_id != second.evidence_id
+    store = SubstitutionFeatureStore.from_providers(
+        {"physchem": physchem, "conservation": conservation}
+    )
+    assert "4" in store.tables["physchem"]["positions"]
+    assert "F" in store.tables["physchem"]["positions"]["4"]["substitutions"]
+    assert "4" in store.tables["conservation"]["positions"]
+
+
+def test_structure_environment_does_not_depend_on_mutant_residue(tmp_path: Path) -> None:
+    structure = tmp_path / "test.pdb"
+    lines = []
+    serial = 1
+    for number, residue, origin in ((1, "ALA", 0.0), (2, "CYS", 3.0), (3, "ASP", 6.0)):
+        for name, offset in (("N", 0.0), ("CA", 0.8), ("C", 1.6), ("O", 2.1)):
+            lines.append(_pdb_atom(serial, name, residue, number, origin + offset))
+            serial += 1
+    structure.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    task = _task(
+        tmp_path,
+        wild_type_sites="C",
+        mutable_positions=[2],
+        structure_resources=(
+            {
+                "resource_id": "test-structure",
+                "path": structure,
+                "format": "pdb",
+                "chain": "A",
+            },
+        ),
+    )
+    context = ProteinTaskContext.from_task(task)
+    provider = StaticStructureProvider(
+        context,
+        KnowledgeProviderConfig(
+            kind="static_structure",
+            options={
+                "contact_cutoff_angstrom": 5.0,
+                "interface_cutoff_angstrom": 5.0,
+                "hbond_cutoff_angstrom": 3.5,
+                "salt_bridge_cutoff_angstrom": 4.0,
+                "sasa_probe_radius_angstrom": 1.4,
+                "sasa_sphere_points": 24,
+                "dense_contact_count": 2,
+                "clash_distance_fraction": 0.75,
+                "disulfide_sg_cutoff_angstrom": 2.3,
+            },
+        ),
+        parameter_set_id="test:v1",
+    )
+    tryptophan = provider.evaluate(_variant("w", "W"), round_id=1)
+    phenylalanine = provider.evaluate(_variant("f", "F"), round_id=2)
+    site_w = tryptophan.raw_features["sites"]["2"]
+    site_f = phenylalanine.raw_features["sites"]["2"]
+
+    assert site_w["sasa_angstrom2"] == site_f["sasa_angstrom2"]
+    assert site_w["contact_count"] == site_f["contact_count"]
+    assert "closest_contacts" not in site_w
+    assert "interface_contacts" not in site_w
+    assert site_w["mutation"] != site_f["mutation"]
+    assert site_w["mutant_side_chain_not_modelled"] is True
+    assert provider.site_table()["positions"]["2"]["wild_type"] == "C"
 
 
 def test_visible_calibration_never_uses_unrevealed_labels() -> None:

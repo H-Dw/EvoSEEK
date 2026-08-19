@@ -253,6 +253,7 @@ class FeatureBundleOperator:
         caveats: list[str] = []
         provenance: list[dict[str, Any]] = []
         channel_status: dict[str, str] = {}
+        per_channel_limit = max(1, context.max_rows // len(channels))
         for channel in channels:
             result = self.tool.feature_evidence(
                 variant_id,
@@ -260,7 +261,7 @@ class FeatureBundleOperator:
                 round_id=context.round_id,
             )
             query_ids.append(str(result["query_id"]))
-            items = _dict_tuple(result.get("evidence"))
+            items = _dict_tuple(result.get("evidence"))[:per_channel_limit]
             evidence.extend(items)
             channel_status[channel] = "available" if items else "missing"
             for item in items:
@@ -283,6 +284,7 @@ class FeatureBundleOperator:
                 "channels": list(channels),
                 "channel_status": channel_status,
                 "child_query_ids": query_ids,
+                "per_channel_limit": per_channel_limit,
             },
         )
 

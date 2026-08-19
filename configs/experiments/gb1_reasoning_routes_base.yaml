@@ -1,8 +1,9 @@
 mode: knowledge_agent
 seed: 11
-rounds: 1
-budget_per_round: 4
-candidate_limit: 32
+rounds: 3
+budget_per_round: 16
+# Score only this many remaining variants per round. 0 = full remaining oracle pool.
+candidate_limit: 64
 acquisition: greedy
 ucb_beta: 1.5
 diversity_lambda: 0.10
@@ -11,7 +12,8 @@ model_config: configs/model/baseline.yaml
 knowledge_config: configs/knowledge/gb1_reasoning_routes.yaml
 output_root: artifacts/runs/reasoning-routes
 llm_config: configs/llm/deepseek.yaml
-critic_config: configs/critic/scientific_v1.yaml
+# Remote LLM critic; rule fallback is only for API failure, not a mock critic.
+critic_config: configs/critic/deepseek_remote.yaml
 knowledge_enabled: true
 condition: route_base
 generation:
@@ -25,6 +27,15 @@ generation:
   predictor_weight: 0.0
   gp_length_scale: 1.0
   hypothesis_recency_decay: 0.85
+  # Same 16-budget allocation as configs/experiments/knowledge_agent_al96.yaml.
+  # Agent-UQ routes keep this; the active-learning route disables it in apply_route.
+  quota_allocation:
+    enabled: true
+    hypothesis_target: 8
+    evidence_prior: 3
+    coverage_exploration: 3
+    matched_control: 2
+    strong_hypothesis_threshold: 0.75
 active_learning:
   enabled: false
   module: lightweight_calibrated_hybrid
@@ -40,6 +51,7 @@ active_learning:
     refit_full: true
   acquisition:
     plugin: hybrid_batch
+    # 16-budget integer quotas: exploitation=8, exploration=4, knowledge=4.
     exploitation_fraction: 0.50
     exploration_fraction: 0.25
     knowledge_fraction: 0.25
@@ -60,7 +72,7 @@ evaluation:
     regret_at_k, interval_90_coverage, gaussian_nll]
   top_k: 10
 output:
-  artifacts: [json, csv, markdown, reasoning]
+  artifacts: [json, csv, markdown, svg, reasoning]
   top_k: 16
 kg_interaction:
   enabled: true
@@ -69,12 +81,12 @@ kg_interaction:
     query_evidence_provenance, query_local_knowledge, query_structured_claims]
   feature_tool_strategy: joint
   feature_channels: [physchem, conservation, structure]
-  feature_variant_limit: 1
+  feature_variant_limit: 2
   truncation_audit_enabled: true
   truncation_audit_items: [MutationEffectEstimate, HAS_MUTATION, ABOUT_MUTATION,
     HAS_PHYSCHEM_DELTA, HAS_EVOLUTIONARY_CONTEXT, OCCURS_IN_ENVIRONMENT]
   truncation_audit_sample_rows: 3
-  max_tool_calls: 8
-  max_rows: 12
+  max_tool_calls: 12
+  max_rows: 24
   use_counterevidence: true
   stop_when_sufficient: false

@@ -67,3 +67,37 @@ def test_scientist_agent_calls_configured_knowledge_graph(experiment_config):
     assert hypothesis.preferred_residues[39][0] == "W"
     assert "knowledge-graph query" in hypothesis.statement
     assert agent.inspect_variant(bundle.initial_variants[0].variant_id, round_id=1)["found"]
+
+
+def test_scientist_repropose_after_critic_uses_attempt_id_and_parent(experiment_config):
+    bundle = load_dataset_bundle(
+        experiment_config.task.public_data_path, experiment_config.task.oracle_data_path
+    )
+    state = CampaignState(run_id="test", mode="llm_agent", seed=1, round_id=1)
+    agent = _agent(experiment_config)
+    first = agent.propose_hypothesis(
+        state, bundle.initial_variants, bundle.initial_observations, []
+    )
+    revised = agent.propose_hypothesis(
+        state,
+        bundle.initial_variants,
+        bundle.initial_observations,
+        [],
+        critic_revision={
+            "verdict": "REVISE",
+            "summary": "Increase diversity and change the residue map.",
+            "required_changes": [
+                {"action": "REGENERATE_WITH_CONSTRAINTS", "rationale": "Restated prior batch."}
+            ],
+            "rejected_hypothesis_id": first.hypothesis_id,
+            "rejected_statement": first.statement,
+            "rejected_preferred_residues": {
+                str(site): list(residues) for site, residues in first.preferred_residues.items()
+            },
+        },
+        hypothesis_attempt=1,
+    )
+    assert first.hypothesis_id == "hyp:test:r1"
+    assert revised.hypothesis_id == "hyp:test:r1:a1"
+    assert revised.parent_hypothesis_id == first.hypothesis_id
+    assert "Revised after critic" in revised.statement

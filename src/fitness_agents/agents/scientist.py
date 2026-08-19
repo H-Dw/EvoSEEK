@@ -114,8 +114,21 @@ class ScientistAgent:
         observations: Sequence[FitnessObservation],
         evidence: Sequence[Evidence],
         kg_interaction: Any | None = None,
+        *,
+        critic_revision: dict[str, Any] | None = None,
+        hypothesis_attempt: int = 0,
     ) -> Hypothesis:
         context = self.sanitized_context(state, observed_variants, observations)
+        if hypothesis_attempt > 0:
+            context["expected_hypothesis_id"] = (
+                f"hyp:{state.run_id}:r{state.round_id}:a{hypothesis_attempt}"
+            )
+        if critic_revision is not None:
+            assert_sanitized(critic_revision, "context.critic_revision")
+            context["critic_revision"] = critic_revision
+            rejected_id = critic_revision.get("rejected_hypothesis_id")
+            if rejected_id:
+                context["previous_hypothesis_id"] = rejected_id
         if kg_interaction is not None:
             interaction_payload = asdict(kg_interaction)
             assert_sanitized(interaction_payload, "context.kg_interaction")
@@ -141,7 +154,7 @@ class ScientistAgent:
             round_id=state.round_id,
             variant_id=None,
             role="scientist",
-            request_id=f"scientist:{state.run_id}:r{state.round_id}",
+            request_id=f"scientist:{state.run_id}:r{state.round_id}:a{hypothesis_attempt}",
             schema_name="HypothesisOutput",
             tool_query_ids=self.last_knowledge_query_ids,
         )

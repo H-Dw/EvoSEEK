@@ -28,6 +28,8 @@ from .schema import (
     stable_record_id,
 )
 
+CANONICAL_RESIDUES = tuple("ACDEFGHIKLMNPQRSTVWY")
+
 
 class KnowledgeAdapter(Protocol):
     name: str
@@ -139,7 +141,6 @@ def _feature_semantic_records(
     relations: list[RelationRecord] = []
     source_group = f"feature:{item.channel}"
     evidence_entity_id = f"evidence:{item.evidence_id}"
-    valid_from_round = item.valid_from_round if item.valid_from_round is not None else item.round_id
     provenance_hash = str(item.provenance.get("resource_sha256", item.source_id))
 
     def relation(
@@ -148,6 +149,10 @@ def _feature_semantic_records(
         object_id: str,
         layer: KnowledgeLayer,
         modality: Modality,
+        *,
+        context_id: str | None = None,
+        valid_from_round: int | None = None,
+        evidence_ids: tuple[str, ...] = (),
     ) -> RelationRecord:
         return _relation(
             "inference_records",
@@ -158,9 +163,9 @@ def _feature_semantic_records(
             modality=modality,
             source_id=item.source_id,
             source_group=source_group,
-            context_id=f"variant:{variant.variant_id}",
+            context_id=context_id,
             valid_from_round=valid_from_round,
-            evidence_ids=(item.evidence_id,),
+            evidence_ids=evidence_ids or (item.evidence_id,),
         )
 
     for raw_position, raw_site in raw_sites.items():
@@ -218,7 +223,6 @@ def _feature_semantic_records(
                         (item.source_id,),
                         source_group,
                         item.confidence,
-                        valid_from_round=valid_from_round,
                     )
                     relations.append(
                         relation(
@@ -231,7 +235,7 @@ def _feature_semantic_records(
                     )
             substitution_id = stable_record_id(
                 "substitution-descriptor",
-                item.evidence_id,
+                provenance_hash,
                 mutation_id,
             )
             entities[substitution_id] = EntityRecord(
@@ -244,12 +248,10 @@ def _feature_semantic_records(
                     "deltas": raw_site.get("deltas", {}),
                     "property_accessions": property_accessions,
                     "descriptor_only_not_fitness": True,
-                    "evidence_id": item.evidence_id,
                 },
                 (item.source_id,),
                 source_group,
                 item.confidence,
-                valid_from_round=valid_from_round,
             )
             relations.extend(
                 (
@@ -273,8 +275,9 @@ def _feature_semantic_records(
         elif item.channel == "conservation":
             profile_id = stable_record_id(
                 "evolution-profile",
-                item.evidence_id,
-                mutation_id,
+                provenance_hash,
+                position,
+                edit.mutant,
             )
             entities[profile_id] = EntityRecord(
                 profile_id,
@@ -294,12 +297,10 @@ def _feature_semantic_records(
                     "pairwise_score_method": raw.get("pairwise_score_method"),
                     "estimated_parameters": raw.get("estimated_parameters", []),
                     "evolutionary_prior_not_fitness": True,
-                    "evidence_id": item.evidence_id,
                 },
                 (item.source_id,),
                 source_group,
                 item.confidence,
-                valid_from_round=valid_from_round,
             )
             relations.extend(
                 (
@@ -331,7 +332,13 @@ def _feature_semantic_records(
             environment_properties = {
                 key: value
                 for key, value in raw_site.items()
-                if key not in {"mutation", "mutant_side_chain_not_modelled"}
+                if key
+                not in {
+                    "mutation",
+                    "mutant_side_chain_not_modelled",
+                    "closest_contacts",
+                    "interface_contacts",
+                }
             }
             environment_id = stable_record_id(
                 "residue-environment",
@@ -354,7 +361,6 @@ def _feature_semantic_records(
                 (item.source_id,),
                 source_group,
                 item.confidence,
-                valid_from_round=valid_from_round,
             )
             relations.extend(
                 (
@@ -382,6 +388,360 @@ def _feature_semantic_records(
                 )
             )
     return tuple(entities.values()), tuple(relations)
+
+
+class SiteFeatureKnowledgeAdapter:
+    """Ingest replacement-level conservation/structure/physchem tables once per campaign."""
+
+    name = "site_features"
+
+    def extract(self, context: BuildContext) -> KnowledgeBatch:
+        tables = context.resources.get("site_feature_tables") or {}
+        if not isinstance(tables, dict) or not tables:
+            return KnowledgeBatch(self.name)
+
+        entities: dict[str, EntityRecord] = {}
+        relations: list[RelationRecord] = []
+        protein_id = f"protein:{context.protein_id}"
+        entities[protein_id] = EntityRecord(
+            protein_id,
+            "Protein",
+            KnowledgeLayer.IDENTITY,
+            frozenset({Modality.SEQUENCE}),
+            {"accession": context.protein_id},
+            (f"run:{context.run_id}",),
+            "campaign",
+        )
+
+        def ensure_position(position: int, wild_type: str) -> str:
+            position_id = f"residue:{context.protein_id}:{position}"
+            entities[position_id] = EntityRecord(
+                position_id,
+                "ResiduePosition",
+                KnowledgeLayer.SEQUENCE,
+                frozenset({Modality.SEQUENCE}),
+                {"position": position, "reference_residue": wild_type},
+                (f"run:{context.run_id}",),
+                "campaign",
+            )
+            return position_id
+
+        def ensure_mutation(position: int, wild_type: str, mutant: str) -> str:
+            mutation_id = f"mutation:{context.protein_id}:{wild_type}{position}{mutant}"
+            position_id = ensure_position(position, wild_type)
+            entities[mutation_id] = EntityRecord(
+                mutation_id,
+                "Mutation",
+                KnowledgeLayer.SEQUENCE,
+                frozenset({Modality.SEQUENCE}),
+                {
+                    "reference": wild_type,
+                    "position": position,
+                    "alternate": mutant,
+                },
+                (f"run:{context.run_id}",),
+                "campaign",
+            )
+            relations.append(
+                _relation(
+                    self.name,
+                    mutation_id,
+                    "AT_POSITION",
+                    position_id,
+                    KnowledgeLayer.SEQUENCE,
+                    modality=Modality.SEQUENCE,
+                    source_id=f"run:{context.run_id}",
+                    source_group="campaign",
+                )
+            )
+            return mutation_id
+
+        def ensure_residue_type(residue: str) -> str:
+            residue_id = f"residue-type:{residue}"
+            entities[residue_id] = EntityRecord(
+                residue_id,
+                "ResidueType",
+                KnowledgeLayer.SEQUENCE,
+                frozenset({Modality.SEQUENCE}),
+                {"one_letter_code": residue},
+                ("IUPAC:amino-acid-code",),
+                "canonical_amino_acid",
+            )
+            return residue_id
+
+        physchem = tables.get("physchem") if isinstance(tables.get("physchem"), dict) else {}
+        if physchem:
+            source_id = str(physchem.get("source_id") or "physchem")
+            provenance_hash = str(physchem.get("resource_sha256") or source_id)
+            source_group = "feature:physchem"
+            property_accessions = physchem.get("property_accessions", {})
+            property_accessions = (
+                property_accessions if isinstance(property_accessions, dict) else {}
+            )
+            positions = physchem.get("positions", {})
+            if isinstance(positions, dict):
+                for raw_position, payload in positions.items():
+                    if not isinstance(payload, dict):
+                        continue
+                    try:
+                        position = int(raw_position)
+                    except (TypeError, ValueError):
+                        continue
+                    wild_type = str(payload.get("wild_type") or "")
+                    if not wild_type:
+                        continue
+                    ensure_position(position, wild_type)
+                    substitutions = payload.get("substitutions", {})
+                    if not isinstance(substitutions, dict):
+                        continue
+                    for mutant, site in substitutions.items():
+                        if not isinstance(site, dict) or str(mutant) == wild_type:
+                            continue
+                        mutant_code = str(mutant)
+                        mutation_id = ensure_mutation(position, wild_type, mutant_code)
+                        for residue, values_key in (
+                            (wild_type, "wild_type_values"),
+                            (mutant_code, "mutant_values"),
+                        ):
+                            residue_id = ensure_residue_type(residue)
+                            values = site.get(values_key, {})
+                            if not isinstance(values, dict):
+                                continue
+                            for property_name, value in sorted(values.items()):
+                                descriptor_id = stable_record_id(
+                                    "physchem-property",
+                                    provenance_hash,
+                                    property_name,
+                                    residue,
+                                    value,
+                                )
+                                entities[descriptor_id] = EntityRecord(
+                                    descriptor_id,
+                                    "PhyschemPropertyValue",
+                                    KnowledgeLayer.SEQUENCE,
+                                    frozenset({Modality.TABULAR}),
+                                    {
+                                        "property": property_name,
+                                        "value": value,
+                                        "residue": residue,
+                                        "accession": property_accessions.get(property_name),
+                                    },
+                                    (source_id,),
+                                    source_group,
+                                )
+                                relations.append(
+                                    _relation(
+                                        self.name,
+                                        residue_id,
+                                        "HAS_DESCRIPTOR",
+                                        descriptor_id,
+                                        KnowledgeLayer.SEQUENCE,
+                                        modality=Modality.TABULAR,
+                                        source_id=source_id,
+                                        source_group=source_group,
+                                    )
+                                )
+                        substitution_id = stable_record_id(
+                            "substitution-descriptor",
+                            provenance_hash,
+                            mutation_id,
+                        )
+                        entities[substitution_id] = EntityRecord(
+                            substitution_id,
+                            "SubstitutionDescriptor",
+                            KnowledgeLayer.SEQUENCE,
+                            frozenset({Modality.SEQUENCE, Modality.TABULAR}),
+                            {
+                                "mutation": site.get(
+                                    "mutation", f"{wild_type}{position}{mutant_code}"
+                                ),
+                                "deltas": site.get("deltas", {}),
+                                "property_accessions": property_accessions,
+                                "descriptor_only_not_fitness": True,
+                            },
+                            (source_id,),
+                            source_group,
+                        )
+                        relations.append(
+                            _relation(
+                                self.name,
+                                mutation_id,
+                                "HAS_PHYSCHEM_DELTA",
+                                substitution_id,
+                                KnowledgeLayer.SEQUENCE,
+                                modality=Modality.TABULAR,
+                                source_id=source_id,
+                                source_group=source_group,
+                            )
+                        )
+
+        conservation = (
+            tables.get("conservation") if isinstance(tables.get("conservation"), dict) else {}
+        )
+        if conservation:
+            provenance_hash = str(conservation.get("resource_sha256") or "conservation")
+            source_id = f"msa_profile:{provenance_hash[:16]}"
+            source_group = "feature:conservation"
+            positions = conservation.get("positions", {})
+            shared = {
+                "sequence_count": conservation.get("sequence_count"),
+                "neff": conservation.get("neff"),
+                "neff_per_length": conservation.get("neff_per_length"),
+                "pseudocount_mode": conservation.get("pseudocount_mode"),
+                "pseudocount_value": conservation.get("pseudocount_value"),
+                "pairwise_enabled": conservation.get("pairwise_enabled"),
+                "pairwise_score_method": conservation.get("pairwise_mode"),
+                "estimated_parameters": conservation.get("estimated_parameters", []),
+                "evolutionary_prior_not_fitness": True,
+            }
+            if isinstance(positions, dict):
+                for raw_position, payload in positions.items():
+                    if not isinstance(payload, dict):
+                        continue
+                    try:
+                        position = int(raw_position)
+                    except (TypeError, ValueError):
+                        continue
+                    wild_type = str(payload.get("wild_type") or "")
+                    if not wild_type:
+                        continue
+                    position_id = ensure_position(position, wild_type)
+                    residues = payload.get("residues", {})
+                    if not isinstance(residues, dict):
+                        continue
+                    for residue in CANONICAL_RESIDUES:
+                        site = residues.get(residue)
+                        if not isinstance(site, dict):
+                            continue
+                        profile_id = stable_record_id(
+                            "evolution-profile",
+                            provenance_hash,
+                            position,
+                            residue,
+                        )
+                        entities[profile_id] = EntityRecord(
+                            profile_id,
+                            "EvolutionProfile",
+                            KnowledgeLayer.EVOLUTIONARY,
+                            frozenset({Modality.MSA, Modality.TABULAR}),
+                            {
+                                **site,
+                                "mutation": f"{wild_type}{position}{residue}",
+                                **shared,
+                            },
+                            (source_id,),
+                            source_group,
+                        )
+                        relations.append(
+                            _relation(
+                                self.name,
+                                position_id,
+                                "HAS_EVOLUTION_PROFILE",
+                                profile_id,
+                                KnowledgeLayer.EVOLUTIONARY,
+                                modality=Modality.MSA,
+                                source_id=source_id,
+                                source_group=source_group,
+                            )
+                        )
+                        if residue == wild_type:
+                            continue
+                        mutation_id = ensure_mutation(position, wild_type, residue)
+                        relations.append(
+                            _relation(
+                                self.name,
+                                mutation_id,
+                                "HAS_EVOLUTIONARY_CONTEXT",
+                                profile_id,
+                                KnowledgeLayer.EVOLUTIONARY,
+                                modality=Modality.MSA,
+                                source_id=source_id,
+                                source_group=source_group,
+                            )
+                        )
+
+        structure = tables.get("structure") if isinstance(tables.get("structure"), dict) else {}
+        if structure:
+            provenance_hash = str(structure.get("resource_sha256") or "structure")
+            resource_id = structure.get("resource_id")
+            source_id = f"structure:{resource_id}"
+            source_group = "feature:structure"
+            positions = structure.get("positions", {})
+            if isinstance(positions, dict):
+                for raw_position, site in positions.items():
+                    if not isinstance(site, dict) or site.get("status") != "ok":
+                        continue
+                    try:
+                        position = int(raw_position)
+                    except (TypeError, ValueError):
+                        continue
+                    wild_type = str(site.get("wild_type") or "")
+                    if not wild_type:
+                        continue
+                    position_id = ensure_position(position, wild_type)
+                    environment_properties = {
+                        key: value
+                        for key, value in site.items()
+                        if key
+                        not in {
+                            "wild_type",
+                            "mutation",
+                            "mutant_side_chain_not_modelled",
+                            "closest_contacts",
+                            "interface_contacts",
+                        }
+                    }
+                    environment_id = stable_record_id(
+                        "residue-environment",
+                        provenance_hash,
+                        resource_id,
+                        position,
+                        environment_properties,
+                    )
+                    entities[environment_id] = EntityRecord(
+                        environment_id,
+                        "ResidueEnvironment",
+                        KnowledgeLayer.STRUCTURE,
+                        frozenset({Modality.STRUCTURE_3D, Modality.TABULAR}),
+                        {
+                            **environment_properties,
+                            "protein_position": position,
+                            "resource_id": resource_id,
+                            "static_environment_not_mutant_model": True,
+                        },
+                        (source_id,),
+                        source_group,
+                    )
+                    relations.append(
+                        _relation(
+                            self.name,
+                            position_id,
+                            "MAPPED_TO_STRUCTURE",
+                            environment_id,
+                            KnowledgeLayer.STRUCTURE,
+                            modality=Modality.STRUCTURE_3D,
+                            source_id=source_id,
+                            source_group=source_group,
+                        )
+                    )
+                    for mutant in CANONICAL_RESIDUES:
+                        if mutant == wild_type:
+                            continue
+                        mutation_id = ensure_mutation(position, wild_type, mutant)
+                        relations.append(
+                            _relation(
+                                self.name,
+                                mutation_id,
+                                "OCCURS_IN_ENVIRONMENT",
+                                environment_id,
+                                KnowledgeLayer.STRUCTURE,
+                                modality=Modality.STRUCTURE_3D,
+                                source_id=source_id,
+                                source_group=source_group,
+                            )
+                        )
+
+        return KnowledgeBatch(self.name, tuple(entities.values()), tuple(relations))
 
 
 class CampaignObservationAdapter:

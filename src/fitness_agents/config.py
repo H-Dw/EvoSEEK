@@ -1111,7 +1111,11 @@ class ExperimentConfig:
     evidence_deletion: bool = False
     run_label: str = ""
     condition: str = ""
+    # Unused. Do not restore predictor-UCB evidence prefiltering; it is not
+    # applied in the campaign loop and would change selection independently of Agent-UQ.
     evidence_prefilter_limit: int = 5000
+    kg_ingest_evidence_limit: int = 120
+    structured_kg_snapshot_mode: str = "live_only"
 
     def __post_init__(self) -> None:
         selected = self.generation.selection_driver == "active_learning"
@@ -1130,6 +1134,12 @@ class ExperimentConfig:
                 raise ValueError(
                     "generation.quota_allocation quotas must sum to budget_per_round"
                 )
+        if self.kg_ingest_evidence_limit < 1:
+            raise ValueError("kg_ingest_evidence_limit must be positive")
+        if self.structured_kg_snapshot_mode not in {"live_only", "incremental_ids"}:
+            raise ValueError(
+                "structured_kg_snapshot_mode must be 'live_only' or 'incremental_ids'"
+            )
 
 
 def _resolve_api_tokenizer_path(raw: dict[str, Any], root: Path) -> dict[str, Any]:
@@ -1442,4 +1452,8 @@ def load_experiment_config(
         run_label=str(raw.get("run_label", "")),
         condition=str(raw.get("condition") or raw.get("run_label") or raw["mode"]),
         evidence_prefilter_limit=int(raw.get("evidence_prefilter_limit", 5000)),
+        kg_ingest_evidence_limit=int(raw.get("kg_ingest_evidence_limit", 120)),
+        structured_kg_snapshot_mode=str(
+            raw.get("structured_kg_snapshot_mode", "live_only")
+        ),
     )

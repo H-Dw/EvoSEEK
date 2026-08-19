@@ -141,3 +141,21 @@ def test_validation_priors_append_and_apply_fidelity_and_recency_weights(
     assert later_weights["wet"] == pytest.approx(0.85)
     assert later_weights["dry"] == pytest.approx(0.085)
     engine.close()
+
+
+def test_evidence_for_can_score_kg_without_static_channels(experiment_config, tmp_path):
+    bundle = load_dataset_bundle(
+        experiment_config.task.public_data_path, experiment_config.task.oracle_data_path
+    )
+    engine = KnowledgeEngine(
+        experiment_config.knowledge, graph_path=tmp_path / "kg-only.sqlite", assay_id="test"
+    )
+    engine.update(bundle.initial_variants, bundle.initial_observations)
+    remaining = bundle.oracle_pool[:5]
+    kg_only = engine.evidence_for(remaining, round_id=1, channels=("kg",))
+    assert all(
+        {item.channel for item in bundle_items} == {"kg"}
+        for bundle_items in kg_only.values()
+    )
+    assert engine.site_feature_tables() == {}
+    engine.close()

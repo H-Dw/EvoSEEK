@@ -12,6 +12,7 @@ from fitness_agents.config import KnowledgeProviderConfig
 from fitness_agents.contracts.schemas import Evidence, Variant
 
 from .context import CANONICAL_AA, ProteinTaskContext
+from .substitution_store import CANONICAL_RESIDUES, compact_static_evidence_id
 
 
 def _read_alignment(path: Path) -> tuple[str, ...]:
@@ -472,6 +473,79 @@ class MSAProfileProvider:
             ),
             encoding="utf-8",
         )
+        self._build_site_lookups()
+
+    def _build_site_lookups(self) -> None:
+        epsilon = 1e-12
+        alphabet_size = len(CANONICAL_AA)
+        self._position_meta: dict[int, dict[str, Any]] = {}
+        self._site_residue_table: dict[int, dict[str, dict[str, Any]]] = {}
+        for position, wild_type in zip(
+            self.context.mutable_positions, self.context.wild_type_residues, strict=True
+        ):
+            sequence_index = self.context.position_to_sequence_index[position]
+            column = self.profile.query_index_to_column[sequence_index]
+            profile = self.profile.frequencies[column]
+            entropy_nats = self.profile.entropy[column]
+            effective_count = self.profile.effective_count[column]
+            self._position_meta[position] = {
+                "column": column,
+                "entropy": entropy_nats,
+                "entropy_nats": entropy_nats,
+                "normalized_entropy": entropy_nats / math.log(alphabet_size),
+                "information_content_bits": (
+                    math.log2(alphabet_size) - entropy_nats / math.log(2.0)
+                ),
+                "coverage": self.profile.coverage[column],
+                "effective_count": effective_count,
+                "gap_fraction": self.profile.gap_fraction[column],
+                "site_quality": (
+                    "ok"
+                    if effective_count >= self.minimum_site_effective_count
+                    else "low_effective_count"
+                ),
+            }
+            residues: dict[str, dict[str, Any]] = {}
+            for residue in CANONICAL_RESIDUES:
+                log_odds = math.log(
+                    (profile[residue] + epsilon) / (profile[wild_type] + epsilon)
+                )
+                residues[residue] = {
+                    **self._position_meta[position],
+                    "wild_type_frequency": profile[wild_type],
+                    "mutant_frequency": profile[residue],
+                    "log_odds_vs_wild_type": log_odds,
+                }
+            self._site_residue_table[position] = residues
+
+    def site_table(self) -> dict[str, Any]:
+        neff_per_length = self.profile.neff / max(len(self.profile.query), 1)
+        positions: dict[str, Any] = {}
+        for position, wild_type in zip(
+            self.context.mutable_positions, self.context.wild_type_residues, strict=True
+        ):
+            positions[str(position)] = {
+                "wild_type": wild_type,
+                **self._position_meta[position],
+                "residues": {
+                    residue: dict(features)
+                    for residue, features in self._site_residue_table[position].items()
+                },
+            }
+        return {
+            "channel": self.channel,
+            "resource_sha256": self.profile.resource_sha256,
+            "parameter_set_id": self.parameter_set_id,
+            "sequence_count": self.profile.sequence_count,
+            "neff": self.profile.neff,
+            "neff_per_length": neff_per_length,
+            "pseudocount_mode": self.pseudocount_mode,
+            "pseudocount_value": self.pseudocount_value,
+            "pairwise_enabled": self.pairwise_enabled,
+            "pairwise_mode": self.pairwise_mode,
+            "estimated_parameters": list(self.estimated_parameters),
+            "positions": positions,
+        }
 
     def evaluate(self, variant: Variant, *, round_id: int, **_kwargs: Any) -> Evidence:
         epsilon = 1e-12
@@ -485,34 +559,15 @@ class MSAProfileProvider:
             self.context.mutable_positions, self.context.wild_type_residues, strict=True
         ):
             mutant = variant_by_position[position]
-            sequence_index = self.context.position_to_sequence_index[position]
-            column = self.profile.query_index_to_column[sequence_index]
-            profile = self.profile.frequencies[column]
-            log_odds = math.log((profile[mutant] + epsilon) / (profile[wild_type] + epsilon))
+            features = dict(self._site_residue_table[position][mutant])
+            log_odds = float(features["log_odds_vs_wild_type"])
             single_terms.append(log_odds)
-            if mutant != wild_type:
-                mutated_single_terms.append(log_odds)
-            entropy_nats = self.profile.entropy[column]
-            effective_count = self.profile.effective_count[column]
+            if mutant == wild_type:
+                continue
+            mutated_single_terms.append(log_odds)
             site_features[str(position)] = {
-                "column": column,
-                "wild_type_frequency": profile[wild_type],
-                "mutant_frequency": profile[mutant],
-                "log_odds_vs_wild_type": log_odds,
-                "entropy": entropy_nats,
-                "entropy_nats": entropy_nats,
-                "normalized_entropy": entropy_nats / math.log(len(CANONICAL_AA)),
-                "information_content_bits": (
-                    math.log2(len(CANONICAL_AA)) - entropy_nats / math.log(2.0)
-                ),
-                "coverage": self.profile.coverage[column],
-                "effective_count": effective_count,
-                "gap_fraction": self.profile.gap_fraction[column],
-                "site_quality": (
-                    "ok"
-                    if effective_count >= self.minimum_site_effective_count
-                    else "low_effective_count"
-                ),
+                **features,
+                "mutation": f"{wild_type}{position}{mutant}",
             }
         independent_sum = float(sum(single_terms))
         independent_mean = float(
@@ -593,7 +648,9 @@ class MSAProfileProvider:
             )
             if variant_by_position[position] != wild_type
         ]
-        evaluated_site_features = changed_site_features or list(site_features.values())
+        evaluated_site_features = changed_site_features or list(
+            self._position_meta.values()
+        )
         sites_have_depth = all(
             float(item["effective_count"]) >= self.minimum_site_effective_count
             for item in evaluated_site_features
@@ -665,18 +722,13 @@ class MSAProfileProvider:
             "estimated_parameters": list(self.estimated_parameters),
             "cache_status": self.cache_status,
         }
-        identity = json.dumps(
-            {
-                "variant_id": variant.variant_id,
-                "round_id": round_id,
-                "context_id": self.context.context_id,
-                "profile_sha256": self.profile.resource_sha256,
-                "raw_features": raw_features,
-            },
-            sort_keys=True,
-        )
         return Evidence(
-            evidence_id=f"ev:conservation:{hashlib.sha256(identity.encode()).hexdigest()[:16]}",
+            evidence_id=compact_static_evidence_id(
+                self.channel,
+                variant.variant_id,
+                self.parameter_set_id,
+                self.profile.resource_sha256,
+            ),
             variant_id=variant.variant_id,
             channel=self.channel,
             statement=statement,

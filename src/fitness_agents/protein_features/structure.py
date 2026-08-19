@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import math
 import shlex
 from dataclasses import dataclass
@@ -14,6 +13,7 @@ from fitness_agents.config import KnowledgeProviderConfig
 from fitness_agents.contracts.schemas import Evidence, Variant
 
 from .context import ProteinTaskContext, StructureResource
+from .substitution_store import compact_static_evidence_id, compact_structure_site
 
 VDW_RADII = {"H": 1.20, "C": 1.70, "N": 1.55, "O": 1.52, "S": 1.80, "P": 1.80}
 MAX_ASA = {
@@ -314,6 +314,21 @@ class StaticStructureProvider:
         self.features = self._prepare_features()
         self.resource_sha256 = hashlib.sha256(self.resource.path.read_bytes()).hexdigest()
 
+    def site_table(self) -> dict[str, Any]:
+        positions: dict[str, Any] = {}
+        for position, wild_type in zip(
+            self.context.mutable_positions, self.context.wild_type_residues, strict=True
+        ):
+            feature = compact_structure_site(self.features[position])
+            positions[str(position)] = {"wild_type": wild_type, **feature}
+        return {
+            "channel": self.channel,
+            "resource_id": self.resource.resource_id,
+            "resource_sha256": self.resource_sha256,
+            "parameter_set_id": self.parameter_set_id,
+            "positions": positions,
+        }
+
     def _mapped_key(self, position: int) -> tuple[str, int, str]:
         if position in self.resource.residue_map:
             return self.resource.residue_map[position]
@@ -456,7 +471,7 @@ class StaticStructureProvider:
         ):
             if wild_type == mutant:
                 continue
-            feature = dict(self.features[position])
+            feature = compact_structure_site(self.features[position])
             feature["mutation"] = f"{wild_type}{position}{mutant}"
             feature["mutant_side_chain_not_modelled"] = True
             sites[str(position)] = feature
@@ -484,21 +499,13 @@ class StaticStructureProvider:
             "static_context_flag_count": static_risk_count,
             "resource_id": self.resource.resource_id,
         }
-        identity = json.dumps(
-            {
-                "variant_id": variant.variant_id,
-                "round_id": round_id,
-                "resource_sha256": self.resource_sha256,
-                "method_references": {
-                    "sasa": "Shrake-Rupley approximation",
-                    "maximum_asa": "Tien et al. 2013",
-                },
-                "raw_features": raw_features,
-            },
-            sort_keys=True,
-        )
         return Evidence(
-            evidence_id=f"ev:structure:{hashlib.sha256(identity.encode()).hexdigest()[:16]}",
+            evidence_id=compact_static_evidence_id(
+                self.channel,
+                variant.variant_id,
+                self.parameter_set_id,
+                self.resource_sha256,
+            ),
             variant_id=variant.variant_id,
             channel=self.channel,
             statement=statement,

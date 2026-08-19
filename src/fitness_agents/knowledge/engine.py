@@ -4,7 +4,7 @@ import hashlib
 import json
 from collections import defaultdict
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -27,16 +27,19 @@ from fitness_agents.kg_knowledge import (
     InferenceKnowledgeAdapter,
     KnowledgeGraphBuilder,
     LocalRAGKnowledgeAdapter,
+    SiteFeatureKnowledgeAdapter,
     SQLiteGraphSink,
     ValidationKnowledgeAdapter,
 )
 from fitness_agents.local_knowledge import LocalKnowledgeBase, RetrievalResult
 from fitness_agents.plugin_registry import PluginRegistry
 from fitness_agents.protein_features import (
+    STATIC_FEATURE_CHANNELS,
     MSAProfileProvider,
     PhyschemDescriptorProvider,
     ProteinTaskContext,
     StaticStructureProvider,
+    SubstitutionFeatureStore,
 )
 from fitness_agents.protein_features.calibration import calibrate_visible_evidence
 from fitness_agents.utils.progress import heartbeat
@@ -156,6 +159,7 @@ class KnowledgeEngine:
         protein_aliases: tuple[str, ...] = (),
         protein_accessions: tuple[str, ...] = (),
         local_knowledge_enabled: bool = True,
+        snapshot_mode: str = "live_only",
     ) -> None:
         self.config = config
         self.validation_config = validation_config or ValidationConfig()
@@ -203,9 +207,10 @@ class KnowledgeEngine:
         self._reflections: dict[str, ReThinkReflection] = {}
         self._local_retrieval_results: dict[int, list[RetrievalResult]] = defaultdict(list)
         self._local_evidence: dict[int, list[Evidence]] = defaultdict(list)
+        self._static_evidence_cache: dict[tuple[str, str], Evidence] = {}
         self.providers: dict[str, object] = {}
         sink_path = structured_graph_path or Path(graph_path).with_name("structured_kg.sqlite")
-        self.structured_sink = SQLiteGraphSink(sink_path)
+        self.structured_sink = SQLiteGraphSink(sink_path, snapshot_mode=snapshot_mode)
         self.local_knowledge: LocalKnowledgeBase | None = None
         self.local_knowledge_build_report = None
         if config.local_knowledge.enabled and local_knowledge_enabled:
@@ -226,6 +231,7 @@ class KnowledgeEngine:
             self.local_knowledge_build_report = self.local_knowledge.refresh()
         adapters = PluginRegistry("knowledge_adapter")
         adapters.register("campaign_observations", CampaignObservationAdapter())
+        adapters.register("site_features", SiteFeatureKnowledgeAdapter())
         adapters.register("inference_records", InferenceKnowledgeAdapter())
         if (
             self.local_knowledge is not None
@@ -340,6 +346,19 @@ class KnowledgeEngine:
             raise TypeError("Evidence provider must implement evaluate(variant, round_id=...)")
         self.providers[channel] = provider
 
+    def site_feature_tables(self) -> dict[str, dict[str, Any]]:
+        return dict(SubstitutionFeatureStore.from_providers(self.providers).tables)
+
+    def _providers_for(self, channels: Sequence[str] | None) -> dict[str, object]:
+        if channels is None:
+            return dict(self.providers)
+        requested = {str(item) for item in channels}
+        return {
+            name: provider
+            for name, provider in self.providers.items()
+            if name in requested
+        }
+
     def update(
         self,
         variants: Sequence[Variant],
@@ -419,6 +438,7 @@ class KnowledgeEngine:
                     "validation_records": tuple(self._validation_records.values()),
                     "reflections": tuple(self._reflections.values()),
                     "local_retrieval_results": current_local_results,
+                    "site_feature_tables": self.site_feature_tables(),
                 },
             )
         )
@@ -675,24 +695,40 @@ class KnowledgeEngine:
         *,
         round_id: int,
         delete_evidence: bool = False,
+        channels: Sequence[str] | None = None,
     ) -> dict[str, list[Evidence]]:
         output: dict[str, list[Evidence]] = defaultdict(list)
         if delete_evidence:
             return dict(output)
+        providers = self._providers_for(channels)
         residue_statistics = (
-            self.graph.residue_statistics() if "kg" in self.providers else {}
+            self.graph.residue_statistics() if "kg" in providers else {}
         )
         total = len(variants)
         for index, variant in enumerate(variants, start=1):
-            for provider in self.providers.values():
-                output[variant.variant_id].append(
-                    _evaluate_provider(
+            for channel, provider in providers.items():
+                cache_key = (channel, variant.variant_id)
+                cached = (
+                    self._static_evidence_cache.get(cache_key)
+                    if channel in STATIC_FEATURE_CHANNELS
+                    else None
+                )
+                if cached is not None:
+                    item = (
+                        cached
+                        if cached.round_id == round_id
+                        else replace(cached, round_id=round_id)
+                    )
+                else:
+                    item = _evaluate_provider(
                         provider,
                         variant,
                         round_id=round_id,
                         residue_statistics=residue_statistics,
                     )
-                )
+                    if channel in STATIC_FEATURE_CHANNELS:
+                        self._static_evidence_cache[cache_key] = item
+                output[variant.variant_id].append(item)
             interval = self.config.evidence_heartbeat_interval
             if total >= interval and (index == total or index % interval == 0):
                 heartbeat(
@@ -704,7 +740,7 @@ class KnowledgeEngine:
         calibration_channels = {
             channel
             for channel, provider_config in self.provider_configs.items()
-            if provider_config.calibration == "visible_linear" and channel in self.providers
+            if provider_config.calibration == "visible_linear" and channel in providers
         }
         candidate_ids = tuple(calibration_input)
         if calibration_channels:
@@ -719,6 +755,7 @@ class KnowledgeEngine:
                         residue_statistics=residue_statistics,
                     )
                     for channel in sorted(calibration_channels)
+                    if channel in self.providers
                 ]
         calibrated = calibrate_visible_evidence(
             calibration_input,

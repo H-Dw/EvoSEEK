@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+import copy
 import hashlib
-import json
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +12,7 @@ from fitness_agents.config import KnowledgeProviderConfig
 from fitness_agents.contracts.schemas import Evidence, Variant
 
 from .context import ProteinTaskContext
+from .substitution_store import CANONICAL_RESIDUES, compact_static_evidence_id
 
 
 class PhyschemDescriptorProvider:
@@ -49,11 +50,78 @@ class PhyschemDescriptorProvider:
             span = max(values.values()) - min(values.values())
             self.scales[str(name)] = span if span > 0 else 1.0
             self.accessions[str(name)] = str(entry.get("accession", "unspecified"))
+        self._substitutions = self._build_substitutions()
+        self._sequence_length = max(len(self.context.full_sequence), 1)
+
+    def _build_substitutions(self) -> dict[tuple[int, str, str], dict[str, Any]]:
+        aromatic = {"F", "W", "Y"}
+        output: dict[tuple[int, str, str], dict[str, Any]] = {}
+        for position, wild_type in zip(
+            self.context.mutable_positions, self.context.wild_type_residues, strict=True
+        ):
+            wild_type_values = {
+                name: table[wild_type] for name, table in self.properties.items()
+            }
+            for mutant in CANONICAL_RESIDUES:
+                if mutant == wild_type:
+                    continue
+                deltas = {
+                    name: table[mutant] - table[wild_type]
+                    for name, table in self.properties.items()
+                }
+                special_flags = []
+                for residue, label in ((wild_type, "from"), (mutant, "to")):
+                    if residue in {"G", "P", "C"}:
+                        special_flags.append(f"{label}_{residue}:{position}")
+                output[(position, wild_type, mutant)] = {
+                    "mutation": f"{wild_type}{position}{mutant}",
+                    "deltas": deltas,
+                    "wild_type_values": wild_type_values,
+                    "mutant_values": {
+                        name: table[mutant] for name, table in self.properties.items()
+                    },
+                    "special_flags": special_flags,
+                    "normalized_absolute_deltas": [
+                        abs(deltas[name]) / self.scales[name] for name in sorted(deltas)
+                    ],
+                    "aromatic_count_delta": int(mutant in aromatic) - int(wild_type in aromatic),
+                }
+        return output
+
+    def site_table(self) -> dict[str, Any]:
+        positions: dict[str, Any] = {}
+        for position, wild_type in zip(
+            self.context.mutable_positions, self.context.wild_type_residues, strict=True
+        ):
+            positions[str(position)] = {
+                "wild_type": wild_type,
+                "substitutions": {
+                    mutant: copy.deepcopy(self._substitutions[(position, wild_type, mutant)])
+                    for mutant in CANONICAL_RESIDUES
+                    if mutant != wild_type
+                },
+            }
+        return {
+            "channel": self.channel,
+            "source_id": self.source_id,
+            "resource_sha256": self.resource_sha256,
+            "parameter_set_id": self.parameter_set_id,
+            "property_accessions": self.accessions,
+            "assay_pH": self.context.assay_conditions.pH,
+            "positions": positions,
+        }
 
     def evaluate(self, variant: Variant, *, round_id: int, **_kwargs: Any) -> Evidence:
         site_features: dict[str, Any] = {}
         normalized_changes: list[float] = []
         special_flags: list[str] = []
+        mass_delta = 0.0
+        hydropathy_delta = 0.0
+        charge_delta = 0.0
+        aromatic_count_delta = 0
+        has_mass = "residue_mass" in self.properties
+        has_hydropathy = "hydropathy" in self.properties
+        has_charge = "nominal_charge" in self.properties
         for position, wild_type, mutant in zip(
             self.context.mutable_positions,
             self.context.wild_type_residues,
@@ -62,57 +130,39 @@ class PhyschemDescriptorProvider:
         ):
             if wild_type == mutant:
                 continue
-            deltas = {
-                name: table[mutant] - table[wild_type]
-                for name, table in self.properties.items()
-            }
+            row = copy.deepcopy(self._substitutions[(position, wild_type, mutant)])
             site_features[str(position)] = {
-                "mutation": f"{wild_type}{position}{mutant}",
-                "deltas": deltas,
-                "wild_type_values": {
-                    name: table[wild_type] for name, table in self.properties.items()
-                },
-                "mutant_values": {
-                    name: table[mutant] for name, table in self.properties.items()
-                },
+                "mutation": row["mutation"],
+                "deltas": row["deltas"],
+                "wild_type_values": row["wild_type_values"],
+                "mutant_values": row["mutant_values"],
             }
-            normalized_changes.extend(
-                abs(deltas[name]) / self.scales[name] for name in sorted(deltas)
-            )
-            for residue, label in ((wild_type, "from"), (mutant, "to")):
-                if residue in {"G", "P", "C"}:
-                    special_flags.append(f"{label}_{residue}:{position}")
+            normalized_changes.extend(row["normalized_absolute_deltas"])
+            special_flags.extend(row["special_flags"])
+            deltas = row["deltas"]
+            if has_mass:
+                mass_delta += float(deltas["residue_mass"])
+            if has_hydropathy:
+                hydropathy_delta += float(deltas["hydropathy"])
+            if has_charge:
+                charge_delta += float(deltas["nominal_charge"])
+            aromatic_count_delta += int(row["aromatic_count_delta"])
 
         mean_change = float(np.mean(normalized_changes)) if normalized_changes else 0.0
         conservativeness = 1.0 / (1.0 + mean_change)
-        mutant_sequence = self.context.full_sequence_for_variant(variant.variant)
-        wild_type_sequence = self.context.full_sequence
-
-        def sequence_mean(property_name: str, sequence: str) -> float | None:
-            values = self.properties.get(property_name)
-            if values is None:
-                return None
-            return float(np.mean([values[residue] for residue in sequence]))
-
-        global_sequence_deltas: dict[str, float] = {}
-        if "residue_mass" in self.properties:
-            global_sequence_deltas["molecular_weight_delta_da"] = float(
-                sum(self.properties["residue_mass"][item] for item in mutant_sequence)
-                - sum(self.properties["residue_mass"][item] for item in wild_type_sequence)
+        global_sequence_deltas: dict[str, float] = {
+            "aromatic_fraction_delta": aromatic_count_delta / self._sequence_length,
+        }
+        if has_mass:
+            global_sequence_deltas["molecular_weight_delta_da"] = mass_delta
+        if has_hydropathy:
+            global_sequence_deltas["mean_hydropathy_delta"] = (
+                hydropathy_delta / self._sequence_length
             )
-        for property_name, output_name in (
-            ("hydropathy", "mean_hydropathy_delta"),
-            ("nominal_charge", "mean_nominal_charge_delta"),
-        ):
-            mutant_mean = sequence_mean(property_name, mutant_sequence)
-            wild_type_mean = sequence_mean(property_name, wild_type_sequence)
-            if mutant_mean is not None and wild_type_mean is not None:
-                global_sequence_deltas[output_name] = mutant_mean - wild_type_mean
-        aromatic = {"F", "W", "Y"}
-        global_sequence_deltas["aromatic_fraction_delta"] = (
-            sum(item in aromatic for item in mutant_sequence)
-            - sum(item in aromatic for item in wild_type_sequence)
-        ) / len(wild_type_sequence)
+        if has_charge:
+            global_sequence_deltas["mean_nominal_charge_delta"] = (
+                charge_delta / self._sequence_length
+            )
         raw_features = {
             "sites": site_features,
             "mean_normalized_absolute_delta": mean_change,
@@ -129,20 +179,13 @@ class PhyschemDescriptorProvider:
             f"named physicochemical descriptor conservativeness={conservativeness:.3f}; "
             "descriptor only, not an assay-fitness claim"
         )
-        identity = json.dumps(
-            {
-                "channel": self.channel,
-                "variant_id": variant.variant_id,
-                "round_id": round_id,
-                "context_id": self.context.context_id,
-                "resource_sha256": self.resource_sha256,
-                "parameter_set_id": self.parameter_set_id,
-                "raw_features": raw_features,
-            },
-            sort_keys=True,
-        )
         return Evidence(
-            evidence_id=f"ev:physchem:{hashlib.sha256(identity.encode()).hexdigest()[:16]}",
+            evidence_id=compact_static_evidence_id(
+                self.channel,
+                variant.variant_id,
+                self.parameter_set_id,
+                self.resource_sha256,
+            ),
             variant_id=variant.variant_id,
             channel=self.channel,
             statement=statement,

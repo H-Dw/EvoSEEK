@@ -17,5 +17,5 @@ ood_warning_threshold: null
 model_disagreement_threshold: null
 min_batch_distance: 1
 max_tokens: 16384
-reasoning_effort: high
+reasoning_effort: low
 thinking: enabled

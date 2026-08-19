@@ -96,6 +96,17 @@ def _parse_csv(value: str | None, default: list[int] | list[str]) -> list[Any]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
+def required_tool_calls(spec: RouteSpec, *, variant_limit: int) -> int:
+    """Minimum planned LLM-KG calls so RAG/feature/KG steps are not sliced off."""
+    count = 2  # hypothesis_context + query_assay_association
+    if spec.channels:
+        count += max(1, variant_limit)
+    count += 1  # truncation audit
+    if spec.rag:
+        count += 2  # query_local_knowledge + query_structured_claims
+    return count + 2  # explain_variant + compare_variants
+
+
 def apply_route(config: Any, spec: RouteSpec, *, fold: int, seed: int, output_root: Path) -> Any:
     local = replace(
         config.knowledge.local_knowledge,
@@ -125,6 +136,7 @@ def apply_route(config: Any, spec: RouteSpec, *, fold: int, seed: int, output_ro
         operators.extend(("query_local_knowledge", "query_structured_claims"))
     operators.extend(("explain_variant", "compare_variants"))
     audit_items = (*BASE_AUDIT_ITEMS, *(FEATURE_RELATIONS[item] for item in spec.channels))
+    variant_limit = config.kg_interaction.feature_variant_limit
     interaction = replace(
         config.kg_interaction,
         enabled=True,
@@ -134,11 +146,18 @@ def apply_route(config: Any, spec: RouteSpec, *, fold: int, seed: int, output_ro
         feature_channels=spec.channels or ("physchem",),
         truncation_audit_enabled=True,
         truncation_audit_items=tuple(audit_items),
-        max_tool_calls=max(config.kg_interaction.max_tool_calls, 8),
+        max_tool_calls=max(
+            config.kg_interaction.max_tool_calls,
+            required_tool_calls(spec, variant_limit=variant_limit),
+        ),
     )
     generation = replace(
         config.generation,
         selection_driver="active_learning" if spec.active_learning else "agent_uq",
+        quota_allocation=replace(
+            config.generation.quota_allocation,
+            enabled=not spec.active_learning,
+        ),
     )
     active_learning = replace(config.active_learning, enabled=spec.active_learning)
     return replace(
@@ -186,7 +205,74 @@ def audit_run(
             len(state.get("hypotheses", ())),
         ),
         _check("round_artifacts_present", bool(round_dirs), len(round_dirs)),
+        _check(
+            "budget_per_round_is_16",
+            config.get("budget_per_round") == 16,
+            config.get("budget_per_round"),
+        ),
+        _check("rounds_are_3", config.get("rounds") == 3, config.get("rounds")),
+        _check(
+            "rounds_aborted_is_zero",
+            int(summary.get("rounds_aborted") or 0) == 0,
+            summary.get("rounds_aborted"),
+        ),
+        _check(
+            "completed_rounds_match_config",
+            len(summary.get("round_metrics") or ()) == int(config.get("rounds") or 0),
+            {
+                "round_metrics": len(summary.get("round_metrics") or ()),
+                "rounds": config.get("rounds"),
+            },
+        ),
+        _check(
+            "queries_match_completed_budget",
+            int(summary.get("queries_used") or 0)
+            == int(config.get("budget_per_round") or 0)
+            * len(summary.get("round_metrics") or ()),
+            {
+                "queries_used": summary.get("queries_used"),
+                "budget_per_round": config.get("budget_per_round"),
+                "completed_rounds": len(summary.get("round_metrics") or ()),
+            },
+        ),
+        _check(
+            "critic_is_remote_llm",
+            config.get("critic", {}).get("mode") == "remote"
+            and config.get("critic", {}).get("provider") not in {None, "", "mock"},
+            config.get("critic"),
+        ),
     ]
+    interaction_cfg = config.get("kg_interaction", {})
+    expected_strategy = "joint" if spec.channels else "context_only"
+    checks.append(
+        _check(
+            "feature_tool_strategy_matches",
+            interaction_cfg.get("feature_tool_strategy") == expected_strategy,
+            interaction_cfg.get("feature_tool_strategy"),
+        )
+    )
+    quota_cfg = config.get("generation", {}).get("quota_allocation", {})
+    checks.append(
+        _check(
+            "quota_allocation_matches_driver",
+            bool(quota_cfg.get("enabled")) == (not spec.active_learning),
+            quota_cfg,
+        )
+    )
+    if not spec.active_learning:
+        checks.append(
+            _check(
+                "quota_allocation_is_8_3_3_2",
+                quota_cfg.get("quotas")
+                == {
+                    "hypothesis_target": 8,
+                    "evidence_prior": 3,
+                    "coverage_exploration": 3,
+                    "matched_control": 2,
+                },
+                quota_cfg.get("quotas"),
+            )
+        )
     runtime = config.get("knowledge_runtime", {})
     provider_status = runtime.get("provider_status", {})
     local_runtime = runtime.get("local_knowledge", {})
@@ -213,9 +299,28 @@ def audit_run(
     observed_channels: set[str] = set()
     channel_counts: dict[str, int] = {}
     truncation_reports = []
+    completed_round_ids = {
+        int(item.get("round_id"))
+        for item in summary.get("round_metrics") or ()
+        if item.get("round_id") is not None
+    }
     for round_dir in round_dirs:
         interaction_path = round_dir / "kg_interaction.json"
         checks.append(_check(f"{round_dir.name}_kg_interaction", interaction_path.is_file()))
+        try:
+            round_index = int(round_dir.name.rsplit("_", 1)[-1])
+        except ValueError:
+            round_index = None
+        if round_index in completed_round_ids:
+            checks.append(
+                _check(f"{round_dir.name}_selection", (round_dir / "selection.csv").is_file())
+            )
+            checks.append(
+                _check(
+                    f"{round_dir.name}_approved_batch",
+                    (round_dir / "approved_batch.json").is_file(),
+                )
+            )
         if interaction_path.is_file():
             interaction = json.loads(interaction_path.read_text(encoding="utf-8"))
             all_operators.update(str(pack.get("operator")) for pack in interaction.get("packs", ()))
@@ -266,7 +371,21 @@ def audit_run(
         )
     )
     checks.append(
+        _check(
+            "kg_assay_tool_called",
+            "query_assay_association" in all_operators,
+            sorted(all_operators),
+        )
+    )
+    checks.append(
         _check("rag_tool_call_matches", ("query_local_knowledge" in all_operators) == spec.rag)
+    )
+    checks.append(
+        _check(
+            "structured_claims_tool_matches",
+            ("query_structured_claims" in all_operators) == spec.rag,
+            sorted(all_operators),
+        )
     )
     checks.append(
         _check(

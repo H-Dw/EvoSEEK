@@ -63,6 +63,7 @@ markers = [
   "integration: multi-module integration tests",
   "e2e: end-to-end campaign tests",
   "leakage: hidden-label and prompt leakage tests",
+  "live_llm: optional tests that call a real remote LLM API",
 ]
 
 [tool.ruff]

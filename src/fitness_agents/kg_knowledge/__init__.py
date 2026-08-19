@@ -7,6 +7,7 @@ from .adapters import (
     InferenceKnowledgeAdapter,
     KnowledgeAdapter,
     LocalRAGKnowledgeAdapter,
+    SiteFeatureKnowledgeAdapter,
     StaticKnowledgeAdapter,
     ValidationKnowledgeAdapter,
 )
@@ -58,6 +59,7 @@ __all__ = [
     "RelationRecord",
     "RelationSpec",
     "SQLiteGraphSink",
+    "SiteFeatureKnowledgeAdapter",
     "StaticKnowledgeAdapter",
     "ValidationIssue",
     "ValidationKnowledgeAdapter",

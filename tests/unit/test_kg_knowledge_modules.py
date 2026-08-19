@@ -20,6 +20,7 @@ from fitness_agents.kg_knowledge import (
     Modality,
     ProvenanceAwareFusion,
     RelationRecord,
+    SiteFeatureKnowledgeAdapter,
     StaticKnowledgeAdapter,
 )
 from fitness_agents.plugin_registry import PluginRegistry
@@ -261,6 +262,144 @@ def test_effect_estimates_and_feature_channels_materialize_typed_mutation_knowle
         if item.entity_type == "EffectEstimate"
     )
     assert epistasis == pytest.approx(0.5)
+
+
+def test_site_feature_adapter_writes_position_tables_without_combinatorial_variants():
+    context = BuildContext(
+        "run-sites",
+        1,
+        "PTEST",
+        resources={
+            "site_feature_tables": {
+                "physchem": {
+                    "source_id": "aaindex:test",
+                    "resource_sha256": "physchem-hash",
+                    "property_accessions": {"hydropathy": "HOPT810101"},
+                    "positions": {
+                        "3": {
+                            "wild_type": "A",
+                            "substitutions": {
+                                "W": {
+                                    "mutation": "A3W",
+                                    "deltas": {"hydropathy": 1.2},
+                                    "wild_type_values": {"hydropathy": 0.2},
+                                    "mutant_values": {"hydropathy": 1.4},
+                                }
+                            },
+                        }
+                    },
+                },
+                "conservation": {
+                    "resource_sha256": "msa-hash",
+                    "sequence_count": 10,
+                    "neff": 5.0,
+                    "positions": {
+                        "3": {
+                            "wild_type": "A",
+                            "residues": {
+                                "A": {"log_odds_vs_wild_type": 0.0, "entropy": 0.4},
+                                "W": {"log_odds_vs_wild_type": -1.2, "entropy": 0.4},
+                            },
+                        }
+                    },
+                },
+                "structure": {
+                    "resource_id": "rcsb:1PGB",
+                    "resource_sha256": "structure-hash",
+                    "positions": {
+                        "3": {
+                            "wild_type": "A",
+                            "status": "ok",
+                            "sasa_angstrom2": 12.0,
+                            "contact_count": 6,
+                        }
+                    },
+                },
+            }
+        },
+    )
+    batch = SiteFeatureKnowledgeAdapter().extract(context)
+    entity_types = {item.entity_type for item in batch.entities}
+    predicates = {item.predicate for item in batch.relations}
+    assert {
+        "ResiduePosition",
+        "Mutation",
+        "SubstitutionDescriptor",
+        "EvolutionProfile",
+        "ResidueEnvironment",
+    } <= entity_types
+    assert "Variant" not in entity_types
+    assert {
+        "HAS_PHYSCHEM_DELTA",
+        "HAS_EVOLUTIONARY_CONTEXT",
+        "HAS_EVOLUTION_PROFILE",
+        "OCCURS_IN_ENVIRONMENT",
+    } <= predicates
+
+
+def test_feature_semantics_dedupe_substitution_entities_across_combo_variants():
+    variants = [
+        Variant("a", "WF", "WAAF", "A3W;A4F", 2, "observed"),
+        Variant("b", "WA", "WAAA", "A3W", 1, "observed"),
+    ]
+    evidence = [
+        Evidence(
+            "e-a",
+            "a",
+            "physchem",
+            "descriptor",
+            0.1,
+            "aaindex:test",
+            0.0,
+            1,
+            raw_features={
+                "sites": {
+                    "3": {
+                        "mutation": "A3W",
+                        "deltas": {"hydropathy": 1.2},
+                        "wild_type_values": {"hydropathy": 0.2},
+                        "mutant_values": {"hydropathy": 1.4},
+                    }
+                },
+                "property_accessions": {"hydropathy": "HOPT810101"},
+            },
+            provenance={"resource_sha256": "physchem-hash"},
+        ),
+        Evidence(
+            "e-b",
+            "b",
+            "physchem",
+            "descriptor",
+            0.2,
+            "aaindex:test",
+            0.0,
+            1,
+            raw_features={
+                "sites": {
+                    "3": {
+                        "mutation": "A3W",
+                        "deltas": {"hydropathy": 1.2},
+                        "wild_type_values": {"hydropathy": 0.2},
+                        "mutant_values": {"hydropathy": 1.4},
+                    }
+                },
+                "property_accessions": {"hydropathy": "HOPT810101"},
+            },
+            provenance={"resource_sha256": "physchem-hash"},
+        ),
+    ]
+    context = BuildContext(
+        "run-dedupe",
+        1,
+        "PTEST",
+        resources={"variants": variants, "evidence": evidence},
+    )
+    batch = InferenceKnowledgeAdapter().extract(context)
+    descriptors = [
+        item for item in batch.entities if item.entity_type == "SubstitutionDescriptor"
+    ]
+    assert len(descriptors) == 1
+    assert "evidence_id" not in descriptors[0].properties
 
 
 def test_effect_estimates_require_visible_matched_backgrounds():

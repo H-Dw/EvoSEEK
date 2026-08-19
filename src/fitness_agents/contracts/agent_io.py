@@ -25,7 +25,7 @@ class AgentTraceContext(BaseModel):
 class ScientistContextInput(BaseModel):
     """Only the sanitized, round-visible context supplied by CampaignRunner."""
 
-    model_config = ConfigDict(extra="allow", strict=True, frozen=True)
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
     run_id: str
     mode: str
@@ -40,6 +40,9 @@ class ScientistContextInput(BaseModel):
     visible_observations: list[dict[str, Any]]
     previous_hypothesis_id: str | None
     previous_hypothesis_assessment: dict[str, Any] | None
+    knowledge_graph: dict[str, Any] | None = None
+    kg_interaction: dict[str, Any] | None = None
+    critic_revision: dict[str, Any] | None = None
 
     @field_validator("mutable_positions", mode="before")
     @classmethod

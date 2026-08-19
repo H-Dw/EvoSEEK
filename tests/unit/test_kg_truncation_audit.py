@@ -117,3 +117,59 @@ def test_truncation_audit_operator_is_llm_visible_and_runtime_report_checks_norm
     }
     assert not payload["interaction_presence"][1]["present_in_non_audit_packs"]
     sink.close()
+
+
+def test_keyword_audit_matches_predicate_equality_not_property_substrings(tmp_path):
+    sink = _sink_with_physchem_rows(tmp_path)
+    physchem = sink.query_keyword(item="physchem", round_id=1, limit=12)
+    predicate = sink.query_keyword(item="HAS_PHYSCHEM_DELTA", round_id=1, limit=12)
+
+    assert physchem["status"] == "not_found"
+    assert physchem["total_match_count"] == 0
+    assert predicate["relation_match_count"] == 4
+    assert predicate["status"] == "complete"
+    sink.close()
+
+
+def test_live_only_snapshot_does_not_copy_record_json(tmp_path):
+    sink = SQLiteGraphSink(tmp_path / "live-only.sqlite", snapshot_mode="live_only")
+    snapshot = KnowledgeGraphSnapshot(
+        (
+            EntityRecord(
+                "descriptor:1",
+                "SubstitutionDescriptor",
+                KnowledgeLayer.SEQUENCE,
+                frozenset({Modality.TABULAR}),
+                {"delta": 1},
+                ("aaindex:test",),
+                "feature:physchem",
+            ),
+        ),
+        (
+            RelationRecord(
+                "relation:1",
+                "mutation:1",
+                "HAS_PHYSCHEM_DELTA",
+                "descriptor:1",
+                KnowledgeLayer.SEQUENCE,
+                frozenset({Modality.TABULAR}),
+                source_ids=("aaindex:test",),
+                source_group="feature:physchem",
+            ),
+        ),
+    )
+    sink.write(snapshot)
+    sink.write(snapshot)
+    entity_copies = sink.connection.execute(
+        "SELECT COUNT(*) FROM snapshot_entity_versions"
+    ).fetchone()[0]
+    relation_copies = sink.connection.execute(
+        "SELECT COUNT(*) FROM snapshot_relation_versions"
+    ).fetchone()[0]
+    snapshots = sink.connection.execute(
+        "SELECT COUNT(*) FROM graph_snapshots"
+    ).fetchone()[0]
+    assert entity_copies == 0
+    assert relation_copies == 0
+    assert snapshots == 1
+    sink.close()

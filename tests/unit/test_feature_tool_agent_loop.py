@@ -23,7 +23,7 @@ def test_agent_loop_plans_independent_and_joint_feature_tools_before_explanation
         feature_variant_limit=1,
         truncation_audit_enabled=True,
         truncation_audit_items=("physchem", "HAS_PHYSCHEM_DELTA"),
-        max_tool_calls=8,
+        max_tool_calls=10,
         stop_when_sufficient=False,
     )
     controller = _CapturingController()
@@ -49,6 +49,7 @@ def test_agent_loop_plans_independent_and_joint_feature_tools_before_explanation
     assert result is controller.plan
     assert [step.operator for step in controller.plan.steps] == [
         "hypothesis_context",
+        "query_assay_association",
         "query_physchem_delta",
         "query_evolutionary_profile",
         "query_structure_environment",
@@ -57,10 +58,10 @@ def test_agent_loop_plans_independent_and_joint_feature_tools_before_explanation
         "explain_variant",
         "compare_variants",
     ]
-    bundle = controller.plan.steps[4]
+    bundle = controller.plan.steps[5]
     assert bundle.arguments["channels"] == ["physchem", "conservation", "structure"]
     assert bundle.arguments["variant_id"] == "v-best"
-    assert controller.plan.steps[5].arguments["items"] == [
+    assert controller.plan.steps[6].arguments["items"] == [
         "physchem",
         "HAS_PHYSCHEM_DELTA",
     ]

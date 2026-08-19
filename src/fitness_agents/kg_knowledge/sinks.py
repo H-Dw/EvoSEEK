@@ -41,9 +41,14 @@ class SQLiteGraphSink:
 
     name = "sqlite"
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(self, path: str | Path, *, snapshot_mode: str = "live_only") -> None:
+        if snapshot_mode not in {"live_only", "incremental_ids"}:
+            raise ValueError(
+                "snapshot_mode must be 'live_only' or 'incremental_ids'"
+            )
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.snapshot_mode = snapshot_mode
         self.connection = sqlite3.connect(self.path)
         self.connection.executescript(
             """
@@ -79,6 +84,10 @@ class SQLiteGraphSink:
                 ON relations(subject_id, predicate);
             CREATE INDEX IF NOT EXISTS idx_relations_object
                 ON relations(object_id, predicate);
+            CREATE INDEX IF NOT EXISTS idx_entities_type
+                ON entities(entity_type);
+            CREATE INDEX IF NOT EXISTS idx_relations_predicate
+                ON relations(predicate);
             CREATE TABLE IF NOT EXISTS graph_snapshots (
                 snapshot_id TEXT PRIMARY KEY,
                 round_id INTEGER,
@@ -107,85 +116,96 @@ class SQLiteGraphSink:
     def _json(value: Any) -> str:
         return json.dumps(_jsonable(value), ensure_ascii=False, sort_keys=True)
 
-    def write(self, snapshot: KnowledgeGraphSnapshot) -> None:
-        with self.connection:
-            for item in snapshot.entities:
-                self.connection.execute(
-                    """
-                    INSERT INTO entities VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(entity_id) DO UPDATE SET
-                        entity_type = excluded.entity_type,
-                        layer = excluded.layer,
-                        modalities_json = excluded.modalities_json,
-                        properties_json = excluded.properties_json,
-                        source_ids_json = excluded.source_ids_json,
-                        source_group = excluded.source_group,
-                        confidence = excluded.confidence,
-                        valid_from_round = CASE
-                            WHEN entities.valid_from_round IS NULL
-                                THEN excluded.valid_from_round
-                            WHEN excluded.valid_from_round IS NULL
-                                THEN entities.valid_from_round
-                            ELSE MIN(entities.valid_from_round, excluded.valid_from_round)
-                        END,
-                        valid_to_round = excluded.valid_to_round
-                    """,
-                    (
-                        item.entity_id,
-                        item.entity_type,
-                        item.layer.value,
-                        self._json(item.modalities),
-                        self._json(item.properties),
-                        self._json(item.source_ids),
-                        item.source_group,
-                        item.confidence,
-                        item.valid_from_round,
-                        item.valid_to_round,
-                    ),
-                )
-            for item in snapshot.relations:
-                self.connection.execute(
-                    """
-                    INSERT OR REPLACE INTO relations VALUES
-                        (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        item.relation_id,
-                        item.subject_id,
-                        item.predicate,
-                        item.object_id,
-                        item.layer.value,
-                        self._json(item.modalities),
-                        self._json(item.properties),
-                        self._json(item.source_ids),
-                        self._json(item.evidence_ids),
-                        item.source_group,
-                        item.confidence,
-                        item.context_id,
-                        item.valid_from_round,
-                        item.valid_to_round,
-                    ),
-                )
-            entity_payloads = {
-                item.entity_id: self._json(item.__dict__) for item in snapshot.entities
-            }
-            relation_payloads = {
-                item.relation_id: self._json(item.__dict__) for item in snapshot.relations
-            }
-            snapshot_payload = self._json(
-                {
-                    "entities": entity_payloads,
-                    "relations": relation_payloads,
-                }
+    def _snapshot_hash(self, snapshot: KnowledgeGraphSnapshot) -> str:
+        digest = hashlib.sha256()
+        for entity in sorted(snapshot.entities, key=lambda item: item.entity_id):
+            digest.update(entity.entity_id.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(
+                hashlib.sha256(self._json(entity.properties).encode("utf-8")).digest()
             )
-            snapshot_hash = hashlib.sha256(snapshot_payload.encode("utf-8")).hexdigest()
-            snapshot_id = f"kgsnapshot:{snapshot_hash[:24]}"
-            rounds = [
-                item.valid_from_round
-                for item in (*snapshot.entities, *snapshot.relations)
-                if item.valid_from_round is not None
-            ]
-            round_id = max(rounds) if rounds else None
+        digest.update(b"\n")
+        for relation in sorted(snapshot.relations, key=lambda item: item.relation_id):
+            digest.update(relation.relation_id.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(
+                hashlib.sha256(self._json(relation.properties).encode("utf-8")).digest()
+            )
+        return digest.hexdigest()
+
+    def write(self, snapshot: KnowledgeGraphSnapshot) -> None:
+        entity_rows = [
+            (
+                item.entity_id,
+                item.entity_type,
+                item.layer.value,
+                self._json(item.modalities),
+                self._json(item.properties),
+                self._json(item.source_ids),
+                item.source_group,
+                item.confidence,
+                item.valid_from_round,
+                item.valid_to_round,
+            )
+            for item in snapshot.entities
+        ]
+        relation_rows = [
+            (
+                item.relation_id,
+                item.subject_id,
+                item.predicate,
+                item.object_id,
+                item.layer.value,
+                self._json(item.modalities),
+                self._json(item.properties),
+                self._json(item.source_ids),
+                self._json(item.evidence_ids),
+                item.source_group,
+                item.confidence,
+                item.context_id,
+                item.valid_from_round,
+                item.valid_to_round,
+            )
+            for item in snapshot.relations
+        ]
+        snapshot_hash = self._snapshot_hash(snapshot)
+        snapshot_id = f"kgsnapshot:{snapshot_hash[:24]}"
+        rounds = [
+            item.valid_from_round
+            for item in (*snapshot.entities, *snapshot.relations)
+            if item.valid_from_round is not None
+        ]
+        round_id = max(rounds) if rounds else None
+        with self.connection:
+            self.connection.executemany(
+                """
+                INSERT INTO entities VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(entity_id) DO UPDATE SET
+                    entity_type = excluded.entity_type,
+                    layer = excluded.layer,
+                    modalities_json = excluded.modalities_json,
+                    properties_json = excluded.properties_json,
+                    source_ids_json = excluded.source_ids_json,
+                    source_group = excluded.source_group,
+                    confidence = excluded.confidence,
+                    valid_from_round = CASE
+                        WHEN entities.valid_from_round IS NULL
+                            THEN excluded.valid_from_round
+                        WHEN excluded.valid_from_round IS NULL
+                            THEN entities.valid_from_round
+                        ELSE MIN(entities.valid_from_round, excluded.valid_from_round)
+                    END,
+                    valid_to_round = excluded.valid_to_round
+                """,
+                entity_rows,
+            )
+            self.connection.executemany(
+                """
+                INSERT OR REPLACE INTO relations VALUES
+                    (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                relation_rows,
+            )
             self.connection.execute(
                 "INSERT OR IGNORE INTO graph_snapshots VALUES (?, ?, ?, ?, ?)",
                 (
@@ -196,20 +216,21 @@ class SQLiteGraphSink:
                     snapshot_hash,
                 ),
             )
-            self.connection.executemany(
-                "INSERT OR IGNORE INTO snapshot_entity_versions VALUES (?, ?, ?)",
-                (
-                    (snapshot_id, entity_id, payload)
-                    for entity_id, payload in entity_payloads.items()
-                ),
-            )
-            self.connection.executemany(
-                "INSERT OR IGNORE INTO snapshot_relation_versions VALUES (?, ?, ?)",
-                (
-                    (snapshot_id, relation_id, payload)
-                    for relation_id, payload in relation_payloads.items()
-                ),
-            )
+            if self.snapshot_mode == "incremental_ids":
+                self.connection.executemany(
+                    "INSERT OR IGNORE INTO snapshot_entity_versions VALUES (?, ?, ?)",
+                    (
+                        (snapshot_id, item.entity_id, "")
+                        for item in snapshot.entities
+                    ),
+                )
+                self.connection.executemany(
+                    "INSERT OR IGNORE INTO snapshot_relation_versions VALUES (?, ?, ?)",
+                    (
+                        (snapshot_id, item.relation_id, "")
+                        for item in snapshot.relations
+                    ),
+                )
             self.last_snapshot_id = snapshot_id
 
     @staticmethod
@@ -342,48 +363,34 @@ class SQLiteGraphSink:
             raise ValueError("round_id must be non-negative and limit must be positive")
         if not keyword or len(keyword) > 128:
             raise ValueError("item must contain 1 to 128 characters")
-        escaped = (
-            keyword.casefold()
-            .replace("\\", "\\\\")
-            .replace("%", "\\%")
-            .replace("_", "\\_")
-        )
-        pattern = f"%{escaped}%"
         visibility = (
             "(valid_from_round IS NULL OR valid_from_round <= ?) AND "
             "(valid_to_round IS NULL OR valid_to_round >= ?)"
         )
-        entity_search = (
-            "LOWER(entity_id || ' ' || entity_type || ' ' || properties_json || ' ' || "
-            "source_ids_json || ' ' || source_group) LIKE ? ESCAPE '\\'"
-        )
-        relation_search = (
-            "LOWER(relation_id || ' ' || subject_id || ' ' || predicate || ' ' || "
-            "object_id || ' ' || properties_json || ' ' || evidence_ids_json || ' ' || "
-            "source_ids_json || ' ' || source_group) LIKE ? ESCAPE '\\'"
-        )
+        entity_match = "(entity_type = ? OR entity_id = ?)"
+        relation_match = "(predicate = ? OR relation_id = ?)"
         entity_count = int(
             self.connection.execute(
-                f"SELECT COUNT(*) FROM entities WHERE {visibility} AND {entity_search}",
-                (round_id, round_id, pattern),
+                f"SELECT COUNT(*) FROM entities WHERE {visibility} AND {entity_match}",
+                (round_id, round_id, keyword, keyword),
             ).fetchone()[0]
         )
         relation_count = int(
             self.connection.execute(
-                f"SELECT COUNT(*) FROM relations WHERE {visibility} AND {relation_search}",
-                (round_id, round_id, pattern),
+                f"SELECT COUNT(*) FROM relations WHERE {visibility} AND {relation_match}",
+                (round_id, round_id, keyword, keyword),
             ).fetchone()[0]
         )
         self.connection.row_factory = sqlite3.Row
         entity_rows = self.connection.execute(
-            f"SELECT * FROM entities WHERE {visibility} AND {entity_search} "
+            f"SELECT * FROM entities WHERE {visibility} AND {entity_match} "
             "ORDER BY confidence DESC, entity_id LIMIT ?",
-            (round_id, round_id, pattern, limit),
+            (round_id, round_id, keyword, keyword, limit),
         ).fetchall()
         relation_rows = self.connection.execute(
-            f"SELECT * FROM relations WHERE {visibility} AND {relation_search} "
+            f"SELECT * FROM relations WHERE {visibility} AND {relation_match} "
             "ORDER BY confidence DESC, relation_id LIMIT ?",
-            (round_id, round_id, pattern, limit),
+            (round_id, round_id, keyword, keyword, limit),
         ).fetchall()
         matches = [
             {

@@ -14,6 +14,7 @@ from fitness_agents.active_learning import create_active_learning_module
 from fitness_agents.agents.client_registry import create_role_client_bundle
 from fitness_agents.agents.critic import CriticAgent, OpenAICriticClient, RuleBasedCriticClient
 from fitness_agents.agents.rethink import create_rethink_client
+from fitness_agents.agents.output_guards import RevisionConstraints, critic_revision_payload
 from fitness_agents.agents.scientist import ScientistAgent
 from fitness_agents.config import ExperimentConfig
 from fitness_agents.contracts.agent_io import ReThinkContextInput
@@ -69,7 +70,7 @@ from fitness_agents.utils import JsonArtifactWriter, bind_progress, reset_progre
 from fitness_agents.validation.batch import ApprovalGateway, BatchHardValidator, build_draft_batch
 
 from .backends import ApprovalEnforcingBackend, CsvOracleBackend
-from .review import BoundedReviewLoop, ReviewRejected
+from .review import BoundedReviewLoop, HypothesisRevisionRequested, ReviewRejected
 
 
 def _descending_ranks(values: dict[str, float]) -> dict[str, int]:
@@ -103,6 +104,32 @@ def _flatten_evidence(evidence: dict[str, list[Any]], limit: int = 120) -> list[
                     break
         depth += 1
     return balanced
+
+
+def _decision_ingest_variants(
+    observed_variants: Sequence[Any],
+    *,
+    selected_variants: Sequence[Any] = (),
+    observations: Sequence[Any] = (),
+    representative_limit: int = 2,
+) -> list[Any]:
+    """Variants allowed into the structured KG: observed, selected batch, and top visible reps."""
+
+    observation_by_id = {item.variant_id: item for item in observations}
+    ranked = sorted(
+        observed_variants,
+        key=lambda item: (
+            observation_by_id[item.variant_id].fitness
+            if item.variant_id in observation_by_id
+            else float("-inf"),
+            item.variant_id,
+        ),
+        reverse=True,
+    )
+    ordered: dict[str, Any] = {}
+    for item in (*observed_variants, *selected_variants, *ranked[: max(representative_limit, 0)]):
+        ordered[item.variant_id] = item
+    return list(ordered.values())
 
 
 def _shuffle_prediction_scores(
@@ -241,6 +268,7 @@ class CampaignRunner:
             protein_aliases=config.task.protein_aliases,
             protein_accessions=config.task.protein_accessions,
             local_knowledge_enabled=config.knowledge_enabled,
+            snapshot_mode=config.structured_kg_snapshot_mode,
         )
         self._scientist_local_context_allowed = bool(
             config.knowledge.local_knowledge.allow_remote_context
@@ -413,6 +441,7 @@ class CampaignRunner:
             reverse=True,
         )
         representative_ids = [item.variant_id for item in ranked[:2]]
+        enabled_operators = frozenset(self.config.kg_interaction.enabled_operators)
         steps = [
             KGQueryStep(
                 "context",
@@ -421,6 +450,17 @@ class CampaignRunner:
                 {"limit": self.config.kg_interaction.max_rows},
             )
         ]
+        if representative_ids and "query_assay_association" in enabled_operators:
+            steps.append(
+                KGQueryStep(
+                    f"assay_{representative_ids[0]}",
+                    "query_assay_association",
+                    QueryIntent.EXPLAIN,
+                    {"variant_id": representative_ids[0]},
+                    ("context",),
+                    "Retrieve observation-association KG evidence for the top visible variant.",
+                )
+            )
         channel_operator = {
             "physchem": "query_physchem_delta",
             "conservation": "query_evolutionary_profile",
@@ -463,26 +503,11 @@ class CampaignRunner:
                         "Retrieve the configured channels as one joint evidence bundle.",
                     )
                 )
-        if self.config.kg_interaction.truncation_audit_enabled:
-            steps.append(
-                KGQueryStep(
-                    "kg_truncation_audit",
-                    "query_kg_truncation_audit",
-                    QueryIntent.UNCERTAINTY,
-                    {
-                        "items": list(self.config.kg_interaction.truncation_audit_items),
-                        "sample_rows": (
-                            self.config.kg_interaction.truncation_audit_sample_rows
-                        ),
-                    },
-                    ("context",),
-                    "Count keyword matches before max_rows and report missing bounded rows.",
-                )
-            )
-        if (
+        rag_allowed = (
             self.knowledge.local_knowledge is not None
             and self._scientist_local_context_allowed
-        ):
+        )
+        if rag_allowed and "query_local_knowledge" in enabled_operators:
             steps.append(
                 KGQueryStep(
                     "local_knowledge",
@@ -502,6 +527,39 @@ class CampaignRunner:
                         "limit": self.config.kg_interaction.max_rows,
                     },
                     ("context",),
+                )
+            )
+        if rag_allowed and "query_structured_claims" in enabled_operators:
+            steps.append(
+                KGQueryStep(
+                    "structured_claims",
+                    "query_structured_claims",
+                    QueryIntent.SUPPORT,
+                    {
+                        "query": (
+                            "binding affinity maturation library selection "
+                            "mutation operational guideline"
+                        ),
+                        "limit": self.config.kg_interaction.max_rows,
+                    },
+                    ("context",),
+                    "Read RAG-materialized claims from the structured KG snapshot.",
+                )
+            )
+        if self.config.kg_interaction.truncation_audit_enabled:
+            steps.append(
+                KGQueryStep(
+                    "kg_truncation_audit",
+                    "query_kg_truncation_audit",
+                    QueryIntent.UNCERTAINTY,
+                    {
+                        "items": list(self.config.kg_interaction.truncation_audit_items),
+                        "sample_rows": (
+                            self.config.kg_interaction.truncation_audit_sample_rows
+                        ),
+                    },
+                    ("context",),
+                    "Count keyword matches before max_rows and report missing bounded rows.",
                 )
             )
         if representative_ids:
@@ -575,6 +633,37 @@ class CampaignRunner:
                 ),
             },
         )
+
+    def _evidence_ingest_limit(self) -> int:
+        return max(1, int(self.config.kg_ingest_evidence_limit))
+
+    def _flatten_round_evidence(self, evidence: dict[str, list[Any]]) -> list[Any]:
+        return _flatten_evidence(evidence, limit=self._evidence_ingest_limit())
+
+    def _persist_evidence_map(
+        self,
+        variants: Sequence[Any],
+        evidence: dict[str, list[Any]],
+        *,
+        variant_ids: set[str] | None = None,
+    ) -> None:
+        if not evidence:
+            return
+        selected = [
+            item
+            for item in variants
+            if variant_ids is None or item.variant_id in variant_ids
+        ]
+        if selected:
+            self.knowledge.graph.add_variants(selected)
+        items = [
+            item
+            for variant_id, bundle in evidence.items()
+            if variant_ids is None or variant_id in variant_ids
+            for item in bundle
+        ]
+        if items:
+            self.knowledge.graph.add_evidence(items)
 
     def _config_record(self) -> dict[str, Any]:
         return {
@@ -707,6 +796,8 @@ class CampaignRunner:
             "score_shuffle": self.config.score_shuffle,
             "evidence_deletion": self.config.evidence_deletion,
             "evidence_prefilter_limit": self.config.evidence_prefilter_limit,
+            "kg_ingest_evidence_limit": self.config.kg_ingest_evidence_limit,
+            "structured_kg_snapshot_mode": self.config.structured_kg_snapshot_mode,
             "generation": {
                 "selection_driver": self._selection_driver(),
                 "use_fitness_predictors": self.config.generation.use_fitness_predictors,
@@ -810,6 +901,63 @@ class CampaignRunner:
                 "transform": self.config.task.fitness_transform,
             },
         }
+
+    def _repropose_after_critic(
+        self,
+        decision: Any,
+        rejected: Any,
+        *,
+        observed_variants: Sequence[Variant],
+        evidence: dict[str, list[Any]],
+        local_evidence: Sequence[Any],
+        interaction_result: Any | None,
+    ) -> Any:
+        revision = critic_revision_payload(decision=decision, rejected_hypothesis=rejected)
+        evidence_list = [
+            *(local_evidence if self._scientist_local_context_allowed else ()),
+            *self._flatten_round_evidence(evidence),
+        ]
+        hypothesis = self.agent.propose_hypothesis(
+            self.state,
+            observed_variants,
+            self.state.observed,
+            evidence_list,
+            kg_interaction=interaction_result,
+            critic_revision=revision,
+            hypothesis_attempt=1,
+        )
+        if hypothesis.preferred_residues == rejected.preferred_residues:
+            retried = self.agent.propose_hypothesis(
+                self.state,
+                observed_variants,
+                self.state.observed,
+                evidence_list,
+                kg_interaction=interaction_result,
+                critic_revision={**revision, "identical_residues_rejected": True},
+                hypothesis_attempt=2,
+            )
+            if (
+                retried.preferred_residues != rejected.preferred_residues
+                or retried.statement != rejected.statement
+            ):
+                hypothesis = retried
+            else:
+                self.writer.event(
+                    "llm_output_warning",
+                    {
+                        "message": "Revised hypothesis kept the same preferred_residues",
+                        "hypothesis_id": hypothesis.hypothesis_id,
+                    },
+                )
+        self.state.hypotheses.append(hypothesis)
+        self.knowledge.graph.add_hypothesis(
+            hypothesis.hypothesis_id,
+            self.state.round_id,
+            hypothesis.statement,
+            hypothesis.evidence_ids,
+        )
+        self.writer.event("hypothesis_proposed", hypothesis.__dict__)
+        return hypothesis
 
     def _progress(
         self,
@@ -960,39 +1108,56 @@ class CampaignRunner:
             evidence: dict[str, list[Any]] = {}
             local_evidence: tuple[Any, ...] = ()
             if self.config.knowledge_enabled:
-                seen_ids: set[str] = set()
-                evidence_targets: list[Any] = []
-                for item in (*observed_variants, *remaining):
-                    if item.variant_id in seen_ids:
-                        continue
-                    seen_ids.add(item.variant_id)
-                    evidence_targets.append(item)
                 self._progress(
                     "evidence_started",
                     (
-                        f"round {round_id}/{self.config.rounds} scoring evidence for "
-                        f"{len(evidence_targets)} variants"
+                        f"round {round_id}/{self.config.rounds} scoring observed "
+                        f"{len(observed_variants)} variants on all channels"
                     ),
-                    n_candidates=len(evidence_targets),
+                    n_candidates=len(observed_variants),
                 )
-                evidence = self.knowledge.evidence_for(
-                    evidence_targets,
+                observed_evidence = self.knowledge.evidence_for(
+                    observed_variants,
                     round_id=round_id,
                     delete_evidence=self.config.evidence_deletion,
                 )
-                if evidence:
-                    self.knowledge.graph.add_variants(evidence_targets)
-                    self.knowledge.graph.add_evidence(
-                        [item for bundle in evidence.values() for item in bundle]
+                evidence.update(observed_evidence)
+                self._persist_evidence_map(observed_variants, observed_evidence)
+                remaining_kg: dict[str, list[Any]] = {}
+                if "kg" in self.knowledge.providers and remaining:
+                    self._progress(
+                        "evidence_started",
+                        (
+                            f"round {round_id}/{self.config.rounds} scoring remaining "
+                            f"{len(remaining)} variants on kg"
+                        ),
+                        n_candidates=len(remaining),
                     )
+                    remaining_kg = self.knowledge.evidence_for(
+                        remaining,
+                        round_id=round_id,
+                        delete_evidence=self.config.evidence_deletion,
+                        channels=("kg",),
+                    )
+                    for variant_id, bundle in remaining_kg.items():
+                        evidence[variant_id] = bundle
+                if evidence:
                     all_evidence = [item for bundle in evidence.values() for item in bundle]
+                    persisted_evidence = [
+                        item
+                        for bundle in observed_evidence.values()
+                        for item in bundle
+                    ]
                     self.writer.write_json(
                         f"round_{round_id:02d}/evidence_contract.json",
                         {
                             "provider_status": self.knowledge.provider_status,
                             "parameter_set_id": self.config.knowledge.parameter_set_id,
                             "variant_count": len(evidence),
+                            "persisted_variant_count": len(observed_evidence),
+                            "remaining_kg_variant_count": len(remaining_kg),
                             "evidence_count": len(all_evidence),
+                            "persisted_evidence_count": len(persisted_evidence),
                             "channel_counts": {
                                 channel: sum(item.channel == channel for item in all_evidence)
                                 for channel in sorted({item.channel for item in all_evidence})
@@ -1028,7 +1193,7 @@ class CampaignRunner:
                 self._progress(
                     "evidence_completed",
                     f"round {round_id}/{self.config.rounds} evidence ready",
-                    n_candidates=len(evidence_targets),
+                    n_candidates=len(observed_variants),
                 )
 
             if self.knowledge.local_knowledge is not None:
@@ -1037,7 +1202,7 @@ class CampaignRunner:
                     objective=self.config.task.objective,
                     assay_conditions=self.config.task.assay_conditions,
                     anchors=tuple(sorted(self.knowledge.providers)),
-                    candidates=remaining,
+                    candidates=observed_variants,
                 )
                 selecting_local_evidence = []
                 for item in local_evidence:
@@ -1067,8 +1232,9 @@ class CampaignRunner:
                     },
                 )
 
-            structured_variants = list(
-                {item.variant_id: item for item in (*observed_variants, *remaining)}.values()
+            structured_variants = _decision_ingest_variants(
+                observed_variants,
+                observations=self.state.observed,
             )
             structured_result = self.knowledge.sync_structured_kg(
                 run_id=self.run_id,
@@ -1077,9 +1243,7 @@ class CampaignRunner:
                 observations=self.state.observed,
                 evidence=[
                     *local_evidence,
-                    *_flatten_evidence(
-                        evidence, limit=max(len(structured_variants) * 4, 120)
-                    ),
+                    *self._flatten_round_evidence(evidence),
                 ],
                 hypotheses=self.state.hypotheses,
             )
@@ -1124,7 +1288,7 @@ class CampaignRunner:
                     self.state.observed,
                     [
                         *(local_evidence if self._scientist_local_context_allowed else ()),
-                        *_flatten_evidence(evidence),
+                        *self._flatten_round_evidence(evidence),
                     ],
                     kg_interaction=interaction_result,
                 )
@@ -1580,9 +1744,11 @@ class CampaignRunner:
                 review_attempt: int,
                 parent_draft_batch_id: str | None,
                 exclusions: set[str],
+                constraints: RevisionConstraints | None = None,
                 _context: dict[str, Any] = draft_context,
                 _design_score_by_id: dict[str, DesignScore] = design_score_by_id,
             ):
+                _context["revision_constraints"] = constraints
                 if review_attempt == 0:
                     candidate_ids = list(_context["initial_selected_ids"])
                 else:
@@ -1610,6 +1776,9 @@ class CampaignRunner:
                         selection_driver == "agent_uq"
                         and self.agent_quota_acquisition is not None
                     ):
+                        diversity = self.config.diversity_lambda
+                        if constraints is not None and constraints.increase_diversity:
+                            diversity = max(diversity, diversity + 0.15, 0.25)
                         revised_selection = self.agent_quota_acquisition.select(
                             revised_eligible,
                             [
@@ -1620,11 +1789,15 @@ class CampaignRunner:
                                 for item in revised_eligible
                             ],
                             min(_context["expected_batch_size"], len(revised_eligible)),
-                            diversity_lambda=self.config.diversity_lambda,
+                            diversity_lambda=diversity,
+                            constraints=constraints,
                         )
                         _context["agent_quota_selection"] = revised_selection
                         candidate_ids = list(revised_selection.selected_ids)
                     else:
+                        diversity = self.config.diversity_lambda
+                        if constraints is not None and constraints.increase_diversity:
+                            diversity = max(diversity, diversity + 0.15, 0.25)
                         candidate_ids = self.policy.select(
                             revised_eligible,
                             [
@@ -1633,7 +1806,7 @@ class CampaignRunner:
                             ],
                             _context["all_scores"],
                             min(_context["expected_batch_size"], len(revised_eligible)),
-                            self.config.diversity_lambda,
+                            diversity,
                         )
                 candidate_variants = [public_by_id[item] for item in candidate_ids]
                 missing_predictions = [
@@ -1655,6 +1828,7 @@ class CampaignRunner:
                         delete_evidence=self.config.evidence_deletion,
                     )
                     _context["evidence"].update(refreshed_evidence)
+                    self._persist_evidence_map(candidate_variants, refreshed_evidence)
                 falsification_spec = (
                     preregister_batch_median_test(
                         hypothesis_id=_context["hypothesis"].hypothesis_id,
@@ -1796,9 +1970,131 @@ class CampaignRunner:
                     context_evidence=(
                         local_evidence if self._critic_local_context_allowed else ()
                     ),
+                    hypothesis=hypothesis,
                     on_attempt=record_review_attempt,
                     on_attempt_start=record_review_start,
                 )
+            except HypothesisRevisionRequested as requested:
+                try:
+                    if hypothesis is None:
+                        raise ReviewRejected(
+                            "Critic revision limit exhausted",
+                            decisions=requested.decisions,
+                        ) from requested
+                    hypothesis = self._repropose_after_critic(
+                        requested.decision,
+                        hypothesis,
+                        observed_variants=observed_variants,
+                        evidence=evidence,
+                        local_evidence=local_evidence,
+                        interaction_result=interaction_result,
+                    )
+                    eligible = self.generator.generate(
+                        remaining,
+                        self.state,
+                        hypothesis,
+                        evidence,
+                        self.config.candidate_limit,
+                    )
+                    if not eligible:
+                        raise RuntimeError("Candidate generator returned an empty pool")
+                    expected_batch_size = min(self.config.budget_per_round, len(eligible))
+                    if selection_driver == "agent_uq":
+                        prior_scores = self.knowledge.validation_prior_scores(
+                            eligible, round_id=round_id
+                        )
+                        design_scores = self.agent_selector.score(
+                            eligible,
+                            observed_variants=observed_variants,
+                            hypothesis=hypothesis,
+                            hypotheses=self.state.hypotheses,
+                            evidence=evidence,
+                            prior_scores=prior_scores,
+                            predictor_predictions=[],
+                        )
+                        design_predictions = self.agent_selector.as_predictions(design_scores)
+                        all_scores = {
+                            item.variant_id: item.fitness_mean for item in design_predictions
+                        }
+                        working_by_id = {item.variant_id: item for item in design_predictions}
+                        design_score_by_id = {item.variant_id: item for item in design_scores}
+                        if self.agent_quota_acquisition is not None:
+                            agent_quota_selection = self.agent_quota_acquisition.select(
+                                eligible,
+                                [
+                                    replace(item, utility=all_scores[item.variant_id])
+                                    for item in design_scores
+                                ],
+                                expected_batch_size,
+                                diversity_lambda=self.config.diversity_lambda,
+                            )
+                            selected_ids = list(agent_quota_selection.selected_ids)
+                        else:
+                            selected_ids = self.policy.select(
+                                eligible,
+                                [working_by_id[item.variant_id] for item in eligible],
+                                all_scores,
+                                expected_batch_size,
+                                self.config.diversity_lambda,
+                            )
+                    else:
+                        selected_ids = self.policy.select(
+                            eligible,
+                            [working_by_id[item.variant_id] for item in eligible if item.variant_id in working_by_id],
+                            all_scores,
+                            expected_batch_size,
+                            self.config.diversity_lambda,
+                        )
+                    draft_context.update(
+                        {
+                            "hypothesis": hypothesis,
+                            "eligible": eligible,
+                            "working_by_id": working_by_id,
+                            "all_scores": all_scores,
+                            "expected_batch_size": expected_batch_size,
+                            "agent_quota_selection": agent_quota_selection,
+                            "initial_selected_ids": tuple(selected_ids),
+                            "rationale_claims": {
+                                item.variant_id: item.reason for item in design_scores
+                            },
+                        }
+                    )
+                    self.writer.event(
+                        "hypothesis_regenerated",
+                        {
+                            "round_id": round_id,
+                            "hypothesis_id": hypothesis.hypothesis_id,
+                            "parent_hypothesis_id": hypothesis.parent_hypothesis_id,
+                            "critic_decision_id": requested.decision.decision_id,
+                        },
+                    )
+                    review_result = self.review_loop.run(
+                        draft_builder=draft_builder,
+                        variants=public_by_id,
+                        predictions=prediction_by_id,
+                        evidence=evidence,
+                        revealed_ids=set(self.state.revealed_variant_ids),
+                        pending_ids=set(),
+                        allowed_ids={item.variant_id for item in remaining},
+                        expected_batch_size=expected_batch_size,
+                        context_evidence=(
+                            local_evidence if self._critic_local_context_allowed else ()
+                        ),
+                        hypothesis=hypothesis,
+                        on_attempt=record_review_attempt,
+                        on_attempt_start=record_review_start,
+                    )
+                except (HypothesisRevisionRequested, ReviewRejected) as nested:
+                    error = (
+                        nested
+                        if isinstance(nested, ReviewRejected)
+                        and not isinstance(nested, HypothesisRevisionRequested)
+                        else ReviewRejected(
+                            "Critic revision limit exhausted",
+                            decisions=getattr(nested, "decisions", requested.decisions),
+                        )
+                    )
+                    raise error from nested
             except ReviewRejected as error:
                 terminal_policy = (
                     self.config.critic.on_exhausted
@@ -1880,6 +2176,7 @@ class CampaignRunner:
                             pending_ids=set(),
                             allowed_ids={item.variant_id for item in remaining},
                             expected_batch_size=expected_batch_size,
+                            hypothesis=hypothesis,
                             on_attempt=record_review_attempt,
                             on_attempt_start=record_review_start,
                         )
@@ -2242,21 +2539,19 @@ class CampaignRunner:
             post_structured_result = self.knowledge.sync_structured_kg(
                 run_id=self.run_id,
                 round_id=round_id,
-                variants=list(
-                    {
-                        item.variant_id: item
-                        for item in (*observed_variants, *remaining, *predict_targets)
-                    }.values()
+                variants=_decision_ingest_variants(
+                    observed_variants,
+                    selected_variants=selected_variants,
+                    observations=self.state.observed,
                 ),
                 observations=self.state.observed,
                 predictions=[
                     prediction
                     for predictions in validation_prediction_sets
                     for prediction in predictions
+                    if prediction.variant_id in selected_set
                 ],
-                evidence=_flatten_evidence(
-                    evidence, limit=max(len(evidence) * 4, 120)
-                )
+                evidence=self._flatten_round_evidence(evidence)
                 + list(self.knowledge.local_evidence(round_id=round_id)),
                 hypotheses=self.state.hypotheses,
             )

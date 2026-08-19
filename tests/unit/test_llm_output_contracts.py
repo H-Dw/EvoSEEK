@@ -7,11 +7,13 @@ from pydantic import ValidationError
 
 from fitness_agents.agents.llm import (
     HYPOTHESIS_SCHEMA,
+    MockScientistLLMClient,
     OpenAICompatibleLLMClient,
     build_scientist_hypothesis_messages,
     load_scientist_profile,
 )
 from fitness_agents.agents.output_contracts import HypothesisOutput, validate_hypothesis_payload
+from fitness_agents.agents.output_guards import UnknownEvidenceIdsError
 from fitness_agents.agents.rethink import NativeReThinkClient
 from fitness_agents.agents.transports import OpenAICompatibleChatTransport
 from fitness_agents.contracts.agent_io import ReThinkContextInput
@@ -117,6 +119,82 @@ def test_exhausted_missing_key_is_validation_error_not_key_error() -> None:
     assert isinstance(captured.value.__cause__, ValidationError)
 
 
+def test_unknown_evidence_ids_are_stripped_after_retries() -> None:
+    bad = _valid_payload()
+    bad["evidence_ids"] = ["ev:missing"]
+    remote = _SequenceClient([bad])
+    evidence = Evidence(
+        evidence_id="ev:1",
+        variant_id="context:protein",
+        channel="local_rag",
+        statement="Visible evidence.",
+        score=0.0,
+        source_id="localdoc:1",
+        confidence=0.8,
+        round_id=1,
+    )
+
+    hypothesis = _client(remote).generate_hypothesis(
+        sanitized_context=_context(),
+        evidence=[evidence],
+        output_schema=HYPOTHESIS_SCHEMA,
+    )
+
+    assert remote.calls == 3
+    assert hypothesis.evidence_ids == ()
+
+
+def test_campaign_owned_ids_are_coerced_without_retry() -> None:
+    payload = _valid_payload()
+    payload["hypothesis_id"] = "hyp:invented-by-model"
+    payload["parent_hypothesis_id"] = None
+    context = {**_context(), "previous_hypothesis_id": "hyp:run:r0"}
+    remote = _SequenceClient([payload])
+
+    hypothesis = _client(remote).generate_hypothesis(
+        sanitized_context=context,
+        evidence=[],
+        output_schema=HYPOTHESIS_SCHEMA,
+    )
+
+    assert remote.calls == 1
+    assert hypothesis.hypothesis_id == "hyp:run:r1"
+    assert hypothesis.parent_hypothesis_id == "hyp:run:r0"
+
+
+def test_native_scientist_revision_block_sets_parent_and_attempt_id() -> None:
+    payload = _valid_payload()
+    payload["hypothesis_id"] = "hyp:wrong"
+    payload["parent_hypothesis_id"] = None
+    payload["statement"] = "Revised residue map after critic asked for a new hypothesis."
+    context = {
+        **_context(),
+        "expected_hypothesis_id": "hyp:run:r1:a1",
+        "previous_hypothesis_id": "hyp:run:r0",
+        "critic_revision": {
+            "verdict": "REVISE",
+            "summary": "Do not restated the rejected residue map.",
+            "rejected_hypothesis_id": "hyp:run:r1",
+            "rejected_preferred_residues": {
+                "39": ["W"],
+                "40": ["D"],
+                "41": ["G"],
+                "54": ["V"],
+            },
+        },
+    }
+    remote = _SequenceClient([payload])
+
+    hypothesis = _client(remote).generate_hypothesis(
+        sanitized_context=context,
+        evidence=[],
+        output_schema=HYPOTHESIS_SCHEMA,
+    )
+
+    assert hypothesis.hypothesis_id == "hyp:run:r1:a1"
+    assert hypothesis.parent_hypothesis_id == "hyp:run:r1"
+
+
 def test_hypothesis_output_schema_accepts_task_scoped_dynamic_site_keys() -> None:
     schema = HypothesisOutput.model_json_schema()
     site_schema = schema["properties"]["preferred_residues"]
@@ -133,6 +211,14 @@ def test_scientist_profile_defines_output_and_authority_boundaries() -> None:
     assert "final-test" in profile
     assert "batch submission" in profile
     assert "sha256:" in profile
+    assert "critic_revision" in profile
+    assert "400" in profile
+    assert "visible_observations" in profile
+    assert "physchem" in profile
+    assert "conservation" in profile
+    assert "structure" in profile
+    assert "Neff" in profile
+    assert "JSON object" in profile
 
 
 def test_variant_hash_evidence_ids_are_dropped_unknown_evidence_still_fails() -> None:
@@ -155,12 +241,20 @@ def test_variant_hash_evidence_ids_are_dropped_unknown_evidence_still_fails() ->
     )
     assert empty["evidence_ids"] == []
 
-    with pytest.raises(ValueError, match="not visible to the role"):
+    with pytest.raises(UnknownEvidenceIdsError, match="not visible to the role"):
         validate_hypothesis_payload(
             {**payload, "evidence_ids": ["ev:missing"]},
             allowed_evidence_ids=frozenset({"ev:1"}),
             expected_positions=(39, 40, 41, 54),
         )
+
+    stripped = validate_hypothesis_payload(
+        {**payload, "evidence_ids": ["ev:missing", "ev:1"]},
+        allowed_evidence_ids=frozenset({"ev:1"}),
+        expected_positions=(39, 40, 41, 54),
+        on_unknown_evidence="strip",
+    )
+    assert stripped["evidence_ids"] == ["ev:1"]
 
 
 def test_scientist_prompt_keeps_decision_provenance_but_drops_backend_bulk() -> None:
@@ -301,6 +395,33 @@ def test_scientist_prompt_keeps_bounded_feature_tool_evidence() -> None:
     ]
     assert "backend_coordinate_dump" not in messages[1]["content"]
     assert "private_cache_state" not in messages[1]["content"]
+
+
+def test_mock_scientist_uses_critic_revision_parent_and_new_id() -> None:
+    context = {
+        **_context(),
+        "expected_hypothesis_id": "hyp:run:r1:a1",
+        "previous_hypothesis_id": "hyp:run:r1",
+        "critic_revision": {
+            "verdict": "REVISE",
+            "summary": "Add controls and change residues.",
+            "rejected_hypothesis_id": "hyp:run:r1",
+            "rejected_preferred_residues": {
+                "39": ["W"],
+                "40": ["D"],
+                "41": ["G"],
+                "54": ["V"],
+            },
+        },
+    }
+    hypothesis = MockScientistLLMClient().generate_hypothesis(
+        sanitized_context=context,
+        evidence=[],
+        output_schema=HYPOTHESIS_SCHEMA,
+    )
+    assert hypothesis.hypothesis_id == "hyp:run:r1:a1"
+    assert hypothesis.parent_hypothesis_id == "hyp:run:r1"
+    assert "Revised after critic" in hypothesis.statement
 
 
 def _reflection(variant_id: str) -> dict:
