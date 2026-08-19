@@ -242,7 +242,7 @@ def _run_hypothesis_replay(remote: dict[str, str], *, repeats: int) -> dict[str,
                     transport=_Capture(),  # type: ignore[arg-type]
                     model=remote["model"],
                     messages=messages,
-                    max_tokens=int(os.environ.get("FITNESS_AGENTS_LLM_MAX_TOKENS", "16384")),
+                    max_tokens=int(os.environ.get("FITNESS_AGENTS_LLM_MAX_TOKENS", "20000")),
                     thinking=thinking,
                     retries=2,
                     validator=lambda value: validate_hypothesis_payload(

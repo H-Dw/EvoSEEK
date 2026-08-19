@@ -5,6 +5,7 @@ import sys
 from types import SimpleNamespace
 
 import pytest
+from pydantic import BaseModel, ConfigDict, Field
 
 from fitness_agents.agents.output_guards import (
     UnknownEvidenceIdsError,
@@ -17,6 +18,7 @@ from fitness_agents.agents.remote_llm import (
     complete_json,
     create_openai_client,
 )
+from fitness_agents.utils.progress import bind_progress, reset_progress
 
 
 class _ScriptedClient:
@@ -128,6 +130,152 @@ def test_complete_json_truncation_lowers_reasoning_effort() -> None:
     assert extra.get("thinking", {}).get("type") == "disabled"
 
 
+def test_thinking_disabled_omits_reasoning_effort_on_first_request() -> None:
+    client = _ScriptedClient([('{"ok": true}', "stop")])
+    complete_json(
+        client=client,
+        model="deepseek-v4-flash",
+        messages=[{"role": "user", "content": "json"}],
+        reasoning_effort="high",
+        thinking="disabled",
+    )
+    assert "reasoning_effort" not in client.calls[0]
+
+
+def test_truncated_payload_is_not_replayed_as_a_repair_draft() -> None:
+    client = _ScriptedClient(
+        [('{"unfinished":', "length"), ('{"ok": true}', "stop")]
+    )
+    complete_json(
+        client=client,
+        model="unit-test-model",
+        messages=[{"role": "user", "content": "json"}],
+    )
+    assert not any(
+        message["role"] == "assistant" for message in client.calls[1]["messages"]
+    )
+
+
+def test_schema_repair_replays_visible_json_and_generated_constraints() -> None:
+    class _Contract(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+        verdict: str = Field(pattern="^(APPROVE|REVISE)$")
+        summary: str = Field(max_length=8)
+
+    calls = 0
+
+    def validator(payload: dict) -> dict:
+        nonlocal calls
+        calls += 1
+        return _Contract.model_validate(payload).model_dump()
+
+    client = _ScriptedClient(
+        [
+            ('{"verdict":"APPROVE","summary":"too long for contract"}', "stop"),
+            ('{"verdict":"APPROVE","summary":"ok"}', "stop"),
+        ]
+    )
+    complete_json(
+        client=client,
+        model="unit-test-model",
+        messages=[{"role": "user", "content": "json"}],
+        schema=_Contract.model_json_schema(),
+        schema_retries=1,
+        validator=validator,
+    )
+    repair_messages = client.calls[1]["messages"]
+    assert repair_messages[-2]["role"] == "assistant"
+    assert "too long" in repair_messages[-2]["content"]
+    assert "summary" in repair_messages[-1]["content"]
+    assert "maxLength" in repair_messages[-1]["content"]
+
+
+def test_syntax_and_schema_budgets_are_independent() -> None:
+    validation_calls = 0
+
+    def validator(payload: dict) -> dict:
+        nonlocal validation_calls
+        validation_calls += 1
+        if validation_calls == 1:
+            raise ValueError("schema mismatch")
+        return payload
+
+    client = _ScriptedClient(
+        [
+            ('{"bad": true "comma": false}', "stop"),
+            ('{"schema": "wrong"}', "stop"),
+            ('{"ok": true}', "stop"),
+        ]
+    )
+    payload = complete_json(
+        client=client,
+        model="unit-test-model",
+        messages=[{"role": "user", "content": "json"}],
+        syntax_retries=1,
+        schema_retries=1,
+        validator=validator,
+    )
+    assert payload == {"ok": True}
+    assert len(client.calls) == 3
+
+
+def test_extraction_rejects_prose_wrapped_or_multiple_objects() -> None:
+    for content in ('answer: {"ok": true}', '{"a": 1} {"b": 2}'):
+        client = _ScriptedClient([(content, "stop")])
+        with pytest.raises(RemoteLLMCompletionError):
+            complete_json(
+                client=client,
+                model="unit-test-model",
+                messages=[{"role": "user", "content": "json"}],
+                syntax_retries=0,
+            )
+
+
+def test_retry_observability_records_hash_paths_usage_budget_and_disposition() -> None:
+    class _Contract(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+        summary: str = Field(max_length=4)
+
+    class _Capture:
+        def __init__(self) -> None:
+            self.events: list[tuple[str, dict]] = []
+
+        def heartbeat(self, message, *, log=True, **payload):
+            del message, log, payload
+
+        def report(self, event_type, *, message, persist=True, **payload):
+            del message, persist
+            self.events.append((event_type, payload))
+
+    client = _ScriptedClient(
+        [('{"summary":"too long"}', "stop"), ('{"summary":"ok"}', "stop")]
+    )
+    capture = _Capture()
+    token = bind_progress(capture)
+    try:
+        complete_json(
+            client=client,
+            model="deepseek-v4-flash",
+            messages=[{"role": "user", "content": "json"}],
+            schema=_Contract.model_json_schema(),
+            thinking="disabled",
+            reasoning_effort="high",
+            schema_retries=1,
+            validator=lambda value: _Contract.model_validate(value).model_dump(),
+            trace_context={"role": "unit_contract"},
+        )
+    finally:
+        reset_progress(token)
+    retry = next(payload for name, payload in capture.events if name == "llm_request_retry")
+    assert retry["role"] == "unit_contract"
+    assert retry["thinking"] == "disabled"
+    assert retry["completion_tokens"] == 20
+    assert retry["validation_errors"][0]["path"] == "summary"
+    assert len(retry["invalid_payload_sha256"]) == 64
+    assert retry["retry_budget"]["limits"]["schema"] == 1
+    assert retry["disposition"] == "retry"
+
+
 def test_complete_json_never_accepts_complete_json_with_length_finish_reason() -> None:
     client = _ScriptedClient(
         [
@@ -139,7 +287,7 @@ def test_complete_json_never_accepts_complete_json_with_length_finish_reason() -
         client=client,
         model="unit-test-model",
         messages=[{"role": "user", "content": "json"}],
-        output_retries=1,
+        truncation_retries=1,
         transport_retries=0,
     )
     assert payload == {"ok": True}
@@ -175,7 +323,6 @@ def test_non_retryable_http_error_fails_after_one_external_request() -> None:
             model="unit-test-model",
             messages=[{"role": "user", "content": "json"}],
             transport_retries=2,
-            output_retries=1,
         )
     except RuntimeError as error:
         assert isinstance(error.__cause__, _HTTPError)
@@ -195,7 +342,6 @@ def test_retryable_http_error_uses_only_transport_budget() -> None:
         model="unit-test-model",
         messages=[{"role": "user", "content": "json"}],
         transport_retries=1,
-        output_retries=0,
     )
     assert payload == {"ok": True}
     assert len(client.calls) == 2
@@ -210,7 +356,6 @@ def test_content_filter_and_tool_call_finish_reasons_fail_without_retry() -> Non
                 model="unit-test-model",
                 messages=[{"role": "user", "content": "json"}],
                 transport_retries=2,
-                output_retries=1,
             )
         except RuntimeError:
             pass
@@ -228,7 +373,6 @@ def test_insufficient_system_resource_uses_transport_retry() -> None:
         model="unit-test-model",
         messages=[{"role": "user", "content": "json"}],
         transport_retries=1,
-        output_retries=0,
     )
     assert payload == {"ok": True}
     assert len(client.calls) == 2
@@ -250,7 +394,7 @@ def test_formal_unknown_evidence_does_not_silently_strip_and_pass() -> None:
             model="unit-test-model",
             messages=[{"role": "user", "content": "json"}],
             transport_retries=0,
-            output_retries=1,
+            unknown_evidence_retries=1,
             validator=validator,
             allow_unknown_evidence_stripping=False,
         )
@@ -294,7 +438,7 @@ def test_schema_failure_keeps_structured_terminal_code() -> None:
             client=client,
             model="unit-test-model",
             messages=[{"role": "user", "content": "json"}],
-            output_retries=0,
+            schema_retries=0,
             validator=reject_schema,
         )
 
@@ -320,7 +464,7 @@ def test_complete_json_retry_mentions_json_decode_position() -> None:
     assert "character" in retry_text or "JSONDecodeError" in retry_text or "syntax" in retry_text
 
 
-def test_unknown_evidence_is_stripped_after_retries_exhausted() -> None:
+def test_unknown_evidence_is_never_rewritten_after_retries_exhausted() -> None:
     def validator(payload: dict) -> dict:
         del payload
         raise UnknownEvidenceIdsError(
@@ -330,14 +474,16 @@ def test_unknown_evidence_is_stripped_after_retries_exhausted() -> None:
         )
 
     client = _ScriptedClient([('{"ok": true}', "stop")] * 3)
-    payload = complete_json(
-        client=client,
-        model="unit-test-model",
-        messages=[{"role": "user", "content": "json"}],
-        retries=2,
-        validator=validator,
-    )
-    assert payload == {"ok": True, "evidence_ids": []}
+    with pytest.raises(RemoteLLMCompletionError) as captured:
+        complete_json(
+            client=client,
+            model="unit-test-model",
+            messages=[{"role": "user", "content": "json"}],
+            unknown_evidence_retries=2,
+            validator=validator,
+            allow_unknown_evidence_stripping=True,
+        )
+    assert captured.value.error_code == "OUTPUT_EVIDENCE_IDS_INVALID"
     assert len(client.calls) == 3
     assert "ev:missing" in client.calls[1]["messages"][-1]["content"]
 

@@ -224,9 +224,17 @@ class OpenDesignRunner:
                     base_url=config.critic.base_url,
                     provider=config.critic.provider,
                     max_tokens=config.critic.max_tokens,
-                    reasoning_effort=config.critic.reasoning_effort,
-                    thinking=config.critic.thinking,
+                    reasoning_effort=None,
+                    thinking="disabled",
                     api_key=config.critic.api_key,
+                    max_transport_retries=config.critic.max_model_retries,
+                    max_truncation_retries=config.critic.max_truncation_retries,
+                    max_syntax_retries=config.critic.max_syntax_retries,
+                    max_schema_retries=config.critic.max_schema_retries,
+                    max_semantic_retries=config.critic.max_semantic_retries,
+                    max_unknown_evidence_retries=(
+                        config.critic.max_unknown_evidence_retries
+                    ),
                 )
                 critic_agent = CriticAgent(
                     critic_client,

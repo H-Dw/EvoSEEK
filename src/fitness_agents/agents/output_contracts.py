@@ -9,12 +9,17 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    RootModel,
     StringConstraints,
     field_validator,
     model_validator,
 )
 
-from fitness_agents.agents.output_guards import UnknownEvidenceIdsError
+from fitness_agents.agents.output_guards import (
+    SemanticOutputValidationError,
+    UnknownEvidenceIdsError,
+)
+from fitness_agents.contracts.hypothesis_pipeline import SynthesisAbstention
 from fitness_agents.contracts.schemas import Hypothesis, ReThinkReflection
 
 HYPOTHESIS_TEXT_MAX = 400
@@ -110,10 +115,13 @@ class ChannelContributionOutput(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     channel: Literal["physchem", "conservation", "structure"]
-    sub_hypothesis_id: NonEmptyText
-    claim: HypothesisText
+    analysis_id: NonEmptyText
+    analysis_summary: HypothesisText
     evidence_ids: Annotated[list[NonEmptyText], Field(max_length=EVIDENCE_ID_MAX)]
     uncertainty: HypothesisText
+    candidate_hypothesis_ids: Annotated[
+        list[NonEmptyText], Field(max_length=4)
+    ] = Field(default_factory=list)
 
 
 class HypothesisExplanationOutput(BaseModel):
@@ -208,6 +216,90 @@ class HypothesisOutput(BaseModel):
                 else None
             ),
         )
+
+
+class SynthesizedHypothesisOutput(HypothesisOutput):
+    outcome: Literal["SYNTHESIZED_HYPOTHESIS"] = "SYNTHESIZED_HYPOTHESIS"
+
+
+class NoSupportedHypothesisOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    outcome: Literal["NO_SUPPORTED_HYPOTHESIS"] = "NO_SUPPORTED_HYPOTHESIS"
+    abstention_id: NonEmptyText
+    reason: HypothesisText
+    evidence_ids: Annotated[list[NonEmptyText], Field(max_length=EVIDENCE_ID_MAX)]
+    unresolved_constraints: Annotated[list[HypothesisText], Field(max_length=8)]
+    recommended_next_evidence: Annotated[list[HypothesisText], Field(max_length=8)]
+
+    def to_abstention(
+        self,
+        *,
+        allowed_evidence_ids: frozenset[str] | None,
+    ) -> SynthesisAbstention:
+        evidence_ids = visible_evidence_ids(
+            self.evidence_ids, allowed_evidence_ids, on_unknown="error"
+        )
+        return SynthesisAbstention(
+            abstention_id=self.abstention_id,
+            reason=self.reason,
+            evidence_ids=evidence_ids,
+            unresolved_constraints=tuple(self.unresolved_constraints),
+            recommended_next_evidence=tuple(self.recommended_next_evidence),
+        )
+
+
+MainSynthesisResult = Annotated[
+    SynthesizedHypothesisOutput | NoSupportedHypothesisOutput,
+    Field(discriminator="outcome"),
+]
+
+
+class MainSynthesisOutput(RootModel[MainSynthesisResult]):
+    pass
+
+
+def validate_main_synthesis_payload(
+    payload: dict[str, Any],
+    *,
+    expected_hypothesis_id: str,
+    expected_parent_hypothesis_id: str | None,
+    allowed_evidence_ids: frozenset[str],
+    expected_positions: tuple[int, ...] | None,
+    allowed_positions: tuple[int, ...] | None,
+    max_positions: int | None,
+) -> dict[str, Any]:
+    output = MainSynthesisOutput.model_validate(payload).root
+    if isinstance(output, NoSupportedHypothesisOutput):
+        abstention = output.to_abstention(allowed_evidence_ids=allowed_evidence_ids)
+        dumped = output.model_dump(mode="json")
+        dumped["evidence_ids"] = list(abstention.evidence_ids)
+        return dumped
+    try:
+        hypothesis = output.to_hypothesis(
+            expected_hypothesis_id=expected_hypothesis_id,
+            expected_parent_hypothesis_id=expected_parent_hypothesis_id,
+            allowed_evidence_ids=allowed_evidence_ids,
+            expected_positions=expected_positions,
+            allowed_positions=allowed_positions,
+            max_positions=max_positions,
+        )
+    except ValueError as error:
+        if "preferred_residues position mismatch" not in str(error):
+            raise
+        raise SemanticOutputValidationError(
+            (
+                f"{error}. With preference_policy=all_positions, either provide a non-empty, "
+                "evidence-supported residue list for every mutable position or change outcome "
+                "to NO_SUPPORTED_HYPOTHESIS; never use empty residue arrays."
+            ),
+            paths=("outcome", "preferred_residues"),
+        ) from error
+    dumped = output.model_dump(mode="json")
+    dumped["hypothesis_id"] = hypothesis.hypothesis_id
+    dumped["parent_hypothesis_id"] = hypothesis.parent_hypothesis_id
+    dumped["evidence_ids"] = list(hypothesis.evidence_ids)
+    return dumped
 
 
 class ReThinkItemOutput(BaseModel):

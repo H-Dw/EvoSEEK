@@ -7,10 +7,14 @@ api_key: env:DEEPSEEK_API_KEY
 temperature: 0.0
 max_revision_attempts: 2
 max_model_retries: 2
-max_output_retries: 1
+max_truncation_retries: 1
+max_syntax_retries: 1
+max_schema_retries: 2
+max_semantic_retries: 1
+max_unknown_evidence_retries: 1
 retry_backoff_seconds: 1.0
 request_timeout_seconds: 120.0
-max_input_chars: 80000
+max_input_chars: 160000
 on_reject: abort_round
 on_exhausted: abort_round
 fallback_policy: rule
@@ -20,6 +24,7 @@ profile: scientific_v1
 ood_warning_threshold: null
 model_disagreement_threshold: null
 min_batch_distance: 1
-max_tokens: 16384
-reasoning_effort: high
-thinking: enabled
+review_controls: false
+review_diversity: false
+max_tokens: 20000
+thinking: disabled

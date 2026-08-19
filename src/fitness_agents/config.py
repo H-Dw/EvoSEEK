@@ -1154,7 +1154,11 @@ class CriticConfig:
     # One runtime owns provider/output retries.  Scientific revisions above
     # are a separate budget and never multiply this value in CriticAgent.
     max_model_retries: int = 2
-    max_output_retries: int = 1
+    max_truncation_retries: int = 1
+    max_syntax_retries: int = 1
+    max_schema_retries: int = 2
+    max_semantic_retries: int = 1
+    max_unknown_evidence_retries: int = 1
     retry_backoff_seconds: float = 1.0
     request_timeout_seconds: float = 120.0
     max_input_chars: int = 80000
@@ -1167,6 +1171,8 @@ class CriticConfig:
     ood_warning_threshold: float | None = None
     model_disagreement_threshold: float | None = None
     min_batch_distance: int = 1
+    review_controls: bool = True
+    review_diversity: bool = True
     base_url: str | None = None
     api_key: str | None = None
     max_tokens: int | None = None
@@ -1180,14 +1186,25 @@ class CriticConfig:
             raise ValueError("critic.max_revision_attempts must be between 0 and 2")
         if self.max_model_retries not in {0, 1, 2}:
             raise ValueError("critic.max_model_retries must be between 0 and 2")
-        if self.max_output_retries not in {0, 1}:
-            raise ValueError("critic.max_output_retries must be 0 or 1")
+        retry_fields = {
+            "max_truncation_retries": self.max_truncation_retries,
+            "max_syntax_retries": self.max_syntax_retries,
+            "max_schema_retries": self.max_schema_retries,
+            "max_semantic_retries": self.max_semantic_retries,
+            "max_unknown_evidence_retries": self.max_unknown_evidence_retries,
+        }
+        if any(value not in {0, 1, 2} for value in retry_fields.values()):
+            raise ValueError(f"critic output retry budgets must be between 0 and 2: {retry_fields}")
         if self.retry_backoff_seconds < 0:
             raise ValueError("critic.retry_backoff_seconds must be non-negative")
         if self.request_timeout_seconds <= 0:
             raise ValueError("critic.request_timeout_seconds must be positive")
         if self.max_input_chars < 4096:
             raise ValueError("critic.max_input_chars must be at least 4096")
+        if self.max_tokens is not None and not 1 <= self.max_tokens <= 20000:
+            raise ValueError("critic.max_tokens must be between 1 and 20000")
+        if self.min_batch_distance < 0:
+            raise ValueError("critic.min_batch_distance must be non-negative")
         if self.on_reject not in {"abort_round", "safe_fallback"}:
             raise ValueError("critic.on_reject must be abort_round or safe_fallback")
         if self.on_exhausted not in {"abort_round", "safe_fallback"}:
@@ -1206,23 +1223,42 @@ class LLMConfig:
     reasoning_effort: str | None = None
     thinking: str | None = None
     max_transport_retries: int = 2
-    max_output_retries: int = 1
+    max_truncation_retries: int = 1
+    max_syntax_retries: int = 1
+    max_schema_retries: int = 2
+    max_semantic_retries: int = 1
+    max_unknown_evidence_retries: int = 1
     retry_backoff_seconds: float = 1.0
     request_timeout_seconds: float = 120.0
     allow_unknown_evidence_stripping: bool = False
     max_input_chars: int = 80000
+    rethink_reasoning_batch_size: int = 8
+    rethink_max_parallel_batches: int = 4
 
     def __post_init__(self) -> None:
         if self.max_transport_retries not in {0, 1, 2}:
             raise ValueError("llm.max_transport_retries must be between 0 and 2")
-        if self.max_output_retries not in {0, 1}:
-            raise ValueError("llm.max_output_retries must be 0 or 1")
+        retry_fields = {
+            "max_truncation_retries": self.max_truncation_retries,
+            "max_syntax_retries": self.max_syntax_retries,
+            "max_schema_retries": self.max_schema_retries,
+            "max_semantic_retries": self.max_semantic_retries,
+            "max_unknown_evidence_retries": self.max_unknown_evidence_retries,
+        }
+        if any(value not in {0, 1, 2} for value in retry_fields.values()):
+            raise ValueError(f"llm output retry budgets must be between 0 and 2: {retry_fields}")
         if self.retry_backoff_seconds < 0:
             raise ValueError("llm.retry_backoff_seconds must be non-negative")
         if self.request_timeout_seconds <= 0:
             raise ValueError("llm.request_timeout_seconds must be positive")
         if self.max_input_chars < 4096:
             raise ValueError("llm.max_input_chars must be at least 4096")
+        if self.max_tokens is not None and not 1 <= self.max_tokens <= 20000:
+            raise ValueError("llm.max_tokens must be between 1 and 20000")
+        if not 1 <= self.rethink_reasoning_batch_size <= 8:
+            raise ValueError("llm.rethink_reasoning_batch_size must be between 1 and 8")
+        if not 1 <= self.rethink_max_parallel_batches <= 16:
+            raise ValueError("llm.rethink_max_parallel_batches must be between 1 and 16")
 
 
 @dataclass
@@ -1230,9 +1266,12 @@ class HierarchicalHypothesisConfig:
     enabled: bool = False
     required_channels: tuple[str, ...] = ("physchem", "conservation", "structure")
     max_parallel_branches: int = 3
+    child_sample_batch_size: int = 8
+    child_max_parallel_batches: int = 2
     max_child_revision_attempts: int = 1
-    max_main_revision_attempts: int = 1
+    max_main_revision_attempts: int = 2
     formal_fail_closed: bool = True
+    subcritic_mode: str = "remote"
     child_scientist_profiles: dict[str, str] = field(
         default_factory=lambda: {
             "physchem": "physchem_v1",
@@ -1258,10 +1297,22 @@ class HierarchicalHypothesisConfig:
 
     def __post_init__(self) -> None:
         allowed = {"physchem", "conservation", "structure"}
+        if self.subcritic_mode not in {"remote", "deterministic_gate"}:
+            raise ValueError(
+                "hierarchical_hypothesis.subcritic_mode must be remote or deterministic_gate"
+            )
         if not self.required_channels or set(self.required_channels).difference(allowed):
             raise ValueError("hierarchical_hypothesis.required_channels is invalid")
         if self.max_parallel_branches not in {1, 2, 3}:
             raise ValueError("hierarchical_hypothesis.max_parallel_branches must be 1..3")
+        if not 1 <= self.child_sample_batch_size <= 8:
+            raise ValueError(
+                "hierarchical_hypothesis.child_sample_batch_size must be 1..8"
+            )
+        if not 1 <= self.child_max_parallel_batches <= 16:
+            raise ValueError(
+                "hierarchical_hypothesis.child_max_parallel_batches must be 1..16"
+            )
         if self.max_child_revision_attempts not in {0, 1, 2}:
             raise ValueError("max_child_revision_attempts must be between 0 and 2")
         if self.max_main_revision_attempts not in {0, 1, 2}:
@@ -1275,6 +1326,12 @@ class HierarchicalHypothesisConfig:
             self.main_critic_max_tokens,
         ) < 512:
             raise ValueError("hierarchical role token budgets must be at least 512")
+        if max(
+            self.child_max_tokens,
+            self.child_critic_max_tokens,
+            self.main_critic_max_tokens,
+        ) > 20000:
+            raise ValueError("hierarchical role token budgets cannot exceed 20000")
         input_budgets = (
             self.main_max_input_chars,
             self.child_max_input_chars,

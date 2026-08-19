@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Sequence
 from dataclasses import asdict
 from typing import Any
@@ -9,6 +10,7 @@ from fitness_agents.contracts.agent_io import (
     RoleActivationState,
     ScientistContextInput,
 )
+from fitness_agents.contracts.hypothesis_pipeline import SynthesisAbstention
 from fitness_agents.contracts.interfaces import KnowledgeGraphTool, LLMClient
 from fitness_agents.contracts.schemas import (
     CampaignState,
@@ -197,6 +199,9 @@ class ScientistAgent:
                         for position in self.allowed_mutation_positions
                     },
                     "mutation_notation": variant_map[observation.variant_id].mutation_notation,
+                    "sequence_sha256": hashlib.sha256(
+                        variant_map[observation.variant_id].sequence.encode()
+                    ).hexdigest(),
                     "measured_fitness": observation.fitness,
                     "round_revealed": observation.round_revealed,
                 }
@@ -236,7 +241,7 @@ class ScientistAgent:
         cross_channel_conflicts: Sequence[dict[str, Any]] = (),
         critic_revision: dict[str, Any] | None = None,
         hypothesis_attempt: int = 0,
-    ) -> Hypothesis:
+    ) -> Hypothesis | SynthesisAbstention:
         context = self.sanitized_context(state, observed_variants, observations)
         if hypothesis_attempt > 0:
             context["expected_hypothesis_id"] = (

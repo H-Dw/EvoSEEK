@@ -115,8 +115,13 @@ def report_prompt_budget(**payload: Any) -> None:
         "profile",
         "system_chars",
         "user_chars",
+        "assistant_chars",
+        "input_chars",
         "field_chars",
         "max_input_chars",
+        "remaining_chars",
+        "utilization_ratio",
+        "budget_band",
         "request_started",
         "round_id",
     }

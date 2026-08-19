@@ -12,10 +12,26 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 TRUNCATION_FINISH_REASONS = frozenset({"length", "max_tokens", "max_output_tokens"})
-MAX_OUTPUT_TOKENS = 32768
+MAX_OUTPUT_TOKENS = 20000
 ALLOWED_EVIDENCE_RETRY_CAP = 24
-FAILURE_KINDS = ("truncated", "syntax", "schema", "unknown_evidence", "empty", "other")
-FailureKind = Literal["truncated", "syntax", "schema", "unknown_evidence", "empty", "other"]
+FAILURE_KINDS = (
+    "truncated",
+    "syntax",
+    "schema",
+    "semantic",
+    "unknown_evidence",
+    "empty",
+    "other",
+)
+FailureKind = Literal[
+    "truncated",
+    "syntax",
+    "schema",
+    "semantic",
+    "unknown_evidence",
+    "empty",
+    "other",
+]
 
 
 class OutputTruncatedError(ValueError):
@@ -57,7 +73,24 @@ class UnknownEvidenceIdsError(ValueError):
         )
         self.unknown = tuple(sorted(unknown))
         self.allowed = tuple(sorted(allowed or ())[:ALLOWED_EVIDENCE_RETRY_CAP])
+        self.paths = ("evidence_ids",)
+        self.allowed_values = {"evidence_ids[]": self.allowed}
         self.stripped_payload = stripped_payload
+
+
+class SemanticOutputValidationError(ValueError):
+    """Typed JSON passed its schema but failed a runtime/domain invariant."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        paths: tuple[str, ...] = (),
+        allowed_values: dict[str, tuple[str, ...]] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.paths = paths
+        self.allowed_values = allowed_values or {}
 
 
 @dataclass(frozen=True)
@@ -79,10 +112,16 @@ class TokenBudgetPolicy:
     effort: str | None = None
     max_budget: int = MAX_OUTPUT_TOKENS
 
-    def apply(self, failure: OutputFailure, *, deepseek: bool) -> None:
+    def apply(
+        self,
+        failure: OutputFailure,
+        *,
+        deepseek: bool,
+        preserve_thinking: bool = False,
+    ) -> None:
         if failure.kind != "truncated":
             return
-        if deepseek:
+        if deepseek and not preserve_thinking:
             self.thinking = "disabled"
             # DeepSeek maps low/medium reasoning effort back to high.  Once a
             # completion is truncated, disable thinking and omit the effort
@@ -133,25 +172,21 @@ def _braces_balanced(text: str) -> bool:
 
 
 def json_salvage(text: str) -> dict[str, Any] | None:
-    """Repair cosmetic JSON only; never synthesize closure for truncated output."""
+    """Repair cosmetic JSON only; never extract prose or synthesize closure."""
 
     payload = strip_markdown_fences(text)
     if not payload:
         return None
     stripped_commas = re.sub(r",(\s*[}\]])", r"\1", payload)
 
+    if not _braces_balanced(stripped_commas):
+        return None
+
     def _load(candidate: str) -> dict[str, Any] | None:
         try:
             parsed = json.loads(candidate)
         except json.JSONDecodeError:
-            start = candidate.find("{")
-            end = candidate.rfind("}")
-            if start < 0 or end <= start:
-                return None
-            try:
-                parsed = json.loads(candidate[start : end + 1])
-            except json.JSONDecodeError:
-                return None
+            return None
         return parsed if isinstance(parsed, dict) else None
 
     parsed = _load(stripped_commas)
@@ -191,6 +226,8 @@ def classify_output_failure(
         kind = "truncated"
     elif isinstance(error, json.JSONDecodeError) or "JSON object" in str(error):
         kind = "syntax"
+    elif isinstance(error, SemanticOutputValidationError):
+        kind = "semantic"
     elif type(error).__name__ in {"ValidationError", "ValueError"}:
         kind = "schema"
     else:
@@ -211,12 +248,13 @@ def retry_instruction(
     failure: OutputFailure,
     *,
     error: Exception,
+    schema: dict[str, Any] | None = None,
+    repair_hints: dict[str, tuple[str, ...] | list[str]] | None = None,
     allowed_evidence_ids: tuple[str, ...] = (),
 ) -> str:
     parts = [
         f"The previous JSON failed ({failure.kind}): {failure.message[:800]}.",
-        "Return one complete JSON object with every required key and no Markdown.",
-        "Keep statement/summary/expected_outcome/falsification_criterion at or under 400 characters.",
+        "Return exactly one balanced, complete JSON object and no Markdown.",
     ]
     if failure.finish_reason:
         parts.append(f"finish_reason={failure.finish_reason}.")
@@ -225,8 +263,18 @@ def retry_instruction(
     parts.append(f"content_chars={failure.content_length}.")
     if failure.kind == "truncated":
         parts.append(
-            "The previous completion was truncated. Disable hidden reasoning and emit compact JSON only."
+            "The previous completion was truncated; do not copy it or guess its missing suffix. "
+            "Emit a fresh compact object."
         )
+    else:
+        parts.append("Modify only the fields named by the validation errors.")
+        details = validation_error_entries(error)
+        if details:
+            parts.append(
+                "Validation errors (field path/type/message): "
+                + json.dumps(details, ensure_ascii=False, separators=(",", ":"))
+                + "."
+            )
     unknown = getattr(error, "unknown", ())
     allowed = getattr(error, "allowed", allowed_evidence_ids)
     if unknown:
@@ -234,25 +282,91 @@ def retry_instruction(
     if allowed:
         parts.append(f"Cite only these evidence_id values: {list(allowed)}.")
         parts.append("If none apply, return evidence_ids=[]. Never invent ev: identifiers.")
+    constraints = schema_constraints(schema or {})
+    explicit = dict(repair_hints or {})
+    explicit.update(getattr(error, "allowed_values", {}) or {})
+    for path, values in sorted(explicit.items()):
+        compact = tuple(str(item) for item in values)[:32]
+        if compact:
+            constraints[path] = {"allowed": list(compact)}
+    if constraints:
+        parts.append(
+            "Current field constraints: "
+            + json.dumps(constraints, ensure_ascii=False, separators=(",", ":"))
+            + "."
+        )
+    parts.append(
+        "Do not change verdict, action, or identifier fields unless their exact path is "
+        "listed as invalid."
+    )
     return " ".join(parts)
 
 
-def validation_detail(error: Exception) -> str:
+def validation_error_entries(error: Exception) -> list[dict[str, str]]:
+    """Return bounded Pydantic-style errors without echoing invalid inputs."""
+
     errors = getattr(error, "errors", None)
     if callable(errors):
         try:
-            entries = errors(include_input=False, include_url=False)
-            summary = [
-                {
-                    "location": ".".join(str(part) for part in item.get("loc", ())),
-                    "type": item.get("type"),
-                    "message": item.get("msg"),
-                }
-                for item in entries[:12]
-            ]
-            return json.dumps(summary, ensure_ascii=False)
-        except (TypeError, ValueError):
-            pass
+            raw_entries = errors(include_input=False, include_url=False)
+        except TypeError:
+            raw_entries = errors()
+        return [
+            {
+                "path": ".".join(str(part) for part in item.get("loc", ())) or "$",
+                "type": str(item.get("type") or "validation_error"),
+                "message": str(item.get("msg") or "invalid value")[:240],
+            }
+            for item in raw_entries[:16]
+        ]
+    paths = getattr(error, "paths", ())
+    return [
+        {"path": str(path), "type": type(error).__name__, "message": str(error)[:240]}
+        for path in paths[:16]
+    ]
+
+
+def schema_constraints(schema: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Extract compact enum/length constraints from a generated JSON Schema."""
+
+    definitions = schema.get("$defs", {}) if isinstance(schema, dict) else {}
+    output: dict[str, dict[str, Any]] = {}
+
+    def walk(node: Any, path: str, seen: frozenset[str] = frozenset()) -> None:
+        if not isinstance(node, dict):
+            return
+        ref = node.get("$ref")
+        if isinstance(ref, str) and ref.startswith("#/$defs/"):
+            name = ref.rsplit("/", 1)[-1]
+            if name not in seen:
+                walk(definitions.get(name), path, seen.union({name}))
+            return
+        item: dict[str, Any] = {}
+        if isinstance(node.get("enum"), list):
+            item["allowed"] = node["enum"][:32]
+        if "const" in node:
+            item["allowed"] = [node["const"]]
+        for key in ("minLength", "maxLength", "minimum", "maximum", "minItems", "maxItems"):
+            if key in node:
+                item[key] = node[key]
+        if item and path:
+            output[path] = item
+        for key, child in (node.get("properties") or {}).items():
+            child_path = f"{path}.{key}" if path else str(key)
+            walk(child, child_path, seen)
+        if "items" in node:
+            walk(node["items"], f"{path}[]", seen)
+        for child in node.get("anyOf", ()) or node.get("oneOf", ()) or ():
+            walk(child, path, seen)
+
+    walk(schema, "")
+    return dict(sorted(output.items())[:64])
+
+
+def validation_detail(error: Exception) -> str:
+    entries = validation_error_entries(error)
+    if entries:
+        return json.dumps(entries, ensure_ascii=False)
     if isinstance(error, json.JSONDecodeError):
         return (
             f"JSONDecodeError: {error.msg} at column {error.pos} "
@@ -270,6 +384,8 @@ class RevisionConstraints:
 
     require_controls: bool = False
     increase_diversity: bool = False
+    required_control_count: int | None = None
+    minimum_batch_distance: int | None = None
     add_exploration: bool = False
     reduce_mutation_depth: bool = False
     regenerate_hypothesis: bool = False
@@ -278,6 +394,28 @@ class RevisionConstraints:
         return RevisionConstraints(
             require_controls=self.require_controls or other.require_controls,
             increase_diversity=self.increase_diversity or other.increase_diversity,
+            required_control_count=max(
+                (
+                    item
+                    for item in (
+                        self.required_control_count,
+                        other.required_control_count,
+                    )
+                    if item is not None
+                ),
+                default=None,
+            ),
+            minimum_batch_distance=max(
+                (
+                    item
+                    for item in (
+                        self.minimum_batch_distance,
+                        other.minimum_batch_distance,
+                    )
+                    if item is not None
+                ),
+                default=None,
+            ),
             add_exploration=self.add_exploration or other.add_exploration,
             reduce_mutation_depth=self.reduce_mutation_depth or other.reduce_mutation_depth,
             regenerate_hypothesis=self.regenerate_hypothesis or other.regenerate_hypothesis,

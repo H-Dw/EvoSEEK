@@ -6,6 +6,7 @@ Keys are read from the process environment or a gitignored project ``.env`` file
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -19,6 +20,7 @@ from typing import Any, Literal
 from fitness_agents.utils.progress import TimedHeartbeat, report_event, report_prompt_budget
 
 from .output_guards import (
+    MAX_OUTPUT_TOKENS,
     ContentFilteredError,
     EmptyLLMOutputError,
     OutputTruncatedError,
@@ -26,11 +28,10 @@ from .output_guards import (
     ProviderResourceError,
     TokenBudgetPolicy,
     UnexpectedFinishReasonError,
-    UnknownEvidenceIdsError,
     classify_output_failure,
     json_salvage,
     retry_instruction,
-    validation_detail,
+    validation_error_entries,
 )
 from .transports import ChatTransport
 
@@ -135,6 +136,21 @@ def prompt_budget_record(
         _measure_field_chars(parsed, prefix=role, output=field_chars)
     largest_fields = sorted(field_chars.items(), key=lambda item: (-item[1], item[0]))[:128]
     trace = trace_context or {}
+    input_chars = sum(len(str(item.get("content", ""))) for item in messages)
+    utilization_ratio = (
+        round(input_chars / max_input_chars, 6) if max_input_chars else None
+    )
+    budget_band = None
+    if utilization_ratio is not None:
+        budget_band = (
+            "exceeded"
+            if utilization_ratio > 1.0
+            else "critical"
+            if utilization_ratio >= 0.9
+            else "warning"
+            if utilization_ratio >= 0.8
+            else "normal"
+        )
     return {
         "role": str(trace.get("role") or "unknown"),
         "profile": trace.get("profile"),
@@ -144,8 +160,19 @@ def prompt_budget_record(
         "user_chars": sum(
             len(str(item.get("content", ""))) for item in messages if item.get("role") == "user"
         ),
+        "assistant_chars": sum(
+            len(str(item.get("content", "")))
+            for item in messages
+            if item.get("role") == "assistant"
+        ),
+        "input_chars": input_chars,
         "field_chars": dict(largest_fields),
         "max_input_chars": max_input_chars,
+        "remaining_chars": (
+            max_input_chars - input_chars if max_input_chars is not None else None
+        ),
+        "utilization_ratio": utilization_ratio,
+        "budget_band": budget_band,
         "request_started": request_started,
         "round_id": trace.get("round_id"),
     }
@@ -178,6 +205,9 @@ def _terminal_failure(
             category = "transport"
         elif failure is not None and failure.kind == "schema":
             code = "OUTPUT_SCHEMA_INVALID"
+            category = "output"
+        elif failure is not None and failure.kind == "semantic":
+            code = "OUTPUT_SEMANTIC_INVALID"
             category = "output"
         elif failure is not None and failure.kind == "syntax":
             code = "OUTPUT_JSON_INVALID"
@@ -362,27 +392,22 @@ def classify_request_failure(error: Exception) -> RequestFailureDisposition:
 
 
 def extract_json_object(text: str) -> dict[str, Any]:
+    """Accept one complete JSON object, with cosmetic fence/comma repair only."""
+
     payload = text.strip()
     if payload.startswith("```"):
         payload = re.sub(r"^```(?:json)?\s*", "", payload, count=1, flags=re.IGNORECASE)
         payload = re.sub(r"\s*```$", "", payload)
     try:
         parsed = json.loads(payload)
-        if isinstance(parsed, dict):
-            return parsed
     except json.JSONDecodeError:
-        pass
-    salvaged = json_salvage(payload)
-    if salvaged is not None:
-        return salvaged
-    start = payload.find("{")
-    end = payload.rfind("}")
-    if start < 0 or end <= start:
-        raise ValueError("Remote LLM response did not contain a JSON object")
-    parsed = json.loads(payload[start : end + 1])
-    if not isinstance(parsed, dict):
-        raise TypeError("Remote LLM JSON payload is not an object")
-    return parsed
+        salvaged = json_salvage(payload)
+        if salvaged is not None:
+            return salvaged
+        raise
+    if isinstance(parsed, dict):
+        return parsed
+    raise TypeError("Remote LLM JSON payload is not an object")
 
 
 def _message_content(message: Any) -> str:
@@ -421,8 +446,52 @@ def _usage_payload(response: Any) -> dict[str, Any]:
     return {key: value for key, value in payload.items() if value is not None}
 
 
-def _safe_validation_detail(error: Exception) -> str:
-    return validation_detail(error)
+@dataclass(frozen=True)
+class OutputRetryBudgets:
+    """Independent repair budgets; one failure class cannot consume another."""
+
+    truncated: int = 1
+    syntax: int = 1
+    schema: int = 2
+    semantic: int = 1
+    unknown_evidence: int = 1
+    empty: int = 1
+    other: int = 0
+
+    def as_dict(self) -> dict[str, int]:
+        return {
+            "truncated": self.truncated,
+            "syntax": self.syntax,
+            "schema": self.schema,
+            "semantic": self.semantic,
+            "unknown_evidence": self.unknown_evidence,
+            "empty": self.empty,
+            "other": self.other,
+        }
+
+
+def _private_raw_capture(
+    content: str,
+    *,
+    trace_fields: dict[str, Any],
+    attempt: int,
+    payload_sha256: str,
+) -> str | None:
+    """Optionally persist raw visible output outside normal artifacts and traces."""
+
+    private_dir = os.environ.get("FITNESS_AGENTS_PRIVATE_LLM_OUTPUT_DIR")
+    if not private_dir or not content:
+        return None
+    role = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(trace_fields.get("role") or "unknown"))
+    target_dir = Path(private_dir).expanduser().resolve()
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = target_dir / f"{role}.attempt-{attempt}.{payload_sha256[:16]}.txt"
+    target.write_text(content, encoding="utf-8")
+    try:
+        target.chmod(0o600)
+    except OSError:
+        pass
+    return str(target)
 
 
 def complete_json(
@@ -438,20 +507,33 @@ def complete_json(
     thinking: str | None = None,
     retries: int = 2,
     transport_retries: int | None = None,
-    output_retries: int | None = None,
+    truncation_retries: int | None = None,
+    syntax_retries: int | None = None,
+    schema_retries: int | None = None,
+    semantic_retries: int | None = None,
+    unknown_evidence_retries: int | None = None,
     retry_backoff_seconds: float = 0.0,
-    allow_unknown_evidence_stripping: bool = True,
+    allow_unknown_evidence_stripping: bool = False,
     max_input_chars: int | None = None,
     validator: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+    repair_hints: dict[str, tuple[str, ...] | list[str]] | None = None,
     trace_context: dict[str, Any] | None = None,
+    preserve_thinking_on_retry: bool = False,
 ) -> dict[str, Any]:
-    """Request and validate JSON, retrying syntax and domain-contract failures together."""
+    """Request one typed object with separate transport/repair retry budgets."""
 
-    # Callers include the schema in their prompt. DeepSeek's compatibility path supports
+    # Callers include the generated schema in their prompt. DeepSeek's compatibility path supports
     # json_object rather than OpenAI's json_schema response format, so validation is local.
-    del schema
+    schema = schema or {}
+    # Retained as a config/API compatibility field. Formal extraction never
+    # rewrites identifier-bearing payloads after validation.
+    del allow_unknown_evidence_stripping
     load_project_env()
-    token_budget = max_tokens or int(os.environ.get("FITNESS_AGENTS_LLM_MAX_TOKENS", "16384"))
+    token_budget = max_tokens or int(os.environ.get("FITNESS_AGENTS_LLM_MAX_TOKENS", "20000"))
+    if not 1 <= token_budget <= MAX_OUTPUT_TOKENS:
+        raise ValueError(
+            f"max_tokens must be between 1 and {MAX_OUTPUT_TOKENS}; got {token_budget}"
+        )
     if transport is None and client is None:
         raise ValueError("A chat transport or compatible client is required")
     connection = transport if transport is not None else client
@@ -467,13 +549,27 @@ def complete_json(
     else:
         effort = reasoning_effort
         thinking_mode = thinking
+    # Provider adapters may otherwise infer an effort/default that silently
+    # re-enables reasoning. Disabled thinking always means no effort field.
+    if thinking_mode == "disabled":
+        effort = None
 
     if retries < 0:
         raise ValueError("retries must be non-negative")
     transport_retry_limit = retries if transport_retries is None else transport_retries
-    output_retry_limit = retries if output_retries is None else output_retries
-    if transport_retry_limit < 0 or output_retry_limit < 0:
-        raise ValueError("transport_retries and output_retries must be non-negative")
+    budgets = OutputRetryBudgets(
+        truncated=1 if truncation_retries is None else truncation_retries,
+        syntax=1 if syntax_retries is None else syntax_retries,
+        schema=2 if schema_retries is None else schema_retries,
+        semantic=1 if semantic_retries is None else semantic_retries,
+        unknown_evidence=(
+            1 if unknown_evidence_retries is None else unknown_evidence_retries
+        ),
+        empty=1,
+        other=0,
+    )
+    if transport_retry_limit < 0 or any(value < 0 for value in budgets.as_dict().values()):
+        raise ValueError("transport and output retry budgets must be non-negative")
     if retry_backoff_seconds < 0:
         raise ValueError("retry_backoff_seconds must be non-negative")
 
@@ -485,11 +581,11 @@ def complete_json(
     current_messages = list(messages)
     trace_fields = dict(trace_context or {})
     transport_retries_used = 0
-    output_retries_used = 0
+    output_retries_used = {kind: 0 for kind in budgets.as_dict()}
     request_attempt = 0
     request_started_any = False
     input_chars = 0
-    max_external_attempts = 1 + transport_retry_limit + output_retry_limit
+    max_external_attempts = 1 + transport_retry_limit + sum(budgets.as_dict().values())
     while request_attempt < max_external_attempts:
         input_chars = sum(len(str(item.get("content", ""))) for item in current_messages)
         if max_input_chars is not None and input_chars > max_input_chars:
@@ -517,14 +613,24 @@ def complete_json(
                 **trace_fields,
             )
             break
-        report_prompt_budget(
-            **prompt_budget_record(
-                current_messages,
-                max_input_chars=max_input_chars,
-                trace_context=trace_fields,
-                request_started=True,
-            )
+        budget_record = prompt_budget_record(
+            current_messages,
+            max_input_chars=max_input_chars,
+            trace_context=trace_fields,
+            request_started=True,
         )
+        report_prompt_budget(**budget_record)
+        if budget_record["budget_band"] in {"warning", "critical"}:
+            report_event(
+                "llm_prompt_budget_high_water",
+                message=f"LLM request {model} reached prompt high-water mark",
+                model=model,
+                input_chars=budget_record["input_chars"],
+                max_input_chars=max_input_chars,
+                utilization_ratio=budget_record["utilization_ratio"],
+                budget_band=budget_record["budget_band"],
+                **trace_fields,
+            )
         kwargs: dict[str, Any] = {
             "model": model,
             "messages": current_messages,
@@ -552,7 +658,13 @@ def complete_json(
             thinking=policy.thinking,
             max_tokens=policy.budget,
             input_chars=input_chars,
-            reasoning_effort=policy.effort,
+                reasoning_effort=policy.effort,
+                retry_budget={
+                    "limits": budgets.as_dict(),
+                    "consumed": dict(output_retries_used),
+                    "transport_limit": transport_retry_limit,
+                    "transport_consumed": transport_retries_used,
+                },
             **trace_fields,
         )
         started = time.perf_counter()
@@ -603,6 +715,13 @@ def complete_json(
                 thinking=policy.thinking,
                 latency_s=round(time.perf_counter() - started, 3),
                 finish_reason=finish_reason,
+                disposition="accepted",
+                retry_budget={
+                    "limits": budgets.as_dict(),
+                    "consumed": dict(output_retries_used),
+                    "transport_limit": transport_retry_limit,
+                    "transport_consumed": transport_retries_used,
+                },
                 **usage,
                 **trace_fields,
             )
@@ -620,13 +739,27 @@ def complete_json(
             )
             last_disposition = disposition
             last_failure = failure
+            failure_budget = budgets.as_dict().get(failure.kind, 0)
             will_retry = (
                 disposition.retryable
                 and (
                     transport_retries_used < transport_retry_limit
                     if disposition.category == "transport"
-                    else output_retries_used < output_retry_limit
+                    else output_retries_used.get(failure.kind, 0) < failure_budget
                 )
+            )
+            invalid_payload_sha256 = (
+                hashlib.sha256(content.encode("utf-8")).hexdigest() if content else None
+            )
+            private_raw_path = (
+                _private_raw_capture(
+                    content,
+                    trace_fields=trace_fields,
+                    attempt=request_attempt,
+                    payload_sha256=invalid_payload_sha256 or "empty",
+                )
+                if invalid_payload_sha256
+                else None
             )
             report_event(
                 "llm_request_retry" if will_retry else "llm_request_rejected",
@@ -648,30 +781,20 @@ def complete_json(
                 content_length=failure.content_length,
                 braces_balanced=failure.braces_balanced,
                 decode_position=failure.decode_position,
+                validation_errors=validation_error_entries(error),
+                invalid_payload_sha256=invalid_payload_sha256,
+                private_raw_path=private_raw_path,
+                disposition="retry" if will_retry else "rejected",
+                retry_budget={
+                    "limits": budgets.as_dict(),
+                    "consumed": dict(output_retries_used),
+                    "transport_limit": transport_retry_limit,
+                    "transport_consumed": transport_retries_used,
+                },
                 latency_s=round(time.perf_counter() - started, 3),
                 **usage,
                 **trace_fields,
             )
-            if (
-                isinstance(error, UnknownEvidenceIdsError)
-                and error.stripped_payload is not None
-                and allow_unknown_evidence_stripping
-                and output_retries_used >= output_retry_limit
-            ):
-                report_event(
-                    "llm_output_warning",
-                    message="Dropped evidence_ids that were not visible to the role",
-                    persist=True,
-                    unknown_evidence_ids=list(error.unknown),
-                    allowed_evidence_ids=list(error.allowed),
-                    **trace_fields,
-                )
-                _record_completion_receipt(
-                    input_chars=input_chars,
-                    request_started=True,
-                    failure_category=None,
-                )
-                return error.stripped_payload
             if disposition.category == "transport":
                 if not will_retry:
                     break
@@ -683,17 +806,35 @@ def complete_json(
             else:
                 if not will_retry:
                     break
-                output_retries_used += 1
-                if deepseek and policy.thinking == "enabled":
+                output_retries_used[failure.kind] += 1
+                if (
+                    deepseek
+                    and policy.thinking == "enabled"
+                    and not preserve_thinking_on_retry
+                ):
                     policy.thinking = "disabled"
-                policy.apply(failure, deepseek=deepseek)
-                current_messages = [
-                    *messages,
+                if policy.thinking == "disabled":
+                    policy.effort = None
+                policy.apply(
+                    failure,
+                    deepseek=deepseek,
+                    preserve_thinking=preserve_thinking_on_retry,
+                )
+                retry_messages = list(messages)
+                if content and failure.kind != "truncated":
+                    retry_messages.append({"role": "assistant", "content": content})
+                retry_messages.append(
                     {
                         "role": "user",
-                        "content": retry_instruction(failure, error=error),
-                    },
-                ]
+                        "content": retry_instruction(
+                            failure,
+                            error=error,
+                            schema=schema,
+                            repair_hints=repair_hints,
+                        ),
+                    }
+                )
+                current_messages = retry_messages
             request_attempt += 1
             continue
         request_attempt += 1
@@ -702,6 +843,13 @@ def complete_json(
         message=f"LLM request {model} failed",
         model=model,
         error_type=type(last_error).__name__ if last_error is not None else "RuntimeError",
+        disposition="failed",
+        retry_budget={
+            "limits": budgets.as_dict(),
+            "consumed": dict(output_retries_used),
+            "transport_limit": transport_retry_limit,
+            "transport_consumed": transport_retries_used,
+        },
         **trace_fields,
     )
     terminal = _terminal_failure(
