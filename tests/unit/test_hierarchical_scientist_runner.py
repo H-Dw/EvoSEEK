@@ -167,7 +167,11 @@ def test_hierarchical_scientist_config_matches_formal_al96_protocol() -> None:
     assert hierarchy.max_parallel_branches == 3
     assert hierarchy.max_child_revision_attempts == 1
     assert hierarchy.max_main_revision_attempts == 1
-    assert config.kg_interaction.max_tool_calls >= 12
+    assert config.kg_interaction.max_tool_calls == 15
+    assert config.scientist_prompt_evidence_limit == 32
+    assert hierarchy.main_max_input_chars == 80000
+    assert hierarchy.child_max_input_chars == 60000
+    assert hierarchy.critic_max_input_chars == 60000
     assert config.kg_interaction.feature_channels == ("physchem", "conservation", "structure")
     assert config.generation.quota_allocation.quotas() == {
         "hypothesis_target": 8,
@@ -419,6 +423,13 @@ def test_apply_condition_configures_base_kg_modes_without_feature_tools(tmp_path
     assert features_rag.knowledge.local_knowledge.enabled is True
     assert "query_local_knowledge" in features_rag.kg_interaction.enabled_operators
     assert set(features_rag.kg_interaction.enabled_operators).intersection(runner.FEATURE_OPERATORS)
+    assert features_rag.kg_interaction.required_tool_calls(include_rag=True) == 15
+    assert features_rag.kg_interaction.max_tool_calls == 15
+    with pytest.raises(ValueError, match="complete runtime plan"):
+        replace(
+            features_rag,
+            kg_interaction=replace(features_rag.kg_interaction, max_tool_calls=14),
+        )
 
 
 def test_default_matrix_is_twelve_jobs_in_two_waves_of_six(tmp_path, monkeypatch, capsys) -> None:

@@ -38,6 +38,8 @@ class ProgressTarget(Protocol):
         **payload: Any,
     ) -> None: ...
 
+    def record_prompt_budget(self, payload: Mapping[str, Any]) -> None: ...
+
 
 _current: ContextVar[ProgressTarget | None] = ContextVar("fitness_agents_progress", default=None)
 
@@ -103,6 +105,35 @@ def report_event(
         target.report(event_type, message=message, persist=persist, **payload)
         return
     _log(message, payload)
+
+
+def report_prompt_budget(**payload: Any) -> None:
+    """Persist size-only prompt diagnostics without recording prompt contents."""
+
+    allowed = {
+        "role",
+        "profile",
+        "system_chars",
+        "user_chars",
+        "field_chars",
+        "max_input_chars",
+        "request_started",
+        "round_id",
+    }
+    record = {key: value for key, value in payload.items() if key in allowed}
+    target = _current.get()
+    if target is not None:
+        recorder = getattr(target, "record_prompt_budget", None)
+        if callable(recorder):
+            recorder(record)
+        target.report(
+            "llm_prompt_budget",
+            message=f"LLM prompt budget checked for {record.get('role', 'unknown')}",
+            persist=True,
+            **record,
+        )
+        return
+    _log("LLM prompt budget checked", record)
 
 
 def heartbeat(message: str, *, log: bool = True, **payload: Any) -> None:

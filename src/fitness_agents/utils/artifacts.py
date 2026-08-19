@@ -3,6 +3,8 @@ from __future__ import annotations
 import csv
 import json
 import logging
+import re
+import threading
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, is_dataclass
@@ -74,6 +76,7 @@ class JsonArtifactWriter:
         self.trace_path = self.run_dir / "trace.jsonl"
         self.status_path = self.run_dir / "status.json"
         self._started = time.monotonic()
+        self._write_lock = threading.RLock()
         self._status: dict[str, Any] = {
             "run_id": run_id,
             "phase": "initialized",
@@ -89,29 +92,30 @@ class JsonArtifactWriter:
         event_type: str | None = None,
         **payload: Any,
     ) -> Path:
-        phase = payload.get("phase", self._status.get("phase"))
-        round_id = payload.get("round_id", self._status.get("round_id", 0))
-        detail = {
-            str(key): _jsonable(value)
-            for key, value in payload.items()
-            if key not in {"phase", "round_id", "message"} and _is_status_scalar(value)
-        }
-        record = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "run_id": self.run_id,
-            "phase": phase,
-            "round_id": round_id,
-            "message": message,
-            "elapsed_s": round(time.monotonic() - self._started, 3),
-            "event_type": event_type,
-        }
-        if detail:
-            record["detail"] = detail
-        self._status = record
-        encoded = json.dumps(_jsonable(record), ensure_ascii=False, indent=2, sort_keys=True)
-        temporary = self.status_path.with_suffix(".json.tmp")
-        temporary.write_text(encoded + "\n", encoding="utf-8")
-        temporary.replace(self.status_path)
+        with self._write_lock:
+            phase = payload.get("phase", self._status.get("phase"))
+            round_id = payload.get("round_id", self._status.get("round_id", 0))
+            detail = {
+                str(key): _jsonable(value)
+                for key, value in payload.items()
+                if key not in {"phase", "round_id", "message"} and _is_status_scalar(value)
+            }
+            record = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "run_id": self.run_id,
+                "phase": phase,
+                "round_id": round_id,
+                "message": message,
+                "elapsed_s": round(time.monotonic() - self._started, 3),
+                "event_type": event_type,
+            }
+            if detail:
+                record["detail"] = detail
+            self._status = record
+            encoded = json.dumps(_jsonable(record), ensure_ascii=False, indent=2, sort_keys=True)
+            temporary = self.status_path.with_suffix(".json.tmp")
+            temporary.write_text(encoded + "\n", encoding="utf-8")
+            temporary.replace(self.status_path)
         return self.status_path
 
     def heartbeat(self, message: str, *, log: bool = True, **payload: Any) -> None:
@@ -149,8 +153,41 @@ class JsonArtifactWriter:
             "event_type": event_type,
             "payload": _jsonable(payload),
         }
-        with self.trace_path.open("a", encoding="utf-8") as handle:
+        with self._write_lock, self.trace_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+
+    def record_prompt_budget(self, payload: Mapping[str, Any]) -> None:
+        """Append one size-only budget record to the current round and role artifact."""
+
+        allowed = (
+            "role",
+            "profile",
+            "system_chars",
+            "user_chars",
+            "field_chars",
+            "max_input_chars",
+            "request_started",
+        )
+        record = {key: _jsonable(payload.get(key)) for key in allowed}
+        round_id = int(payload.get("round_id") or self._status.get("round_id") or 0)
+        role = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(record["role"] or "unknown")).strip("_")
+        role = role or "unknown"
+        relative = Path(f"round_{round_id:02d}") / "llm" / role / "prompt_budget.json"
+        target = self.run_dir / relative
+        with self._write_lock:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            records: list[dict[str, Any]] = []
+            if target.is_file():
+                existing = json.loads(target.read_text(encoding="utf-8"))
+                if isinstance(existing, list):
+                    records = [dict(item) for item in existing if isinstance(item, dict)]
+            records.append(record)
+            temporary = target.with_suffix(".json.tmp")
+            temporary.write_text(
+                json.dumps(records, ensure_ascii=False, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+            temporary.replace(target)
 
     def write_json(self, relative_path: str, payload: Any) -> Path:
         target = self.run_dir / relative_path

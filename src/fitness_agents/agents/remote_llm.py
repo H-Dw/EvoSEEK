@@ -11,11 +11,12 @@ import os
 import re
 import time
 from collections.abc import Callable
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from fitness_agents.utils.progress import TimedHeartbeat, report_event
+from fitness_agents.utils.progress import TimedHeartbeat, report_event, report_prompt_budget
 
 from .output_guards import (
     ContentFilteredError,
@@ -35,6 +36,180 @@ from .transports import ChatTransport
 
 DEEPSEEK_DEFAULT_BASE_URL = "https://api.deepseek.com"
 DEEPSEEK_DEFAULT_MODEL = "deepseek-v4-flash"
+
+_completion_receipt: ContextVar[dict[str, Any] | None] = ContextVar(
+    "fitness_agents_llm_completion_receipt", default=None
+)
+
+
+def reset_completion_receipt() -> None:
+    """Clear request metadata in the current role context before a completion."""
+
+    _completion_receipt.set(None)
+
+
+def completion_receipt_snapshot() -> dict[str, Any]:
+    """Return size/status metadata for the latest completion in this role context."""
+
+    return dict(_completion_receipt.get() or {})
+
+
+def _record_completion_receipt(
+    *,
+    input_chars: int,
+    request_started: bool,
+    failure_category: str | None,
+) -> None:
+    _completion_receipt.set(
+        {
+            "input_chars": input_chars,
+            "failure_category": failure_category,
+            "request_started": request_started,
+        }
+    )
+
+
+class RemoteLLMCompletionError(RuntimeError):
+    """Structured terminal failure for one bounded remote completion."""
+
+    def __init__(
+        self,
+        error_code: str,
+        *,
+        failure_category: str,
+        input_chars: int,
+        request_started: bool,
+        detail: str,
+    ) -> None:
+        super().__init__(f"{error_code}: {detail}")
+        self.error_code = error_code
+        self.failure_category = failure_category
+        self.input_chars = input_chars
+        self.request_started = request_started
+
+
+def _json_char_count(value: Any) -> int:
+    return len(json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str))
+
+
+def _measure_field_chars(
+    value: Any,
+    *,
+    prefix: str,
+    output: dict[str, int],
+    depth: int = 0,
+) -> None:
+    if depth >= 4:
+        return
+    if isinstance(value, dict):
+        for raw_key, item in value.items():
+            key = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(raw_key))[:80] or "field"
+            path = f"{prefix}.{key}" if prefix else key
+            output[path] = output.get(path, 0) + _json_char_count(item)
+            _measure_field_chars(item, prefix=path, output=output, depth=depth + 1)
+    elif isinstance(value, list) and value and all(isinstance(item, dict) for item in value):
+        keys = tuple(dict.fromkeys(str(key) for item in value for key in item))[:64]
+        for raw_key in keys:
+            key = re.sub(r"[^A-Za-z0-9_.-]+", "_", raw_key)[:80] or "field"
+            path = f"{prefix}[].{key}"
+            output[path] = output.get(path, 0) + sum(
+                _json_char_count(item[raw_key]) for item in value if raw_key in item
+            )
+
+
+def prompt_budget_record(
+    messages: list[dict[str, str]],
+    *,
+    max_input_chars: int | None,
+    trace_context: dict[str, Any] | None,
+    request_started: bool,
+) -> dict[str, Any]:
+    field_chars: dict[str, int] = {}
+    for item in messages:
+        role = str(item.get("role", "unknown"))
+        content = str(item.get("content", ""))
+        try:
+            parsed = json.loads(content)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        _measure_field_chars(parsed, prefix=role, output=field_chars)
+    largest_fields = sorted(field_chars.items(), key=lambda item: (-item[1], item[0]))[:128]
+    trace = trace_context or {}
+    return {
+        "role": str(trace.get("role") or "unknown"),
+        "profile": trace.get("profile"),
+        "system_chars": sum(
+            len(str(item.get("content", ""))) for item in messages if item.get("role") == "system"
+        ),
+        "user_chars": sum(
+            len(str(item.get("content", ""))) for item in messages if item.get("role") == "user"
+        ),
+        "field_chars": dict(largest_fields),
+        "max_input_chars": max_input_chars,
+        "request_started": request_started,
+        "round_id": trace.get("round_id"),
+    }
+
+
+def _terminal_failure(
+    error: Exception | None,
+    *,
+    failure: Any | None,
+    disposition: RequestFailureDisposition | None,
+    input_chars: int,
+    request_started: bool,
+) -> RemoteLLMCompletionError:
+    if isinstance(error, PromptBudgetExceededError):
+        code = "PROMPT_BUDGET_EXCEEDED"
+        category = "budget"
+    elif isinstance(error, ContentFilteredError):
+        code = "CONTENT_FILTERED"
+        category = "output"
+    elif isinstance(error, UnexpectedFinishReasonError):
+        code = "OUTPUT_FINISH_REASON_INVALID"
+        category = "output"
+    elif isinstance(error, ProviderResourceError):
+        code = "PROVIDER_RESOURCE_UNAVAILABLE"
+        category = "transport"
+    else:
+        status_code = _exception_status_code(error) if error is not None else None
+        if status_code is not None:
+            code = f"HTTP_{status_code}"
+            category = "transport"
+        elif failure is not None and failure.kind == "schema":
+            code = "OUTPUT_SCHEMA_INVALID"
+            category = "output"
+        elif failure is not None and failure.kind == "syntax":
+            code = "OUTPUT_JSON_INVALID"
+            category = "output"
+        elif failure is not None and failure.kind == "truncated":
+            code = "OUTPUT_TRUNCATED"
+            category = "output"
+        elif failure is not None and failure.kind == "unknown_evidence":
+            code = "OUTPUT_EVIDENCE_IDS_INVALID"
+            category = "output"
+        elif failure is not None and failure.kind == "empty":
+            code = "OUTPUT_EMPTY"
+            category = "output"
+        elif isinstance(error, TimeoutError):
+            code = "TRANSPORT_TIMEOUT"
+            category = "transport"
+        elif isinstance(error, ConnectionError):
+            code = "TRANSPORT_CONNECTION_ERROR"
+            category = "transport"
+        elif disposition is not None and disposition.category == "transport":
+            code = "TRANSPORT_ERROR"
+            category = "transport"
+        else:
+            code = "OUTPUT_INVALID"
+            category = "output"
+    return RemoteLLMCompletionError(
+        code,
+        failure_category=category,
+        input_chars=input_chars,
+        request_started=request_started,
+        detail=str(error)[:800] if error is not None else "remote completion failed",
+    )
 
 
 def load_project_env(path: str | Path | None = None) -> None:
@@ -302,19 +477,36 @@ def complete_json(
     if retry_backoff_seconds < 0:
         raise ValueError("retry_backoff_seconds must be non-negative")
 
+    reset_completion_receipt()
     last_error: Exception | None = None
+    last_failure: Any | None = None
+    last_disposition: RequestFailureDisposition | None = None
     policy = TokenBudgetPolicy(budget=token_budget, thinking=thinking_mode, effort=effort)
     current_messages = list(messages)
     trace_fields = dict(trace_context or {})
     transport_retries_used = 0
     output_retries_used = 0
     request_attempt = 0
+    request_started_any = False
+    input_chars = 0
     max_external_attempts = 1 + transport_retry_limit + output_retry_limit
     while request_attempt < max_external_attempts:
         input_chars = sum(len(str(item.get("content", ""))) for item in current_messages)
         if max_input_chars is not None and input_chars > max_input_chars:
             last_error = PromptBudgetExceededError(
                 f"projected prompt has {input_chars} characters; limit is {max_input_chars}"
+            )
+            last_failure = classify_output_failure(
+                last_error, finish_reason=None, content="", usage={}
+            )
+            last_disposition = classify_request_failure(last_error)
+            report_prompt_budget(
+                **prompt_budget_record(
+                    current_messages,
+                    max_input_chars=max_input_chars,
+                    trace_context=trace_fields,
+                    request_started=False,
+                )
             )
             report_event(
                 "llm_prompt_budget_exceeded",
@@ -325,6 +517,14 @@ def complete_json(
                 **trace_fields,
             )
             break
+        report_prompt_budget(
+            **prompt_budget_record(
+                current_messages,
+                max_input_chars=max_input_chars,
+                trace_context=trace_fields,
+                request_started=True,
+            )
+        )
         kwargs: dict[str, Any] = {
             "model": model,
             "messages": current_messages,
@@ -360,6 +560,7 @@ def complete_json(
         content = ""
         usage: dict[str, Any] = {}
         try:
+            request_started_any = True
             with TimedHeartbeat(f"LLM {model} attempt {request_attempt + 1}"):
                 response = (
                     transport.create_chat_completion(**kwargs)
@@ -405,6 +606,11 @@ def complete_json(
                 **usage,
                 **trace_fields,
             )
+            _record_completion_receipt(
+                input_chars=input_chars,
+                request_started=True,
+                failure_category=None,
+            )
             return payload
         except Exception as error:  # noqa: BLE001 - retry JSON/thinking failures
             last_error = error
@@ -412,6 +618,8 @@ def complete_json(
             failure = classify_output_failure(
                 error, finish_reason=finish_reason, content=content, usage=usage
             )
+            last_disposition = disposition
+            last_failure = failure
             will_retry = (
                 disposition.retryable
                 and (
@@ -458,6 +666,11 @@ def complete_json(
                     allowed_evidence_ids=list(error.allowed),
                     **trace_fields,
                 )
+                _record_completion_receipt(
+                    input_chars=input_chars,
+                    request_started=True,
+                    failure_category=None,
+                )
                 return error.stripped_payload
             if disposition.category == "transport":
                 if not will_retry:
@@ -491,4 +704,16 @@ def complete_json(
         error_type=type(last_error).__name__ if last_error is not None else "RuntimeError",
         **trace_fields,
     )
-    raise RuntimeError("Remote LLM JSON completion failed") from last_error
+    terminal = _terminal_failure(
+        last_error,
+        failure=last_failure,
+        disposition=last_disposition,
+        input_chars=input_chars,
+        request_started=request_started_any,
+    )
+    _record_completion_receipt(
+        input_chars=terminal.input_chars,
+        request_started=terminal.request_started,
+        failure_category=terminal.failure_category,
+    )
+    raise terminal from last_error

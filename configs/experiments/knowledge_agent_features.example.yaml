@@ -3,6 +3,7 @@ seed: 11
 rounds: 1
 budget_per_round: 4
 candidate_limit: 16
+scientist_prompt_evidence_limit: 32
 acquisition: greedy
 task_config: configs/task/gb1_binding_features.example.yaml
 model_config: configs/model/baseline.yaml
@@ -42,6 +43,9 @@ hierarchical_hypothesis:
   child_max_tokens: 4096
   child_critic_max_tokens: 2048
   main_critic_max_tokens: 4096
+  main_max_input_chars: 80000
+  child_max_input_chars: 60000
+  critic_max_input_chars: 60000
 kg_interaction:
   enabled: true
   enabled_operators:
@@ -69,7 +73,7 @@ kg_interaction:
     - MutationEffectEstimate
     - HAS_EPISTASIS_ESTIMATE
   truncation_audit_sample_rows: 3
-  max_tool_calls: 8
+  max_tool_calls: 9
   max_rows: 12
   use_counterevidence: true
   stop_when_sufficient: false

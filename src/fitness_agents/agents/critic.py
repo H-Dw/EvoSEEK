@@ -467,6 +467,7 @@ class OpenAICriticClient:
         self.max_output_retries = max_output_retries
         self.retry_backoff_seconds = retry_backoff_seconds
         self.max_input_chars = max_input_chars
+        self.profile_name = profile
         self.profile = load_critic_profile(profile)
         self.client = create_openai_client(
             api_key=api_key,
@@ -526,6 +527,12 @@ class OpenAICriticClient:
             retry_backoff_seconds=self.retry_backoff_seconds,
             max_input_chars=self.max_input_chars,
             validator=_validate,
+            trace_context={
+                "round_id": context.get("round_id"),
+                "role": "critic",
+                "profile": self.profile_name,
+                "schema_name": "CritiqueDecisionOutput",
+            },
         )
         return _decision_from_payload(payload)
 

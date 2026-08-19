@@ -12,7 +12,7 @@ from fitness_agents.contracts.hypothesis_pipeline import ChannelEvidenceInput, C
 from fitness_agents.contracts.schemas import Evidence
 from fitness_agents.kg_interaction.contracts import EvidencePack, InteractionResult
 
-from .llm import _compact_prompt_evidence
+from .llm import _compact_prompt_evidence, _compact_prompt_pack, _prompt_row_identities
 
 FEATURE_CHANNELS: tuple[ChannelName, ...] = ("physchem", "conservation", "structure")
 FEATURE_OPERATOR_CHANNEL: dict[str, ChannelName] = {
@@ -177,19 +177,20 @@ class KGContextPartitioner:
         retry_control: dict[str, Any] | None = None,
     ) -> ChannelEvidenceInput:
         context = ScientistContextInput.model_validate(base_context)
+        seen_identities: set[tuple[str, str]] = set()
+        evidence_payloads = []
+        for item in evidence:
+            payload = _compact_prompt_evidence(item)
+            identities = _prompt_row_identities(payload)
+            if any(identity in seen_identities for identity in identities):
+                continue
+            evidence_payloads.append(payload)
+            seen_identities.update(identities)
         pack_payloads = []
-        pack_evidence_ids: set[str] = set()
         for pack in packs:
-            payload = asdict(pack)
-            payload["evidence"] = [
-                _compact_prompt_evidence(item) for item in pack.evidence
-            ]
-            pack_evidence_ids.update(
-                str(item["evidence_id"])
-                for item in payload["evidence"]
-                if item.get("evidence_id")
+            pack_payloads.append(
+                _compact_prompt_pack(asdict(pack), seen_identities=seen_identities)
             )
-            pack_payloads.append(payload)
         return ChannelEvidenceInput(
             run_id=context.run_id,
             round_id=context.round_id,
@@ -198,11 +199,7 @@ class KGContextPartitioner:
             mutable_positions=context.mutable_positions,
             wild_type_sites=context.wild_type_sites,
             visible_observations=tuple(context.visible_observations),
-            evidence=tuple(
-                _compact_prompt_evidence(item)
-                for item in evidence
-                if item.evidence_id not in pack_evidence_ids
-            ),
+            evidence=tuple(evidence_payloads),
             kg_packs=tuple(pack_payloads),
             retry_control=retry_control,
         )

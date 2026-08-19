@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from fitness_agents.agents.remote_llm import complete_json
+import pytest
+
+from fitness_agents.agents.remote_llm import RemoteLLMCompletionError, complete_json
 from fitness_agents.loop import run_campaign
 from fitness_agents.utils.artifacts import JsonArtifactWriter
 from fitness_agents.utils.progress import bind_progress, reset_progress
@@ -145,3 +147,79 @@ def test_complete_json_reports_request_lifecycle() -> None:
     event_types = [item[0] for item in capture.calls]
     assert "llm_request_started" in event_types
     assert "llm_request_completed" in event_types
+
+
+def test_prompt_budget_artifact_contains_only_size_metadata(tmp_path: Path) -> None:
+    writer = JsonArtifactWriter(tmp_path, "prompt-budget-run")
+    writer.write_status(message="round active", phase="llm_hypothesis", round_id=1)
+    token = bind_progress(writer)
+    try:
+        payload = complete_json(
+            client=_FakeClient(),
+            model="unit-test-model",
+            messages=[
+                {"role": "system", "content": "system contract"},
+                {"role": "user", "content": '{"context":{"secret":"do-not-persist"}}'},
+            ],
+            max_input_chars=1000,
+            trace_context={
+                "role": "subscientist:physchem",
+                "profile": "physchem_v1",
+                "round_id": 1,
+            },
+        )
+    finally:
+        reset_progress(token)
+
+    assert payload == {"ok": True}
+    path = (
+        tmp_path
+        / "prompt-budget-run"
+        / "round_01"
+        / "llm"
+        / "subscientist_physchem"
+        / "prompt_budget.json"
+    )
+    records = json.loads(path.read_text(encoding="utf-8"))
+    assert len(records) == 1
+    assert set(records[0]) == {
+        "role",
+        "profile",
+        "system_chars",
+        "user_chars",
+        "field_chars",
+        "max_input_chars",
+        "request_started",
+    }
+    assert records[0]["request_started"] is True
+    assert records[0]["field_chars"]["user.context"] > 0
+    assert "do-not-persist" not in path.read_text(encoding="utf-8")
+
+
+def test_prompt_budget_artifact_marks_preflight_rejection_without_request(tmp_path: Path) -> None:
+    writer = JsonArtifactWriter(tmp_path, "prompt-budget-rejected")
+    writer.write_status(message="round active", phase="llm_hypothesis", round_id=2)
+    token = bind_progress(writer)
+    try:
+        with pytest.raises(RemoteLLMCompletionError, match="PROMPT_BUDGET_EXCEEDED"):
+            complete_json(
+                client=_FakeClient(),
+                model="unit-test-model",
+                messages=[{"role": "user", "content": '{"evidence":"' + "x" * 100 + '"}'}],
+                max_input_chars=20,
+                trace_context={"role": "scientist", "profile": "scientific_v1", "round_id": 2},
+            )
+    finally:
+        reset_progress(token)
+
+    path = (
+        tmp_path
+        / "prompt-budget-rejected"
+        / "round_02"
+        / "llm"
+        / "scientist"
+        / "prompt_budget.json"
+    )
+    records = json.loads(path.read_text(encoding="utf-8"))
+    assert records[0]["request_started"] is False
+    assert records[0]["user_chars"] > records[0]["max_input_chars"]

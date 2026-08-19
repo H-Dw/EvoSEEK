@@ -8,6 +8,7 @@ seed: 11
 rounds: 3
 budget_per_round: 16
 candidate_limit: 64
+scientist_prompt_evidence_limit: 32
 acquisition: greedy
 ucb_beta: 1.5
 diversity_lambda: 0.10
@@ -96,6 +97,9 @@ hierarchical_hypothesis:
   child_max_tokens: 4096
   child_critic_max_tokens: 2048
   main_critic_max_tokens: 4096
+  main_max_input_chars: 80000
+  child_max_input_chars: 60000
+  critic_max_input_chars: 60000
 kg_interaction:
   enabled: true
   enabled_operators:
@@ -123,7 +127,7 @@ kg_interaction:
     - MutationEffectEstimate
     - HAS_EPISTASIS_ESTIMATE
   truncation_audit_sample_rows: 3
-  max_tool_calls: 12
+  max_tool_calls: 15
   max_rows: 24
   use_counterevidence: true
   stop_when_sufficient: false

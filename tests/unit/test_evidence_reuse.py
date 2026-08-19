@@ -46,6 +46,29 @@ def test_flatten_evidence_uses_fixed_limit_not_pool_times_channels():
     assert len(flattened) == 120
 
 
+def test_flatten_evidence_prioritizes_available_records() -> None:
+    class _Evidence:
+        def __init__(self, evidence_id: str, quality_status: str) -> None:
+            self.evidence_id = evidence_id
+            self.channel = "kg"
+            self.quality_status = quality_status
+            self.contributes_to_selection = False
+            self.confidence = 1.0
+            self.score = 1.0
+
+    flattened = _flatten_evidence(
+        {
+            "v1": [
+                _Evidence("ev:unavailable", "unavailable"),
+                _Evidence("ev:available", "ok"),
+            ]
+        },
+        limit=1,
+    )
+
+    assert [item.evidence_id for item in flattened] == ["ev:available"]
+
+
 def test_orchestrator_scores_static_channels_only_on_observed_and_selected(
     config_factory, monkeypatch
 ):

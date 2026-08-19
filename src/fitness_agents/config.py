@@ -1017,7 +1017,7 @@ class KGInteractionRuntimeConfig:
         "query_local_knowledge",
         "query_structured_claims",
     )
-    max_tool_calls: int = 3
+    max_tool_calls: int = 4
     max_rows: int = 12
     use_counterevidence: bool = True
     stop_when_sufficient: bool = False
@@ -1027,6 +1027,43 @@ class KGInteractionRuntimeConfig:
     truncation_audit_enabled: bool = False
     truncation_audit_items: tuple[str, ...] = ()
     truncation_audit_sample_rows: int = 3
+
+    def required_tool_calls(
+        self,
+        *,
+        include_rag: bool,
+        representative_count: int = 2,
+    ) -> int:
+        """Return the maximum executable calls in the runtime's deterministic plan."""
+
+        operators = set(self.enabled_operators)
+        representatives = max(0, min(2, int(representative_count)))
+        feature_variants = min(representatives, self.feature_variant_limit)
+        count = int("hypothesis_context" in operators)
+        count += int(representatives >= 1 and "query_assay_association" in operators)
+        channel_operators = {
+            "physchem": "query_physchem_delta",
+            "conservation": "query_evolutionary_profile",
+            "structure": "query_structure_environment",
+        }
+        if self.feature_tool_strategy in {"independent", "independent_and_joint"}:
+            count += feature_variants * sum(
+                channel_operators[channel] in operators for channel in self.feature_channels
+            )
+        if (
+            self.feature_tool_strategy in {"joint", "independent_and_joint"}
+            and "query_feature_bundle" in operators
+        ):
+            count += feature_variants
+        if include_rag:
+            count += int("query_local_knowledge" in operators)
+            count += int("query_structured_claims" in operators)
+        count += int(
+            self.truncation_audit_enabled and "query_kg_truncation_audit" in operators
+        )
+        count += int(representatives >= 1 and "explain_variant" in operators)
+        count += int(representatives >= 2 and "compare_variants" in operators)
+        return count
 
     def __post_init__(self) -> None:
         if self.max_tool_calls < 1 or self.max_rows < 1:
@@ -1215,6 +1252,9 @@ class HierarchicalHypothesisConfig:
     child_max_tokens: int = 4096
     child_critic_max_tokens: int = 2048
     main_critic_max_tokens: int = 4096
+    main_max_input_chars: int | None = None
+    child_max_input_chars: int | None = None
+    critic_max_input_chars: int | None = None
 
     def __post_init__(self) -> None:
         allowed = {"physchem", "conservation", "structure"}
@@ -1235,6 +1275,13 @@ class HierarchicalHypothesisConfig:
             self.main_critic_max_tokens,
         ) < 512:
             raise ValueError("hierarchical role token budgets must be at least 512")
+        input_budgets = (
+            self.main_max_input_chars,
+            self.child_max_input_chars,
+            self.critic_max_input_chars,
+        )
+        if any(value is not None and value < 4096 for value in input_budgets):
+            raise ValueError("hierarchical role input budgets must be at least 4096")
 
 
 @dataclass
@@ -1273,6 +1320,7 @@ class ExperimentConfig:
     # applied in the campaign loop and would change selection independently of Agent-UQ.
     evidence_prefilter_limit: int = 5000
     kg_ingest_evidence_limit: int = 120
+    scientist_prompt_evidence_limit: int = 48
     structured_kg_snapshot_mode: str = "live_only"
 
     def __post_init__(self) -> None:
@@ -1294,6 +1342,28 @@ class ExperimentConfig:
                 )
         if self.kg_ingest_evidence_limit < 1:
             raise ValueError("kg_ingest_evidence_limit must be positive")
+        if self.scientist_prompt_evidence_limit < 1:
+            raise ValueError("scientist_prompt_evidence_limit must be positive")
+        if (
+            self.knowledge_enabled
+            and self.knowledge.kg
+            and self.kg_interaction.enabled
+            and self.designer.space != "open_design"
+        ):
+            include_rag = bool(
+                self.knowledge.local_knowledge.enabled
+                and (
+                    self.knowledge.local_knowledge.allow_remote_context
+                    or self.llm.provider == "mock"
+                )
+            )
+            required_calls = self.kg_interaction.required_tool_calls(include_rag=include_rag)
+            if self.kg_interaction.max_tool_calls < required_calls:
+                raise ValueError(
+                    "kg_interaction.max_tool_calls is below the complete runtime plan; "
+                    f"configured={self.kg_interaction.max_tool_calls}, required={required_calls}, "
+                    f"include_rag={include_rag}"
+                )
         if self.structured_kg_snapshot_mode not in {"live_only", "incremental_ids"}:
             raise ValueError(
                 "structured_kg_snapshot_mode must be 'live_only' or 'incremental_ids'"
@@ -1677,6 +1747,7 @@ def load_experiment_config(
         condition=str(raw.get("condition") or raw.get("run_label") or raw["mode"]),
         evidence_prefilter_limit=int(raw.get("evidence_prefilter_limit", 5000)),
         kg_ingest_evidence_limit=int(raw.get("kg_ingest_evidence_limit", 120)),
+        scientist_prompt_evidence_limit=int(raw.get("scientist_prompt_evidence_limit", 48)),
         structured_kg_snapshot_mode=str(
             raw.get("structured_kg_snapshot_mode", "live_only")
         ),

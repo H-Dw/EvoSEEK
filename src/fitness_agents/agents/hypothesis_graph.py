@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextvars import copy_context
 from dataclasses import replace
 from typing import Any
 
@@ -24,9 +25,30 @@ from .context_projection import (
     KGContextPartitioner,
     canonical_sha256,
 )
+from .remote_llm import completion_receipt_snapshot, reset_completion_receipt
 from .subscientist import validate_channel_hypothesis
 
 MainProposer = Callable[..., Hypothesis]
+
+
+def _failure_fields(
+    error: Exception,
+    *,
+    completion: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    completion = completion or {}
+    return {
+        "error_code": str(
+            getattr(error, "error_code", f"{type(error).__name__}: {str(error)[:240]}")
+        ),
+        "input_chars": getattr(error, "input_chars", completion.get("input_chars")),
+        "failure_category": getattr(
+            error, "failure_category", completion.get("failure_category") or "runtime"
+        ),
+        "request_started": bool(
+            getattr(error, "request_started", completion.get("request_started", False))
+        ),
+    }
 
 
 def _conflicts(
@@ -145,6 +167,7 @@ class HypothesisReviewGraph:
         )
         retry_control = None
         last_code = "CHILD_REVIEW_EXHAUSTED"
+        last_completion: dict[str, Any] = {}
         for attempt in range(self.max_child_revision_attempts + 1):
             context = self.partitioner.child_context(
                 base_context=base_context,
@@ -154,7 +177,9 @@ class HypothesisReviewGraph:
                 retry_control=retry_control,
             )
             try:
+                reset_completion_receipt()
                 hypothesis = self.child_scientists[channel].propose(context=context)
+                last_completion = completion_receipt_snapshot()
                 validate_channel_hypothesis(
                     hypothesis.model_dump(mode="json"), context=context
                 )
@@ -166,7 +191,10 @@ class HypothesisReviewGraph:
                     channel=channel,
                     status="FAILED",
                     attempts=attempt + 1,
-                    error_code=f"{type(error).__name__}: {str(error)[:240]}",
+                    **_failure_fields(
+                        error,
+                        completion=completion_receipt_snapshot() or last_completion,
+                    ),
                 )
             output_hash = canonical_sha256(hypothesis.model_dump(mode="json"))
             if review.verdict == "APPROVE":
@@ -182,6 +210,9 @@ class HypothesisReviewGraph:
                     channel=channel,
                     status="SUCCEEDED",
                     attempts=attempt + 1,
+                    input_chars=last_completion.get("input_chars"),
+                    failure_category=last_completion.get("failure_category"),
+                    request_started=bool(last_completion.get("request_started", False)),
                     approved=approved,
                 )
             if review.verdict == "REJECT":
@@ -204,6 +235,9 @@ class HypothesisReviewGraph:
             status="FAILED",
             attempts=self.max_child_revision_attempts + 1,
             error_code=last_code,
+            input_chars=last_completion.get("input_chars"),
+            failure_category="review",
+            request_started=bool(last_completion.get("request_started", False)),
         )
 
     def run(
@@ -231,6 +265,7 @@ class HypothesisReviewGraph:
         with ThreadPoolExecutor(max_workers=self.max_parallel_branches) as executor:
             future_channel = {
                 executor.submit(
+                    copy_context().run,
                     self._run_branch,
                     channel=channel,
                     base_context=context,
@@ -249,10 +284,7 @@ class HypothesisReviewGraph:
                             channel=channel,
                             status="FAILED",
                             attempts=0,
-                            error_code=(
-                                f"BRANCH_RUNTIME_FAILED:{type(error).__name__}:"
-                                f"{str(error)[:240]}"
-                            ),
+                            **_failure_fields(error),
                         )
                     )
         receipts.sort(key=lambda item: FEATURE_CHANNELS.index(item.channel))

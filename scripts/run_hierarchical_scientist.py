@@ -237,10 +237,18 @@ def _local_knowledge_for_spec(
     )
 
 
-def required_tool_calls(spec: ConditionSpec, *, variant_limit: int) -> int:
+def required_tool_calls(
+    spec: ConditionSpec,
+    *,
+    variant_limit: int,
+    feature_tool_strategy: str = "independent_and_joint",
+) -> int:
     count = 2  # hypothesis_context + query_assay_association
     if spec.channels:
-        count += max(1, variant_limit)
+        if feature_tool_strategy in {"independent", "independent_and_joint"}:
+            count += len(spec.channels) * max(1, variant_limit)
+        if feature_tool_strategy in {"joint", "independent_and_joint"}:
+            count += max(1, variant_limit)
     count += 1  # truncation audit
     if spec.rag:
         count += 2  # query_local_knowledge + query_structured_claims
@@ -262,6 +270,14 @@ def _interaction_for_spec(config: Any, spec: ConditionSpec) -> Any:
             enabled_operators=operators,
             feature_tool_strategy=config.kg_interaction.feature_tool_strategy,
             feature_channels=spec.channels,
+            max_tool_calls=max(
+                config.kg_interaction.max_tool_calls,
+                required_tool_calls(
+                    spec,
+                    variant_limit=config.kg_interaction.feature_variant_limit,
+                    feature_tool_strategy=config.kg_interaction.feature_tool_strategy,
+                ),
+            ),
         )
     operators = [
         "hypothesis_context",

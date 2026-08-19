@@ -196,6 +196,9 @@ class BranchReceipt(BaseModel):
     status: Literal["SUCCEEDED", "FAILED", "SKIPPED_UNAVAILABLE"]
     attempts: int = Field(ge=0)
     error_code: str | None = None
+    input_chars: int | None = Field(default=None, ge=0)
+    failure_category: str | None = None
+    request_started: bool = False
     approved: ApprovedSubHypothesis | None = None
 
 

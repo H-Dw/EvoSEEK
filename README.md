@@ -15,29 +15,189 @@ predictor 仍是数值预测组件，Agent 则基于图谱查询结果生成和�
 one-hot 加性/成对上位性特征 + bootstrap Ridge + ExtraTrees 异质集成，并输出校准区间、
 epistemic uncertainty 和 OOD 分数。
 
-## 1. Linux 快速开始
+## 1. Linux 本地环境配置
 
-要求：Linux、Python 3.10–3.13、`curl`、`sha256sum`。推荐 Python 3.11。
+本节说明如何在 Linux 上从源码部署并运行本仓库脚本。GitHub Actions 在 Ubuntu 24.04 上测试
+Python 3.10–3.13；Debian/Ubuntu 可直接按下面的 `apt` 步骤操作。推荐 Python 3.11。
+
+不需要 GPU 即可运行默认 CPU ensemble、单元测试和 mock LLM 路径。默认 `run_demo.py`
+（DeepSeek + Kermut）还需要第 1.6 节的可选 extras、第 1.7 节的 `.env`，以及第 2、3、9 节的
+数据与模型资源。
+
+### 1.1 系统要求
+
+| 项目 | 要求 |
+|---|---|
+| 操作系统 | Linux（推荐 Ubuntu 22.04/24.04 或同等发行版） |
+| Python | 3.10–3.13，推荐 3.11 |
+| 系统工具 | `git`、`curl`、`sha256sum`、`python3-venv` |
+| 编译工具 | `build-essential` 与 `python3-dev`（缺少预编译 wheel 时需要） |
+| 磁盘 | 代码本身很小；完整 GB1 landscape、ESM-2 650M 与本地 RAG 模型会各占数 GB |
+
+### 1.2 安装系统软件包
+
+Debian / Ubuntu：
+
+```bash
+sudo apt-get update
+sudo apt-get install -y \
+  git curl ca-certificates \
+  python3 python3-venv python3-pip python3-dev \
+  build-essential
+python3 --version   # 应为 3.10–3.13
+```
+
+若系统默认 Python 不在 3.10–3.13，请安装对应版本（例如 `python3.11`），并用
+`PYTHON_BIN=python3.11` 调用第 1.4 节的安装脚本。
+
+Fedora / RHEL：
+
+```bash
+sudo dnf install -y git curl ca-certificates python3 python3-pip python3-devel gcc gcc-c++ make
+```
+
+### 1.3 克隆仓库
 
 ```bash
 git clone <your-repository-url> fitness-agents
 cd fitness-agents
+```
+
+### 1.4 创建虚拟环境并安装 Python 依赖（推荐）
+
+一键创建 `.venv`、安装开发依赖并自检：
+
+```bash
 bash scripts/setup_linux.sh dev
 source .venv/bin/activate
 ```
 
-也可使用 Conda：
+`scripts/setup_linux.sh` 会在仓库根目录创建 `.venv`，升级 pip，按 profile 安装依赖，然后运行
+`scripts/check_environment.py`。可用 profile：
+
+| Profile | 安装内容 | 适用场景 |
+|---|---|---|
+| `base` | 核心运行时（numpy / pandas / scikit-learn / scipy / PyYAML / pydantic） | 仅跑 CPU ensemble 与 mock LLM |
+| `dev`（默认） | `base` + pytest、ruff | 本地开发、CI、单元测试 |
+| `llm` | `dev` + `openai` | 调用 DeepSeek 或 OpenAI 兼容的远程 Scientist / Critic |
+
+指定解释器：
+
+```bash
+PYTHON_BIN=python3.11 bash scripts/setup_linux.sh llm
+source .venv/bin/activate
+```
+
+等价的手动步骤：
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e ".[dev]"
+python scripts/check_environment.py
+```
+
+也可用 Make：`make setup`（等同 `dev` profile）。
+
+每次新开 shell 都需要重新激活：
+
+```bash
+cd /path/to/fitness-agents
+source .venv/bin/activate
+```
+
+激活后，下文所有 `python` / `pip` 命令都使用该虚拟环境。未激活时可显式调用
+`.venv/bin/python`。
+
+### 1.5 使用 Conda（可选）
 
 ```bash
 conda env create -f environment.yml
 conda activate fitness-agents
+python scripts/check_environment.py
 ```
 
-检查环境：
+`environment.yml` 固定 Python 3.11，并安装核心依赖与可编辑包。远程 LLM、RAG、Kermut、UI
+仍需在激活后按第 1.6 节补装 extras。
+
+### 1.6 按用途安装可选 extras
+
+核心环境不强制安装 PyTorch。按实际要跑的脚本再装：
+
+```bash
+source .venv/bin/activate
+
+# 远程 Scientist / Critic（DeepSeek 等 OpenAI 兼容 API）
+python -m pip install -e ".[llm]"
+
+# 本地 RAG 向量检索（sentence-transformers）
+python -m pip install -e ".[rag]"
+
+# 科学文档解析入库
+python -m pip install -e ".[rag-docs]"
+
+# Kermut / ESM-2 fitness 后端（会安装 PyTorch、GPyTorch、fair-esm）
+python -m pip install -e ".[kermut]"
+
+# 本地 Gradio 交互界面
+python -m pip install -e ".[ui]"
+```
+
+常用组合可以一次装齐：
+
+```bash
+python -m pip install -e ".[dev,llm,rag]"
+```
+
+Kermut 默认走 CPU。若要用 GPU，应先安装与本机 CUDA 匹配的 PyTorch，再装其余 kermut 依赖；
+配置见第 9.1 节。
+
+### 1.7 配置密钥（`.env`）
+
+密钥**不要**写入 YAML，也不要提交到 git。在仓库根目录创建 `.env`（已列入 `.gitignore`）：
+
+```bash
+cat > .env <<'EOF'
+# Scientist / Critic（默认 DeepSeek V4）
+DEEPSEEK_API_KEY='sk-...'
+
+# 若使用阿里云 DashScope / Qwen embedding 与 reranker，取消下一行注释
+# DASHSCOPE_API_KEY='sk-...'
+EOF
+```
+
+运行时会读取项目根目录 `.env`，且**不会覆盖**已经存在的进程环境变量。默认
+`llm_agent` / `knowledge_agent*` 实验使用 `api_key: env:DEEPSEEK_API_KEY`。也可用
+`FITNESS_AGENTS_LLM_API_KEY` 或 `OPENAI_API_KEY` 作为通用覆盖。
+
+离线复现不需要密钥：把实验 YAML 改回 `llm_provider: mock`（见第 10 节），或先跑单元测试。
+
+常用环境变量：
+
+| 变量 | 作用 |
+|---|---|
+| `DEEPSEEK_API_KEY` | 默认 Scientist / Critic 密钥 |
+| `DASHSCOPE_API_KEY` | Qwen embedding / reranker |
+| `FITNESS_AGENTS_LLM_API_KEY` | 通用 LLM 密钥覆盖 |
+| `FITNESS_AGENTS_LLM_BASE_URL` / `OPENAI_BASE_URL` / `DEEPSEEK_BASE_URL` | API 网关 |
+| `FITNESS_AGENTS_LOG_LEVEL` | 进度日志级别（默认 `INFO`） |
+| `FITNESS_AGENTS_FORCE_DOWNLOAD` | 设为 `1` 时强制重新下载数据压缩包 |
+
+### 1.8 检查环境是否就绪
 
 ```bash
 python scripts/check_environment.py
+python -c "import fitness_agents; print('import ok')"
+python -m pytest tests/unit -q
 ```
+
+`check_environment.py` 会打印 Python 版本、平台和核心包版本。单元测试不需要 API 密钥，
+也不依赖外部数据下载。
+
+Docker 替代方案见第 12 节。数据与模型资产仍按第 2、3 节准备；准备完成后可用第 4 节的
+demo 命令做端到端验证。默认 `python scripts/run_demo.py` 需要 `[llm]`、`[kermut]`、
+`.env` 中的 `DEEPSEEK_API_KEY`，以及 Kermut 的条件概率/坐标文件（第 9.2 节）。
 
 ## 2. 数据下载与准备
 
@@ -280,22 +440,22 @@ python scripts/run_demo.py --config configs/experiments/fitness_direct.yaml --se
 `artifacts/local_knowledge/overlays/gb1.sqlite`，不会把目标状态写回通用向量库。首次运行前显式
 安装依赖并下载固定 revision；campaign runtime 不联网：
 
-```powershell
-.\.venv\Scripts\python.exe -m pip install -e ".[rag]"
-.\.venv\Scripts\python.exe scripts\setup_local_rag_models.py --model bge-small-en-v1.5
-.\.venv\Scripts\python.exe -m fitness_agents.cli knowledge index `
-  configs\experiments\knowledge_agent.yaml
-.\.venv\Scripts\python.exe -m fitness_agents.cli knowledge inspect `
-  configs\experiments\knowledge_agent.yaml
+```bash
+python -m pip install -e ".[rag]"
+python scripts/setup_local_rag_models.py --model bge-small-en-v1.5
+python -m fitness_agents.cli knowledge index \
+  configs/experiments/knowledge_agent.yaml
+python -m fitness_agents.cli knowledge inspect \
+  configs/experiments/knowledge_agent.yaml
 
-.\.venv\Scripts\python.exe scripts\rag_diagnostics\simulate_local_rag_to_kg.py `
-  --embedding-model models\embeddings\bge-small-en-v1.5 `
-  --output-dir artifacts\rag-diagnostics\manual-run `
+python scripts/rag_diagnostics/simulate_local_rag_to_kg.py \
+  --embedding-model models/embeddings/bge-small-en-v1.5 \
+  --output-dir artifacts/rag-diagnostics/manual-run \
   --strict
 
-$env:FITNESS_RAG_TEST_MODEL = (Resolve-Path models\embeddings\bge-small-en-v1.5)
-.\.venv\Scripts\python.exe -m pytest -q `
-  tests\integration\test_local_rag_real_embedding_to_kg.py
+export FITNESS_RAG_TEST_MODEL="$(pwd)/models/embeddings/bge-small-en-v1.5"
+python -m pytest -q \
+  tests/integration/test_local_rag_real_embedding_to_kg.py
 ```
 
 诊断会输出 `diagnostic.json`、`summary.md`、真实向量 SQLite 和 structured KG SQLite，并比较
@@ -305,11 +465,11 @@ embedding 覆盖率、no-answer 阈值以及从既有 lexical 索引启用 dense
 
 新增外部知识时使用项目 skill 并执行 bundle 校验：
 
-```powershell
-.\.venv\Scripts\python.exe `
-  skills\ingest-scientific-knowledge\scripts\validate_knowledge_bundle.py `
-  resources\local_knowledge\directed_evolution `
-  --embedding-model models\embeddings\bge-small-en-v1.5
+```bash
+python \
+  skills/ingest-scientific-knowledge/scripts/validate_knowledge_bundle.py \
+  resources/local_knowledge/directed_evolution \
+  --embedding-model models/embeddings/bge-small-en-v1.5
 ```
 
 检索 chunk 只生成 `context:<protein>` 的非排序上下文。若以后开启
@@ -324,23 +484,23 @@ embedding 覆盖率、no-answer 阈值以及从既有 lexical 索引启用 dense
 示例，均位于 `configs/knowledge/api/`。先复制示例、替换 endpoint 中的 workspace/host，
 再通过环境变量提供密钥：
 
-```powershell
-$env:DASHSCOPE_API_KEY = "<YOUR_API_KEY>"
+```bash
+export DASHSCOPE_API_KEY="<YOUR_API_KEY>"
 
-.\.venv\Scripts\python.exe scripts\rag_api_embeddings.py probe `
-  --embedding-config configs\knowledge\api\embedding.default-qwen.example.yaml `
-  --prompt "How does epistasis constrain combinatorial mutation design?" `
+python scripts/rag_api_embeddings.py probe \
+  --embedding-config configs/knowledge/api/embedding.default-qwen.example.yaml \
+  --prompt "How does epistasis constrain combinatorial mutation design?" \
   --document "Epistatic effects make mutation outcomes depend on genetic background."
 
-.\.venv\Scripts\python.exe scripts\rag_api_embeddings.py index `
-  --experiment-config configs\experiments\knowledge_agent.yaml `
-  --embedding-config configs\knowledge\api\embedding.default-qwen.example.yaml `
-  --index-path artifacts\local_knowledge\corpus\directed_evolution-qwen-v4.sqlite
+python scripts/rag_api_embeddings.py index \
+  --experiment-config configs/experiments/knowledge_agent.yaml \
+  --embedding-config configs/knowledge/api/embedding.default-qwen.example.yaml \
+  --index-path artifacts/local_knowledge/corpus/directed_evolution-qwen-v4.sqlite
 ```
 
 `probe` 分别调用 query/document 编码，并只输出向量维度、范数、哈希与八维预览；`index`
 复用生产解析、原子 chunk、manifest 和 SQLite 写入流程。若需要重排，在两个命令中增加
-`--reranker-config configs\knowledge\api\reranker.qwen3.example.yaml`。默认 20 条原子事实
+`--reranker-config configs/knowledge/api/reranker.qwen3.example.yaml`。默认 20 条原子事实
 语料仍不启用 reranker；先用项目查询集校准 Recall@K、MRR/nDCG、no-answer 和阈值，再决定上线。
 
 若希望 campaign 直接使用 API，在 knowledge YAML 的 `retrieval` 中配置：
@@ -729,8 +889,8 @@ python scripts/run_reasoning_routes.py \
   --max-parallel 2
 ```
 
-Windows PowerShell 使用仓库虚拟环境时，将上面的 `python` 换为
-`.venv\Scripts\python.exe`。DeepSeek key 只通过 `DEEPSEEK_API_KEY` 环境变量提供。
+Linux 已 `source .venv/bin/activate` 后直接使用 `python`。Windows PowerShell 使用仓库虚拟环境时，
+将 `python` 换为 `.\.venv\Scripts\python.exe`。DeepSeek key 只通过 `DEEPSEEK_API_KEY` 环境变量提供。
 
 调度器不仅检查进程退出码，还逐折审计：effective config、provider ready/disabled 状态、
 `evidence_contract.json` 的通道集合、`structured_kg.sqlite`、`kg_interaction.json`、RAG 产物、

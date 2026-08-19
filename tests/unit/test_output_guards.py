@@ -4,13 +4,19 @@ import json
 import sys
 from types import SimpleNamespace
 
+import pytest
+
 from fitness_agents.agents.output_guards import (
     UnknownEvidenceIdsError,
     classify_output_failure,
     json_salvage,
     retry_instruction,
 )
-from fitness_agents.agents.remote_llm import complete_json, create_openai_client
+from fitness_agents.agents.remote_llm import (
+    RemoteLLMCompletionError,
+    complete_json,
+    create_openai_client,
+)
 
 
 class _ScriptedClient:
@@ -162,7 +168,7 @@ class _FailingClient(_ScriptedClient):
 
 
 def test_non_retryable_http_error_fails_after_one_external_request() -> None:
-    client = _FailingClient([_HTTPError(401)], [('{"ok": true}', "stop")])
+    client = _FailingClient([_HTTPError(403)], [('{"ok": true}', "stop")])
     try:
         complete_json(
             client=client,
@@ -173,8 +179,12 @@ def test_non_retryable_http_error_fails_after_one_external_request() -> None:
         )
     except RuntimeError as error:
         assert isinstance(error.__cause__, _HTTPError)
+        assert isinstance(error, RemoteLLMCompletionError)
+        assert error.error_code == "HTTP_403"
+        assert error.failure_category == "transport"
+        assert error.request_started is True
     else:
-        raise AssertionError("401 must fail closed")
+        raise AssertionError("403 must fail closed")
     assert len(client.calls) == 1
 
 
@@ -262,9 +272,35 @@ def test_prompt_preflight_budget_fails_before_external_request() -> None:
         )
     except RuntimeError as error:
         assert "prompt" in str(error.__cause__).lower()
+        assert isinstance(error, RemoteLLMCompletionError)
+        assert error.error_code == "PROMPT_BUDGET_EXCEEDED"
+        assert error.failure_category == "budget"
+        assert error.input_chars == 101
+        assert error.request_started is False
     else:
         raise AssertionError("oversized prompt must fail preflight")
     assert client.calls == []
+
+
+def test_schema_failure_keeps_structured_terminal_code() -> None:
+    client = _ScriptedClient([('{"ok": true}', "stop")])
+
+    def reject_schema(payload: dict) -> dict:
+        del payload
+        raise ValueError("schema mismatch")
+
+    with pytest.raises(RemoteLLMCompletionError) as captured:
+        complete_json(
+            client=client,
+            model="unit-test-model",
+            messages=[{"role": "user", "content": "json"}],
+            output_retries=0,
+            validator=reject_schema,
+        )
+
+    assert captured.value.error_code == "OUTPUT_SCHEMA_INVALID"
+    assert captured.value.failure_category == "output"
+    assert captured.value.request_started is True
 
 
 def test_complete_json_retry_mentions_json_decode_position() -> None:

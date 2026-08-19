@@ -73,11 +73,195 @@ _PROMPT_FEATURE_KEYS = (
     "knowledge_type",
 )
 
+_PROMPT_STRING_MAX_CHARS = 1200
+_PROMPT_COLLECTION_MAX_ITEMS = 24
+_PROMPT_MAPPING_MAX_ITEMS = 32
+_PROMPT_PACK_FIELD_ROW_LIMITS = {
+    "facts": 12,
+    "predictions": 8,
+    "evidence": 12,
+    "supporting_paths": 8,
+    "counterevidence": 8,
+    "directional_signals": 8,
+    "caveats": 8,
+    "provenance": 12,
+}
+_PROMPT_PACK_FIELD_CHAR_LIMITS = {
+    "facts": 12000,
+    "predictions": 8000,
+    "evidence": 12000,
+    "supporting_paths": 8000,
+    "counterevidence": 8000,
+    "directional_signals": 8000,
+    "caveats": 4000,
+    "provenance": 6000,
+}
+_PROMPT_PACK_METADATA_MAX_CHARS = 4000
+
+
+def _bounded_prompt_value(value: Any, *, depth: int = 0) -> Any:
+    if isinstance(value, str):
+        return (
+            value
+            if len(value) <= _PROMPT_STRING_MAX_CHARS
+            else value[:_PROMPT_STRING_MAX_CHARS] + "...[truncated]"
+        )
+    if depth >= 5:
+        return str(value)[:_PROMPT_STRING_MAX_CHARS]
+    if isinstance(value, dict):
+        items = list(value.items())[:_PROMPT_MAPPING_MAX_ITEMS]
+        return {
+            str(key): _bounded_prompt_value(item, depth=depth + 1)
+            for key, item in items
+        }
+    if isinstance(value, (list, tuple, set)):
+        return [
+            _bounded_prompt_value(item, depth=depth + 1)
+            for item in list(value)[:_PROMPT_COLLECTION_MAX_ITEMS]
+        ]
+    return value
+
+
+def _prompt_row_identities(value: Any) -> tuple[tuple[str, str], ...]:
+    if not isinstance(value, dict):
+        return ()
+    return tuple(
+        (key, str(value[key]))
+        for key in ("evidence_id", "claim_id")
+        if value.get(key)
+    )
+
+
+def _fallback_prompt_row(value: Any) -> Any:
+    if not isinstance(value, dict):
+        return _bounded_prompt_value(value)
+    keep = (
+        "evidence_id",
+        "claim_id",
+        "channel",
+        "fact_type",
+        "statement",
+        "summary",
+        "quality_status",
+        "score",
+        "confidence",
+        "source_id",
+        "warnings",
+    )
+    return {
+        key: _bounded_prompt_value(value[key], depth=1)
+        for key in keep
+        if key in value
+    }
+
+
+def _fit_prompt_value_to_chars(value: Any, *, char_limit: int) -> Any:
+    """Keep a bounded prefix whose serialized representation fits the field budget."""
+
+    bounded = _bounded_prompt_value(value)
+    if len(json.dumps(bounded, ensure_ascii=False, default=str)) <= char_limit:
+        return bounded
+    if isinstance(bounded, dict):
+        output: dict[str, Any] = {}
+        for key, item in bounded.items():
+            candidate = {**output, key: item}
+            if len(json.dumps(candidate, ensure_ascii=False, default=str)) > char_limit:
+                continue
+            output[key] = item
+        return output
+    if isinstance(bounded, list):
+        output_list: list[Any] = []
+        for item in bounded:
+            candidate = [*output_list, item]
+            if len(json.dumps(candidate, ensure_ascii=False, default=str)) > char_limit:
+                continue
+            output_list.append(item)
+        return output_list
+    text = str(bounded)
+    return text[: max(0, char_limit - 2)]
+
+
+def _compact_pack_field(
+    values: Any,
+    *,
+    field_name: str,
+    seen_identities: set[tuple[str, str]],
+) -> list[Any]:
+    if not isinstance(values, (list, tuple)):
+        return []
+    row_limit = _PROMPT_PACK_FIELD_ROW_LIMITS[field_name]
+    char_limit = _PROMPT_PACK_FIELD_CHAR_LIMITS[field_name]
+    output: list[Any] = []
+    seen_rows: set[str] = set()
+    used_chars = 0
+    for raw in values:
+        identities = _prompt_row_identities(raw)
+        if field_name != "provenance" and any(item in seen_identities for item in identities):
+            continue
+        compact = (
+            _compact_prompt_evidence(raw)
+            if field_name == "evidence" and isinstance(raw, dict)
+            else (
+                {
+                    **{
+                        key: _bounded_prompt_value(raw[key])
+                        for key in ("evidence_id", "source_id")
+                        if key in raw
+                    },
+                    **_compact_prompt_provenance(raw),
+                }
+                if field_name == "provenance" and isinstance(raw, dict)
+                else _bounded_prompt_value(raw)
+            )
+        )
+        encoded = json.dumps(compact, ensure_ascii=False, sort_keys=True, default=str)
+        identity = encoded if not identities else "|".join(f"{key}:{value}" for key, value in identities)
+        if identity in seen_rows:
+            continue
+        if len(encoded) > char_limit - used_chars:
+            compact = _fallback_prompt_row(raw)
+            encoded = json.dumps(compact, ensure_ascii=False, sort_keys=True, default=str)
+        if not compact or used_chars + len(encoded) > char_limit:
+            continue
+        output.append(compact)
+        used_chars += len(encoded)
+        seen_rows.add(identity)
+        if field_name != "provenance":
+            seen_identities.update(identities)
+        if len(output) >= row_limit:
+            break
+    return output
+
+
+def _compact_prompt_pack(
+    raw_pack: dict[str, Any],
+    *,
+    seen_identities: set[tuple[str, str]] | None = None,
+) -> dict[str, Any]:
+    seen = seen_identities if seen_identities is not None else set()
+    output = {
+        key: _bounded_prompt_value(raw_pack[key])
+        for key in ("query_id", "operator", "as_of_round")
+        if key in raw_pack
+    }
+    for field_name in _PROMPT_PACK_FIELD_ROW_LIMITS:
+        output[field_name] = _compact_pack_field(
+            raw_pack.get(field_name, ()), field_name=field_name, seen_identities=seen
+        )
+    output["metadata"] = _fit_prompt_value_to_chars(
+        raw_pack.get("metadata", {}), char_limit=_PROMPT_PACK_METADATA_MAX_CHARS
+    )
+    return output
+
 
 def _compact_prompt_provenance(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {}
-    return {key: value[key] for key in _PROMPT_PROVENANCE_KEYS if key in value}
+    return {
+        key: _bounded_prompt_value(value[key])
+        for key in _PROMPT_PROVENANCE_KEYS
+        if key in value
+    }
 
 
 def _compact_prompt_evidence(value: Evidence | dict[str, Any]) -> dict[str, Any]:
@@ -104,11 +288,11 @@ def _compact_prompt_evidence(value: Evidence | dict[str, Any]) -> dict[str, Any]
         "artifact_uri",
         "artifact_span",
     )
-    output = {key: raw[key] for key in keep if key in raw}
+    output = {key: _bounded_prompt_value(raw[key]) for key in keep if key in raw}
     raw_features = raw.get("raw_features")
     if isinstance(raw_features, dict):
         output["raw_features"] = {
-            key: raw_features[key]
+            key: _bounded_prompt_value(raw_features[key])
             for key in _PROMPT_FEATURE_KEYS
             if key in raw_features
         }
@@ -116,32 +300,22 @@ def _compact_prompt_evidence(value: Evidence | dict[str, Any]) -> dict[str, Any]
     return output
 
 
-def _compact_scientist_context(context: dict[str, Any]) -> dict[str, Any]:
+def _compact_scientist_context(
+    context: dict[str, Any],
+    *,
+    seen_identities: set[tuple[str, str]] | None = None,
+) -> dict[str, Any]:
     output = dict(context)
     interaction = output.get("kg_interaction")
     if not isinstance(interaction, dict):
         return output
     compact_interaction = dict(interaction)
     compact_packs = []
+    seen = seen_identities if seen_identities is not None else set()
     for raw_pack in interaction.get("packs", ()):
         if not isinstance(raw_pack, dict):
             continue
-        pack = dict(raw_pack)
-        pack["evidence"] = [
-            _compact_prompt_evidence(item)
-            for item in raw_pack.get("evidence", ())
-            if isinstance(item, dict)
-        ]
-        pack["provenance"] = [
-            {
-                key: item[key]
-                for key in ("evidence_id", "source_id", *_PROMPT_PROVENANCE_KEYS)
-                if key in item
-            }
-            for item in raw_pack.get("provenance", ())
-            if isinstance(item, dict)
-        ]
-        compact_packs.append(pack)
+        compact_packs.append(_compact_prompt_pack(raw_pack, seen_identities=seen))
     compact_interaction["packs"] = compact_packs
     output["kg_interaction"] = compact_interaction
     return output
@@ -156,10 +330,19 @@ def build_scientist_hypothesis_messages(
 ) -> list[dict[str, str]]:
     """Build the exact system/user messages used by the remote Scientist client."""
 
+    seen_identities: set[tuple[str, str]] = set()
+    evidence_payload = []
+    for entry in evidence:
+        compact = _compact_prompt_evidence(entry)
+        identities = _prompt_row_identities(compact)
+        if any(item in seen_identities for item in identities):
+            continue
+        evidence_payload.append(compact)
+        seen_identities.update(identities)
     context = _compact_scientist_context(
-        ScientistContextInput.model_validate(sanitized_context).model_dump(mode="json")
+        ScientistContextInput.model_validate(sanitized_context).model_dump(mode="json"),
+        seen_identities=seen_identities,
     )
-    evidence_payload = [_compact_prompt_evidence(entry) for entry in evidence]
     return [
         {
             "role": "system",

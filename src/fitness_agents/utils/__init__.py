@@ -8,6 +8,7 @@ from .progress import (
     emit_batch_progress,
     heartbeat,
     report_event,
+    report_prompt_budget,
     reset_progress,
 )
 from .randomness import seed_everything
@@ -22,6 +23,7 @@ __all__ = [
     "emit_batch_progress",
     "heartbeat",
     "report_event",
+    "report_prompt_budget",
     "reset_progress",
     "seed_everything",
 ]

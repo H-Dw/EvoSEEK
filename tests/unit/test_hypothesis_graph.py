@@ -5,6 +5,7 @@ from threading import Barrier
 from fitness_agents.agents.context_projection import KGContextPartitioner
 from fitness_agents.agents.hypothesis_graph import HypothesisReviewGraph
 from fitness_agents.agents.main_hypothesis_critic import RuleBasedMainHypothesisCritic
+from fitness_agents.agents.remote_llm import RemoteLLMCompletionError, complete_json
 from fitness_agents.agents.subcritic import RuleBasedSubCritic
 from fitness_agents.contracts.agent_io import ScientistContextInput
 from fitness_agents.contracts.hypothesis_pipeline import (
@@ -14,6 +15,7 @@ from fitness_agents.contracts.hypothesis_pipeline import (
 )
 from fitness_agents.contracts.schemas import Evidence, Hypothesis
 from fitness_agents.kg_interaction.contracts import EvidencePack, InteractionResult
+from fitness_agents.utils.progress import bind_progress, report_event, reset_progress
 
 CHANNELS = ("physchem", "conservation", "structure")
 
@@ -163,6 +165,116 @@ def test_three_child_branches_execute_in_parallel_and_main_gets_only_approved_su
     assert result.main_review is not None
     assert result.main_review.verdict == "APPROVE"
     assert result.main_hypothesis["explanation"]["channel_contributions"]
+
+
+def test_child_threads_inherit_progress_context() -> None:
+    class _Capture:
+        def __init__(self) -> None:
+            self.events = []
+
+        def heartbeat(self, message, *, log=True, **payload):
+            del message, log, payload
+
+        def report(self, event_type, *, message, persist=True, **payload):
+            del message, persist, payload
+            self.events.append(event_type)
+
+    class _ReportingScientist(_Scientist):
+        def propose(self, *, context):
+            report_event(f"child:{context.channel}", message="child event")
+            return super().propose(context=context)
+
+    capture = _Capture()
+    token = bind_progress(capture)
+    try:
+        graph = HypothesisReviewGraph(
+            child_scientists={channel: _ReportingScientist() for channel in CHANNELS},
+            child_critics={channel: RuleBasedSubCritic() for channel in CHANNELS},
+            main_critic=RuleBasedMainHypothesisCritic(),
+        )
+        result = graph.run(
+            base_context=_context(),
+            evidence=[_evidence(channel) for channel in CHANNELS],
+            interaction=_interaction(),
+            main_proposer=_main_proposer,
+        )
+    finally:
+        reset_progress(token)
+
+    assert result.status == "SUCCEEDED"
+    assert set(capture.events) == {f"child:{channel}" for channel in CHANNELS}
+
+
+def test_branch_receipt_preserves_structured_remote_failure() -> None:
+    class _BudgetFailureScientist:
+        def propose(self, *, context):
+            del context
+            raise RemoteLLMCompletionError(
+                "PROMPT_BUDGET_EXCEEDED",
+                failure_category="budget",
+                input_chars=123456,
+                request_started=False,
+                detail="projected prompt exceeded the role budget",
+            )
+
+    scientists = {channel: _Scientist() for channel in CHANNELS}
+    scientists["physchem"] = _BudgetFailureScientist()
+    graph = HypothesisReviewGraph(
+        child_scientists=scientists,
+        child_critics={channel: RuleBasedSubCritic() for channel in CHANNELS},
+        main_critic=RuleBasedMainHypothesisCritic(),
+    )
+    result = graph.run(
+        base_context=_context(),
+        evidence=[_evidence(channel) for channel in CHANNELS],
+        interaction=_interaction(),
+        main_proposer=_main_proposer,
+    )
+
+    receipt = next(item for item in result.branches if item.channel == "physchem")
+    assert receipt.status == "FAILED"
+    assert receipt.error_code == "PROMPT_BUDGET_EXCEEDED"
+    assert receipt.input_chars == 123456
+    assert receipt.failure_category == "budget"
+    assert receipt.request_started is False
+
+
+def test_successful_branch_receipt_records_started_request_size() -> None:
+    class _Completions:
+        def create(self, **kwargs):
+            del kwargs
+            message = type("Message", (), {"content": '{"ok": true}'})()
+            choice = type("Choice", (), {"message": message, "finish_reason": "stop"})()
+            return type("Response", (), {"choices": [choice], "usage": None})()
+
+    class _Client:
+        chat = type("Chat", (), {"completions": _Completions()})()
+
+    class _RemoteSizedScientist(_Scientist):
+        def propose(self, *, context):
+            complete_json(
+                client=_Client(),
+                model="unit-test-model",
+                messages=[{"role": "user", "content": "json"}],
+            )
+            return super().propose(context=context)
+
+    graph = HypothesisReviewGraph(
+        child_scientists={channel: _RemoteSizedScientist() for channel in CHANNELS},
+        child_critics={channel: RuleBasedSubCritic() for channel in CHANNELS},
+        main_critic=RuleBasedMainHypothesisCritic(),
+    )
+    result = graph.run(
+        base_context=_context(),
+        evidence=[_evidence(channel) for channel in CHANNELS],
+        interaction=_interaction(),
+        main_proposer=_main_proposer,
+    )
+
+    assert result.status == "SUCCEEDED"
+    assert all(item.input_chars == 4 for item in result.branches)
+    assert all(item.request_started is True for item in result.branches)
+    assert all(item.failure_category is None for item in result.branches)
 
 
 class _ReviseOnceCritic(RuleBasedSubCritic):

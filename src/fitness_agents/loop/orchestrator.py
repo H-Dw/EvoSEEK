@@ -97,7 +97,7 @@ def _flatten_evidence(evidence: dict[str, list[Any]], limit: int = 120) -> list[
     ranked = sorted(
         entries,
         key=lambda item: (
-            item.quality_status == "unavailable",
+            item.quality_status != "unavailable",
             bool(item.contributes_to_selection),
             item.confidence * abs(item.score),
             item.evidence_id,
@@ -328,7 +328,13 @@ class CampaignRunner:
             main_scientist_client = create_llm_client(
                 config.llm.provider,
                 profile=config.hierarchical_hypothesis.main_scientist_profile,
-                **llm_runtime_settings,
+                **{
+                    **llm_runtime_settings,
+                    "max_input_chars": (
+                        config.hierarchical_hypothesis.main_max_input_chars
+                        or config.llm.max_input_chars
+                    ),
+                },
             )
         self.agent = agent or ScientistAgent(
             main_scientist_client,
@@ -397,10 +403,14 @@ class CampaignRunner:
                     channel: RemoteSubScientist(
                         profile=config.hierarchical_hypothesis.child_scientist_profiles[channel],
                         max_tokens=config.hierarchical_hypothesis.child_max_tokens,
+                        max_input_chars=(
+                            config.hierarchical_hypothesis.child_max_input_chars
+                            or config.llm.max_input_chars
+                        ),
                         **{
                             key: value
                             for key, value in llm_runtime_settings.items()
-                            if key != "max_tokens"
+                            if key not in {"max_tokens", "max_input_chars"}
                         },
                         provider=config.llm.provider,
                     )
@@ -410,12 +420,22 @@ class CampaignRunner:
                     channel: RemoteSubCritic(
                         profile=config.hierarchical_hypothesis.child_critic_profiles[channel],
                         max_tokens=config.hierarchical_hypothesis.child_critic_max_tokens,
+                        max_input_chars=(
+                            config.hierarchical_hypothesis.critic_max_input_chars
+                            or config.llm.max_input_chars
+                        ),
                         thinking="disabled",
                         reasoning_effort=None,
                         **{
                             key: value
                             for key, value in llm_runtime_settings.items()
-                            if key not in {"max_tokens", "thinking", "reasoning_effort"}
+                            if key
+                            not in {
+                                "max_tokens",
+                                "max_input_chars",
+                                "thinking",
+                                "reasoning_effort",
+                            }
                         },
                         provider=config.llm.provider,
                     )
@@ -424,10 +444,14 @@ class CampaignRunner:
                 main_hypothesis_critic = RemoteMainHypothesisCritic(
                     profile=config.hierarchical_hypothesis.main_critic_profile,
                     max_tokens=config.hierarchical_hypothesis.main_critic_max_tokens,
+                    max_input_chars=(
+                        config.hierarchical_hypothesis.critic_max_input_chars
+                        or config.llm.max_input_chars
+                    ),
                     **{
                         key: value
                         for key, value in llm_runtime_settings.items()
-                        if key != "max_tokens"
+                        if key not in {"max_tokens", "max_input_chars"}
                     },
                     provider=config.llm.provider,
                 )
@@ -628,6 +652,8 @@ class CampaignRunner:
         )
         representative_ids = [item.variant_id for item in ranked[:2]]
         enabled_operators = frozenset(self.config.kg_interaction.enabled_operators)
+        if "hypothesis_context" not in enabled_operators:
+            raise ValueError("kg_interaction requires hypothesis_context in enabled_operators")
         steps = [
             KGQueryStep(
                 "context",
@@ -659,10 +685,13 @@ class CampaignRunner:
         }:
             for variant_id in feature_variants:
                 for channel in self.config.kg_interaction.feature_channels:
+                    operator = channel_operator[channel]
+                    if operator not in enabled_operators:
+                        continue
                     steps.append(
                         KGQueryStep(
                             f"feature_{channel}_{variant_id}",
-                            channel_operator[channel],
+                            operator,
                             QueryIntent.EXPLAIN,
                             {"variant_id": variant_id},
                             ("context",),
@@ -672,7 +701,7 @@ class CampaignRunner:
         if self.config.kg_interaction.feature_tool_strategy in {
             "joint",
             "independent_and_joint",
-        }:
+        } and "query_feature_bundle" in enabled_operators:
             for variant_id in feature_variants:
                 steps.append(
                     KGQueryStep(
@@ -729,7 +758,10 @@ class CampaignRunner:
                     "Read RAG-materialized claims from the structured KG snapshot.",
                 )
             )
-        if self.config.kg_interaction.truncation_audit_enabled:
+        if (
+            self.config.kg_interaction.truncation_audit_enabled
+            and "query_kg_truncation_audit" in enabled_operators
+        ):
             steps.append(
                 KGQueryStep(
                     "kg_truncation_audit",
@@ -743,7 +775,7 @@ class CampaignRunner:
                     "Count keyword matches before max_rows and report missing bounded rows.",
                 )
             )
-        if representative_ids:
+        if representative_ids and "explain_variant" in enabled_operators:
             steps.append(
                 KGQueryStep(
                     "explain",
@@ -753,7 +785,7 @@ class CampaignRunner:
                     ("context",),
                 )
             )
-        if len(representative_ids) >= 2:
+        if len(representative_ids) >= 2 and "compare_variants" in enabled_operators:
             steps.append(
                 KGQueryStep(
                     "compare",
@@ -763,7 +795,13 @@ class CampaignRunner:
                     ("context",),
                 )
             )
-        steps = steps[: self.config.kg_interaction.max_tool_calls]
+        required_calls = len(steps)
+        if required_calls > self.config.kg_interaction.max_tool_calls:
+            raise ValueError(
+                "kg_interaction.max_tool_calls is below the complete runtime plan; "
+                f"configured={self.config.kg_interaction.max_tool_calls}, "
+                f"required={required_calls}, steps={[item.step_id for item in steps]}"
+            )
         return self.kg_interaction.execute(
             KGQueryPlan(
                 plan_id=f"kgplan:{self.run_id}:r{round_id}",
@@ -820,6 +858,11 @@ class CampaignRunner:
 
     def _flatten_round_evidence(self, evidence: dict[str, list[Any]]) -> list[Any]:
         return _flatten_evidence(evidence, limit=self._evidence_ingest_limit())
+
+    def _scientist_prompt_evidence(self, evidence: dict[str, list[Any]]) -> list[Any]:
+        return _flatten_evidence(
+            evidence, limit=max(1, int(self.config.scientist_prompt_evidence_limit))
+        )
 
     def _persist_evidence_map(
         self,
@@ -983,6 +1026,7 @@ class CampaignRunner:
             "evidence_deletion": self.config.evidence_deletion,
             "evidence_prefilter_limit": self.config.evidence_prefilter_limit,
             "kg_ingest_evidence_limit": self.config.kg_ingest_evidence_limit,
+            "scientist_prompt_evidence_limit": self.config.scientist_prompt_evidence_limit,
             "structured_kg_snapshot_mode": self.config.structured_kg_snapshot_mode,
             "generation": {
                 "selection_driver": self._selection_driver(),
@@ -1081,6 +1125,18 @@ class CampaignRunner:
                 "main_critic_profile": (
                     self.config.hierarchical_hypothesis.main_critic_profile
                 ),
+                "main_max_input_chars": (
+                    self.config.hierarchical_hypothesis.main_max_input_chars
+                    or self.config.llm.max_input_chars
+                ),
+                "child_max_input_chars": (
+                    self.config.hierarchical_hypothesis.child_max_input_chars
+                    or self.config.llm.max_input_chars
+                ),
+                "critic_max_input_chars": (
+                    self.config.hierarchical_hypothesis.critic_max_input_chars
+                    or self.config.llm.max_input_chars
+                ),
             },
             "evaluation": {
                 "metrics": list(self.config.evaluation.metrics),
@@ -1117,11 +1173,11 @@ class CampaignRunner:
         revision = critic_revision_payload(decision=decision, rejected_hypothesis=rejected)
         evidence_list = [
             *(local_evidence if self._scientist_local_context_allowed else ()),
-            *self._flatten_round_evidence(evidence),
+            *self._scientist_prompt_evidence(evidence),
         ]
         activation_state = self._role_activation_state(
             "scientist",
-            evidence=self._flatten_round_evidence(evidence),
+            evidence=self._scientist_prompt_evidence(evidence),
             local_evidence=local_evidence,
             interaction_result=interaction_result,
         )
@@ -1483,7 +1539,7 @@ class CampaignRunner:
                     phase=CampaignPhase.LLM_HYPOTHESIS,
                     model=self.config.llm.model or self.config.llm.provider,
                 )
-                round_evidence = self._flatten_round_evidence(evidence)
+                round_evidence = self._scientist_prompt_evidence(evidence)
                 scientist_evidence = [
                     *(local_evidence if self._scientist_local_context_allowed else ()),
                     *round_evidence,

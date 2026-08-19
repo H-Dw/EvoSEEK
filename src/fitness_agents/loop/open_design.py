@@ -361,7 +361,9 @@ class OpenDesignRunner:
         raw_knowledge_scores = (
             self.knowledge.scores(evidence) if self.config.knowledge_enabled else {}
         )
-        scientist_evidence = _flatten_evidence(evidence)
+        scientist_evidence = _flatten_evidence(
+            evidence, limit=self.config.scientist_prompt_evidence_limit
+        )
         hypothesis = self.agent.propose_hypothesis(
             self.state,
             self.observed_variants,

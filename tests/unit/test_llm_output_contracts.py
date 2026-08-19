@@ -404,6 +404,74 @@ def test_scientist_prompt_keeps_bounded_feature_tool_evidence() -> None:
     assert "private_cache_state" not in messages[1]["content"]
 
 
+def test_scientist_prompt_bounds_pack_fields_and_deduplicates_top_level_evidence() -> None:
+    evidence = Evidence(
+        evidence_id="ev:duplicate",
+        variant_id="v1",
+        channel="local_rag",
+        statement="Canonical top-level statement.",
+        score=0.0,
+        source_id="source:duplicate",
+        confidence=0.8,
+        round_id=1,
+        claim_id="claim:duplicate",
+    )
+    facts = [
+        {
+            "claim_id": "claim:duplicate",
+            "statement": "Duplicate claim from a KG pack.",
+        },
+        *[
+            {
+                "claim_id": f"claim:{index}",
+                "statement": f"fact-{index}-" + "x" * 4000,
+            }
+            for index in range(20)
+        ],
+    ]
+    context = {
+        **_context(),
+        "kg_interaction": {
+            "plan_id": "p-bounded",
+            "packs": [
+                {
+                    "query_id": "q-bounded",
+                    "operator": "query_local_knowledge",
+                    "as_of_round": 1,
+                    "facts": facts,
+                    "evidence": [
+                        {
+                            "evidence_id": "ev:duplicate",
+                            "claim_id": "claim:duplicate",
+                            "channel": "local_rag",
+                            "statement": "Duplicate evidence from a KG pack.",
+                        }
+                    ],
+                    "metadata": {"large_cache": "y" * 10000},
+                }
+            ],
+        },
+    }
+
+    messages = build_scientist_hypothesis_messages(
+        profile="scientist profile",
+        sanitized_context=context,
+        evidence=[evidence],
+        output_schema=HYPOTHESIS_SCHEMA,
+    )
+
+    payload = json.loads(messages[1]["content"])
+    pack = payload["context"]["kg_interaction"]["packs"][0]
+    assert payload["evidence"][0]["evidence_id"] == "ev:duplicate"
+    assert pack["evidence"] == []
+    assert all(item.get("claim_id") != "claim:duplicate" for item in pack["facts"])
+    assert len(pack["facts"]) <= 12
+    assert len(json.dumps(pack["facts"], ensure_ascii=False)) <= 12500
+    assert len(json.dumps(pack["metadata"], ensure_ascii=False)) <= 4000
+    assert "x" * 1500 not in messages[1]["content"]
+    assert "y" * 1500 not in messages[1]["content"]
+
+
 def test_mock_scientist_uses_critic_revision_parent_and_new_id() -> None:
     context = {
         **_context(),
