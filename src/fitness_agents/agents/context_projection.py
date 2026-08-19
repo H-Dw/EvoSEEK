@@ -4,15 +4,21 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Iterable
 from dataclasses import asdict, replace
 from typing import Any
 
 from fitness_agents.contracts.agent_io import ScientistContextInput
-from fitness_agents.contracts.hypothesis_pipeline import ChannelEvidenceInput, ChannelName
+from fitness_agents.contracts.hypothesis_pipeline import (
+    ChannelEvidenceInput,
+    ChannelName,
+    MainSynthesisEvidenceCard,
+)
+from fitness_agents.contracts.mutation_evidence import mutation_evidence_prompt_payload
 from fitness_agents.contracts.schemas import Evidence
 from fitness_agents.kg_interaction.contracts import EvidencePack, InteractionResult
 
-from .llm import _compact_prompt_evidence, _compact_prompt_pack, _prompt_row_identities
+from .llm import _compact_prompt_pack, _prompt_row_identities
 
 FEATURE_CHANNELS: tuple[ChannelName, ...] = ("physchem", "conservation", "structure")
 FEATURE_OPERATOR_CHANNEL: dict[str, ChannelName] = {
@@ -180,7 +186,7 @@ class KGContextPartitioner:
         seen_identities: set[tuple[str, str]] = set()
         evidence_payloads = []
         for item in evidence:
-            payload = _compact_prompt_evidence(item)
+            payload = mutation_evidence_prompt_payload(item)
             identities = _prompt_row_identities(payload)
             if any(identity in seen_identities for identity in identities):
                 continue
@@ -191,6 +197,49 @@ class KGContextPartitioner:
             pack_payloads.append(
                 _compact_prompt_pack(asdict(pack), seen_identities=seen_identities)
             )
+        evidence_by_variant: dict[str, list[dict[str, Any]]] = {}
+        for payload in evidence_payloads:
+            evidence_by_variant.setdefault(str(payload.get("variant_id") or ""), []).append(
+                payload
+            )
+        sample_cards = []
+        for raw_observation in context.visible_observations:
+            observation = dict(raw_observation)
+            variant_id = str(observation.get("variant_id") or "")
+            matching = evidence_by_variant.get(variant_id, [])
+            sequence_sha256 = str(observation.get("sequence_sha256") or "")
+            if len(sequence_sha256) != 64:
+                sequence_sha256 = hashlib.sha256(
+                    str(observation.get("variant") or variant_id).encode()
+                ).hexdigest()
+            sample_cards.append(
+                {
+                    "sample_id": str(observation.get("sample_id") or variant_id),
+                    "variant_id": variant_id,
+                    "mutation_notation": str(
+                        observation.get("mutation_notation") or "WT"
+                    ),
+                    "sequence_sha256": sequence_sha256,
+                    "residues_by_position": {
+                        str(key): str(value)
+                        for key, value in dict(
+                            observation.get("residues_by_position") or {}
+                        ).items()
+                    },
+                    "evidence_ids": tuple(
+                        sorted(
+                            str(item["evidence_id"])
+                            for item in matching
+                            if item.get("evidence_id")
+                        )
+                    ),
+                    "feature_values": {
+                        str(item["evidence_id"]): dict(item.get("features") or {})
+                        for item in matching
+                        if item.get("evidence_id")
+                    },
+                }
+            )
         return ChannelEvidenceInput(
             run_id=context.run_id,
             round_id=context.round_id,
@@ -198,7 +247,7 @@ class KGContextPartitioner:
             task=context.task,
             mutable_positions=context.mutable_positions,
             wild_type_sites=context.wild_type_sites,
-            visible_observations=tuple(context.visible_observations),
+            visible_observations=tuple(sample_cards),
             evidence=tuple(evidence_payloads),
             kg_packs=tuple(pack_payloads),
             retry_control=retry_control,
@@ -208,12 +257,151 @@ class KGContextPartitioner:
 def main_context_payload(
     approved: tuple[Any, ...], conflicts: tuple[Any, ...]
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    approved_payload = [
-        item.model_dump(mode="json") if hasattr(item, "model_dump") else dict(item)
-        for item in approved
-    ]
+    approved_payload = [approved_analysis_payload(item) for item in approved]
     conflict_payload = [
         item.model_dump(mode="json") if hasattr(item, "model_dump") else dict(item)
         for item in conflicts
     ]
     return approved_payload, conflict_payload
+
+
+def approved_analysis_payload(item: Any) -> dict[str, Any]:
+    """Project an approved branch to the only fields needed for main-role fusion."""
+
+    analysis = getattr(item, "hypothesis", None)
+    review = getattr(item, "review", None)
+    if analysis is None or review is None:
+        raise TypeError("approved analysis projection requires hypothesis and review")
+    contribution_modes = []
+    if analysis.candidate_hypotheses:
+        contribution_modes.append("support")
+    if analysis.counterevidence or any(
+        finding.kind == "LIMITATION" for finding in analysis.findings
+    ):
+        contribution_modes.append("constraint_counterevidence")
+    if not analysis.candidate_hypotheses or any(
+        finding.kind in {"OBSERVATION", "INTERPRETATION"}
+        for finding in analysis.findings
+    ):
+        contribution_modes.append("analysis_only")
+    return {
+        "channel": str(item.channel),
+        "contribution_modes": list(dict.fromkeys(contribution_modes)),
+        "analysis": analysis.model_dump(mode="json"),
+        "semantic_review": {
+            "verdict": str(review.verdict),
+            "summary": str(review.summary),
+            "cited_evidence_ids": list(review.cited_evidence_ids),
+        },
+    }
+
+
+def _raw_mapping(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return dict(value)
+    if hasattr(value, "__dataclass_fields__"):
+        return asdict(value)
+    if hasattr(value, "model_dump"):
+        return value.model_dump(mode="json")
+    return {}
+
+
+def main_synthesis_evidence_cards(
+    *,
+    evidence: Iterable[Evidence],
+    interaction: InteractionResult | None,
+    approved: tuple[Any, ...],
+) -> tuple[MainSynthesisEvidenceCard, ...]:
+    """Build one atomic, typed evidence universe for main synthesis review."""
+
+    candidate_ids = {
+        evidence_id
+        for item in approved
+        for candidate in item.hypothesis.candidate_hypotheses
+        for evidence_id in candidate.evidence_ids
+    }
+    limitation_ids = {
+        evidence_id
+        for item in approved
+        for finding in item.hypothesis.findings
+        if finding.kind == "LIMITATION"
+        for evidence_id in finding.evidence_ids
+    }
+    raw_items = [_raw_mapping(item) for item in evidence]
+    if interaction is not None:
+        raw_items.extend(
+            dict(item)
+            for pack in interaction.packs
+            for item in pack.evidence
+            if isinstance(item, dict)
+        )
+    by_id: dict[str, MainSynthesisEvidenceCard] = {}
+    for raw in raw_items:
+        evidence_id = str(raw.get("evidence_id") or "")
+        if not evidence_id or evidence_id in by_id:
+            continue
+        polarity = str(raw.get("polarity") or "neutral").casefold()
+        if polarity not in {"support", "contradict", "neutral", "unknown"}:
+            polarity = "unknown"
+        if evidence_id in limitation_ids or polarity == "contradict":
+            contribution = "constraint_counterevidence"
+        elif evidence_id in candidate_ids or polarity == "support":
+            contribution = "support"
+        else:
+            contribution = "analysis_only"
+        confidence = raw.get("confidence", 0.0)
+        try:
+            confidence = min(1.0, max(0.0, float(confidence)))
+        except (TypeError, ValueError):
+            confidence = 0.0
+        raw_span = raw.get("artifact_span") or raw.get("source_span")
+        source_span = None
+        if isinstance(raw_span, (list, tuple)) and len(raw_span) == 2:
+            source_span = (int(raw_span[0]), int(raw_span[1]))
+        warnings = raw.get("warnings") or ()
+        by_id[evidence_id] = MainSynthesisEvidenceCard(
+            evidence_id=evidence_id,
+            atomic_statement=str(
+                raw.get("statement") or raw.get("claim") or "Evidence statement unavailable."
+            )[:600],
+            channel=str(raw.get("channel") or "unknown")[:120],
+            contribution=contribution,
+            polarity=polarity,
+            applicability=str(raw.get("applicability") or "unknown")[:240],
+            confidence=confidence,
+            quality_status=str(raw.get("quality_status") or "unknown")[:120],
+            warnings=tuple(str(item)[:240] for item in warnings)[:8],
+            source_uri=(
+                str(raw.get("artifact_uri") or raw.get("source_uri"))[:1200]
+                if raw.get("artifact_uri") or raw.get("source_uri")
+                else None
+            ),
+            source_span=source_span,
+        )
+    return tuple(by_id[key] for key in sorted(by_id))
+
+
+def select_main_review_evidence_cards(
+    hypothesis: Any,
+    cards: tuple[MainSynthesisEvidenceCard, ...],
+    *,
+    limit: int = 12,
+) -> tuple[MainSynthesisEvidenceCard, ...]:
+    """Keep cited evidence first, then the most relevant visible counterevidence."""
+
+    by_id = {item.evidence_id: item for item in cards}
+    cited = tuple(dict.fromkeys(getattr(hypothesis, "evidence_ids", ()) or ()))
+    selected = [by_id[item] for item in cited if item in by_id][:limit]
+    selected_ids = {item.evidence_id for item in selected}
+    counterevidence = sorted(
+        (
+            item
+            for item in cards
+            if item.evidence_id not in selected_ids
+            and item.contribution == "constraint_counterevidence"
+        ),
+        key=lambda item: (item.confidence, item.evidence_id),
+        reverse=True,
+    )
+    selected.extend(counterevidence[: max(0, limit - len(selected))])
+    return tuple(selected)

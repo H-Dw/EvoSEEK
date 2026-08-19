@@ -126,9 +126,12 @@ Copy `context.expected_hypothesis_id` exactly. Return one JSON object containing
   `max_preferred_positions`.
 - Use non-empty arrays of canonical one-letter residues as values.
 - Copy the supplied parent identifier or use null.
-- When `approved_subhypotheses` is present, use `explanation` to summarize each channel's
-  contribution, unresolved conflicts, and limitations without exposing hidden reasoning. Otherwise
-  return null.
+- When `approved_channel_analyses` is present, treat each item as an approved channel analysis card:
+  preserve its observation/interpretation/limitation distinctions, consider optional
+  `candidate_hypotheses` without copying them blindly, and use `explanation` to record each
+  `analysis_id`, `analysis_summary`, evidence IDs, uncertainty, candidate hypothesis IDs, unresolved
+  conflicts, and limitations. The main Scientist alone proposes the final cross-channel mutation
+  hypothesis. Otherwise return null.
 - Return JSON only, without Markdown fences or hidden reasoning.
 
 ## 7. Prohibited behavior

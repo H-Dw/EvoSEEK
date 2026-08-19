@@ -2,16 +2,25 @@ from __future__ import annotations
 
 from threading import Barrier
 
-from fitness_agents.agents.context_projection import KGContextPartitioner
+from fitness_agents.agents.context_projection import (
+    KGContextPartitioner,
+    approved_analysis_payload,
+)
 from fitness_agents.agents.hypothesis_graph import HypothesisReviewGraph
 from fitness_agents.agents.main_hypothesis_critic import RuleBasedMainHypothesisCritic
 from fitness_agents.agents.remote_llm import RemoteLLMCompletionError, complete_json
 from fitness_agents.agents.subcritic import RuleBasedSubCritic
 from fitness_agents.contracts.agent_io import ScientistContextInput
+from fitness_agents.contracts.evidence_universe import RoleVisibleEvidenceUniverse
 from fitness_agents.contracts.hypothesis_pipeline import (
+    BatchedChannelAnalysisResult,
+    ChannelAnalysisBatchArtifact,
     ChannelHypothesisOutput,
-    HypothesisReviewIssue,
-    HypothesisReviewOutput,
+    MainReviewIssue,
+    MainReviewOutput,
+    PhyschemReviewIssue,
+    PhyschemReviewOutput,
+    SynthesisAbstention,
 )
 from fitness_agents.contracts.schemas import Evidence, Hypothesis
 from fitness_agents.kg_interaction.contracts import EvidencePack, InteractionResult
@@ -93,15 +102,58 @@ class _Scientist:
         if self.barrier is not None:
             self.barrier.wait(timeout=2)
         return ChannelHypothesisOutput(
-            sub_hypothesis_id=f"sub:{context.channel}:{len(self.contexts)}",
+            analysis_id=f"analysis:{context.channel}:{len(self.contexts)}",
             channel=context.channel,
-            claim=f"Bounded {context.channel} claim.",
-            proposed_residues={"39": ["V"]},
+            analysis_summary=f"Bounded {context.channel} analysis.",
+            findings=[
+                {
+                    "finding_id": f"finding:{context.channel}:1",
+                    "kind": "OBSERVATION",
+                    "statement": f"Visible {context.channel} observation.",
+                    "evidence_ids": [f"ev:{context.channel}"],
+                    "confidence": "medium",
+                }
+            ],
+            candidate_hypotheses=[
+                {
+                    "hypothesis_id": f"candidate:{context.channel}:1",
+                    "statement": f"Bounded {context.channel} candidate hypothesis.",
+                    "proposed_residues": {"39": ["V"]},
+                    "evidence_ids": [f"ev:{context.channel}"],
+                    "expected_observation": "Test against a matched control.",
+                    "falsification_criterion": (
+                        "Revise if matched measurements oppose the direction."
+                    ),
+                }
+            ],
             evidence_ids=[f"ev:{context.channel}"],
-            expected_effect="Test against a matched control.",
             counterevidence=[],
             uncertainty="Channel-local evidence does not establish fitness.",
-            falsification_criterion="Revise if matched measurements oppose the direction.",
+        )
+
+
+class _BatchedScientist(_Scientist):
+    def propose(self, *, context):
+        analysis = super().propose(context=context)
+        return BatchedChannelAnalysisResult(
+            analysis=analysis,
+            batches=(
+                ChannelAnalysisBatchArtifact(
+                    batch_id="b000",
+                    split_depth=0,
+                    sample_ids=("v1",),
+                    input_sha256="a" * 64,
+                    output_sha256="b" * 64,
+                    evidence_universe=RoleVisibleEvidenceUniverse.from_role_sources(
+                        role=f"subscientist:{context.channel}",
+                        evidence=context.evidence,
+                        interaction={"packs": context.kg_packs},
+                    ),
+                    analysis=analysis,
+                    input_chars=1000,
+                    request_started=True,
+                ),
+            ),
         )
 
 
@@ -146,6 +198,42 @@ def test_context_partitioner_prevents_cross_channel_visibility_and_deduplicates(
         assert visible_occurrences == 1
 
 
+def test_feature_child_sample_card_is_fitness_blind_and_channel_typed() -> None:
+    raw_context = _context().model_dump(mode="json")
+    raw_context["visible_observations"] = [
+        {
+            "variant_id": "v1",
+            "variant": "ADGV",
+            "mutation_notation": "V39A",
+            "residues_by_position": {"39": "A", "40": "D", "41": "G", "54": "V"},
+            "measured_fitness": 99.0,
+        }
+    ]
+    evidence = Evidence(
+        **{
+            **_evidence("physchem").__dict__,
+            "raw_features": {
+                "sites": {"39": {"mutation": "V39A", "charge_delta": 1.0}}
+            },
+        }
+    )
+    child = KGContextPartitioner().child_context(
+        base_context=ScientistContextInput.model_validate(raw_context),
+        channel="physchem",
+        evidence=(evidence,),
+        packs=(),
+    )
+    payload = child.model_dump(mode="json")
+    serialized = str(payload["visible_observations"])
+    assert "measured_fitness" not in serialized
+    assert payload["visible_observations"][0]["variant_id"] == "v1"
+    assert payload["visible_observations"][0]["evidence_ids"] == ["ev:physchem"]
+    assert (
+        payload["visible_observations"][0]["feature_values"]["ev:physchem"]["kind"]
+        == "physchem"
+    )
+
+
 def test_three_child_branches_execute_in_parallel_and_main_gets_only_approved_summaries() -> None:
     barrier = Barrier(3)
     scientists = {channel: _Scientist(barrier) for channel in CHANNELS}
@@ -164,7 +252,139 @@ def test_three_child_branches_execute_in_parallel_and_main_gets_only_approved_su
     assert all(item.status == "SUCCEEDED" for item in result.branches)
     assert result.main_review is not None
     assert result.main_review.verdict == "APPROVE"
+    assert result.main_review_attempts[-1].disposition == "APPROVED"
+    assert len(result.main_review_attempts[-1].evidence_cards) <= 12
     assert result.main_hypothesis["explanation"]["channel_contributions"]
+    assert all(len(item.review_attempts) == 1 for item in result.branches)
+    assert all(item.review_attempts[0].disposition == "APPROVED" for item in result.branches)
+    assert result.evidence_universe is not None
+    assert "ev:physchem" in result.evidence_universe.ids
+    assert all(
+        item.review_attempts[0].evidence_universe.ids == frozenset({f"ev:{item.channel}"})
+        for item in result.branches
+    )
+    main_payload = approved_analysis_payload(result.branches[0].approved)
+    assert set(main_payload) == {
+        "channel",
+        "contribution_modes",
+        "analysis",
+        "semantic_review",
+    }
+    assert "input_sha256" not in str(main_payload)
+    assert "decision_id" not in str(main_payload)
+    serialized_approved = result.model_dump(mode="json")["branches"][0]["approved"]
+    assert "analysis" in serialized_approved
+    assert "hypothesis" not in serialized_approved
+
+
+def test_typed_main_abstention_is_retained_without_calling_main_critic() -> None:
+    class _NeverReview:
+        def review(self, **kwargs):
+            raise AssertionError(f"main critic must not review abstention: {kwargs}")
+
+    graph = HypothesisReviewGraph(
+        child_scientists={channel: _Scientist() for channel in CHANNELS},
+        child_critics={channel: RuleBasedSubCritic() for channel in CHANNELS},
+        main_critic=_NeverReview(),
+    )
+
+    def abstain(**kwargs):
+        del kwargs
+        return SynthesisAbstention(
+            abstention_id="abstain:run:r1",
+            reason="No visible card supports a residue direction.",
+            evidence_ids=("ev:physchem",),
+            unresolved_constraints=("All channel contributions are analysis-only.",),
+            recommended_next_evidence=("Obtain a directional assay association.",),
+        )
+
+    result = graph.run(
+        base_context=_context(),
+        evidence=[_evidence(channel) for channel in CHANNELS],
+        interaction=_interaction(),
+        main_proposer=abstain,
+    )
+    assert result.status == "FAILED"
+    assert result.failure_code == "NO_SUPPORTED_HYPOTHESIS"
+    assert result.main_abstention is not None
+    assert result.main_review_attempts[-1].disposition == "ABSTAINED"
+
+
+def test_graph_persists_typed_subscientist_batch_artifacts_without_forwarding_them() -> None:
+    graph = HypothesisReviewGraph(
+        child_scientists={channel: _BatchedScientist() for channel in CHANNELS},
+        child_critics={channel: RuleBasedSubCritic() for channel in CHANNELS},
+        main_critic=RuleBasedMainHypothesisCritic(),
+    )
+
+    result = graph.run(
+        base_context=_context(),
+        evidence=[_evidence(channel) for channel in CHANNELS],
+        interaction=_interaction(),
+        main_proposer=_main_proposer,
+    )
+
+    assert result.status == "SUCCEEDED"
+    assert all(
+        item.review_attempts[0].analysis_batches[0].sample_ids == ("v1",)
+        for item in result.branches
+    )
+    main_explanation = result.main_hypothesis["explanation"]
+    assert "analysis_batches" not in str(main_explanation)
+
+
+def test_main_critic_accepts_exact_rag_id_visible_in_base_interaction() -> None:
+    base = _interaction()
+    interaction = InteractionResult(
+        plan_id=base.plan_id,
+        packs=base.packs
+        + (
+            EvidencePack(
+                query_id="q:rag",
+                operator="query_local_rag",
+                as_of_round=1,
+                evidence=(
+                    {
+                        "evidence_id": "ev:local_rag:visible",
+                        "statement": "Visible RAG statement.",
+                    },
+                ),
+            ),
+        ),
+        executed_steps=base.executed_steps + ("rag",),
+        skipped_steps=base.skipped_steps,
+        stop_reason=base.stop_reason,
+    )
+
+    def proposer(**kwargs):
+        assert any(
+            pack.operator == "query_local_rag" for pack in kwargs["base_interaction"].packs
+        )
+        return Hypothesis(
+            hypothesis_id="hyp:run:r1",
+            statement="Synthesize reviewed analysis cards with visible RAG evidence.",
+            preferred_residues={39: ("V",), 40: ("D",), 41: ("G",), 54: ("V",)},
+            evidence_ids=(
+                *(f"ev:{channel}" for channel in CHANNELS),
+                "ev:local_rag:visible",
+            ),
+            expected_outcome="Tested variants should differ from matched controls.",
+            falsification_criterion="Revise if the matched comparison opposes the direction.",
+        )
+
+    graph = HypothesisReviewGraph(
+        child_scientists={channel: _Scientist() for channel in CHANNELS},
+        child_critics={channel: RuleBasedSubCritic() for channel in CHANNELS},
+        main_critic=RuleBasedMainHypothesisCritic(),
+    )
+    result = graph.run(
+        base_context=_context(),
+        evidence=[_evidence(channel) for channel in CHANNELS],
+        interaction=interaction,
+        main_proposer=proposer,
+    )
+    assert result.status == "SUCCEEDED"
+    assert "ev:local_rag:visible" in result.main_hypothesis["evidence_ids"]
 
 
 def test_child_threads_inherit_progress_context() -> None:
@@ -284,17 +504,18 @@ class _ReviseOnceCritic(RuleBasedSubCritic):
     def review(self, *, context, hypothesis):
         self.calls += 1
         if self.calls == 1:
-            return HypothesisReviewOutput(
+            return PhyschemReviewOutput(
+                review_scope="physchem",
                 decision_id="revise:1",
                 verdict="REVISE",
                 issues=[
-                    HypothesisReviewIssue(
-                        code="UNSUPPORTED_CLAIM",
+                    PhyschemReviewIssue(
+                        code="ANALYSIS_SCOPE_OVERREACH",
                         severity="error",
                         message="Narrow the first draft.",
                     )
                 ],
-                required_changes=["NARROW_CLAIM"],
+                required_changes=["NARROW_ANALYSIS"],
                 cited_evidence_ids=[],
                 summary="Narrow the channel-local claim.",
             )
@@ -305,14 +526,15 @@ class _ReviseMainOnceCritic(RuleBasedMainHypothesisCritic):
     def __init__(self) -> None:
         self.calls = 0
 
-    def review(self, *, hypothesis, approved, conflicts, allowed_evidence_ids):
+    def review(self, *, hypothesis, approved, conflicts, evidence_universe):
         self.calls += 1
         if self.calls == 1:
-            return HypothesisReviewOutput(
+            return MainReviewOutput(
+                review_scope="main",
                 decision_id="main:revise:1",
                 verdict="REVISE",
                 issues=[
-                    HypothesisReviewIssue(
+                    MainReviewIssue(
                         code="OVERCONFIDENT",
                         severity="error",
                         message="Calibrate the synthesis claim.",
@@ -326,7 +548,7 @@ class _ReviseMainOnceCritic(RuleBasedMainHypothesisCritic):
             hypothesis=hypothesis,
             approved=approved,
             conflicts=conflicts,
-            allowed_evidence_ids=allowed_evidence_ids,
+            evidence_universe=evidence_universe,
         )
 
 
@@ -353,7 +575,11 @@ def test_child_critic_feedback_is_structured_and_bounded_to_one_revision() -> No
     retry = scientists["physchem"].contexts[1].retry_control
     assert retry["schema"] == "critic_retry_control.v1"
     assert retry["priority"] == "highest"
-    assert retry["required_changes"] == ["NARROW_CLAIM"]
+    assert retry["required_changes"] == ["NARROW_ANALYSIS"]
+    assert [item.disposition for item in result.branches[0].review_attempts] == [
+        "REVISE",
+        "APPROVED",
+    ]
 
 
 def test_main_critic_feedback_has_protected_priority_and_one_revision() -> None:

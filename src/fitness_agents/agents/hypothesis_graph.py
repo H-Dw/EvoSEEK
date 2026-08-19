@@ -7,15 +7,21 @@ from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextvars import copy_context
 from dataclasses import replace
+from inspect import Parameter, signature
 from typing import Any
 
 from fitness_agents.contracts.agent_io import ScientistContextInput
+from fitness_agents.contracts.evidence_universe import RoleVisibleEvidenceUniverse
 from fitness_agents.contracts.hypothesis_pipeline import (
-    ApprovedSubHypothesis,
+    ApprovedChannelAnalysis,
+    BatchedChannelAnalysisResult,
     BranchReceipt,
     ChannelName,
+    ChildReviewAttemptArtifact,
     CrossChannelConflict,
     HypothesisPipelineResult,
+    MainReviewAttemptArtifact,
+    SynthesisAbstention,
 )
 from fitness_agents.contracts.schemas import Evidence, Hypothesis
 from fitness_agents.kg_interaction.contracts import InteractionResult
@@ -24,11 +30,13 @@ from .context_projection import (
     FEATURE_CHANNELS,
     KGContextPartitioner,
     canonical_sha256,
+    main_synthesis_evidence_cards,
+    select_main_review_evidence_cards,
 )
 from .remote_llm import completion_receipt_snapshot, reset_completion_receipt
 from .subscientist import validate_channel_hypothesis
 
-MainProposer = Callable[..., Hypothesis]
+MainProposer = Callable[..., Hypothesis | SynthesisAbstention]
 
 
 def _failure_fields(
@@ -52,12 +60,16 @@ def _failure_fields(
 
 
 def _conflicts(
-    approved: tuple[ApprovedSubHypothesis, ...]
+    approved: tuple[ApprovedChannelAnalysis, ...]
 ) -> tuple[CrossChannelConflict, ...]:
     by_position: dict[int, dict[ChannelName, tuple[str, ...]]] = defaultdict(dict)
     for item in approved:
-        for raw_position, residues in item.hypothesis.proposed_residues.items():
-            by_position[int(raw_position)][item.channel] = tuple(residues)
+        for candidate in item.hypothesis.candidate_hypotheses:
+            for raw_position, residues in candidate.proposed_residues.items():
+                existing = by_position[int(raw_position)].get(item.channel, ())
+                by_position[int(raw_position)][item.channel] = tuple(
+                    dict.fromkeys((*existing, *residues))
+                )
     conflicts: list[CrossChannelConflict] = []
     for position, channel_residues in sorted(by_position.items()):
         distinct = {tuple(value) for value in channel_residues.values()}
@@ -73,24 +85,28 @@ def _conflicts(
 
 
 def _default_explanation(
-    approved: tuple[ApprovedSubHypothesis, ...],
+    approved: tuple[ApprovedChannelAnalysis, ...],
     conflicts: tuple[CrossChannelConflict, ...],
 ) -> dict[str, Any]:
     return {
-        "summary": "Synthesis of independently reviewed channel hypotheses.",
+        "summary": "Synthesis of independently reviewed channel analysis cards.",
         "channel_contributions": [
             {
                 "channel": item.channel,
-                "sub_hypothesis_id": item.hypothesis.sub_hypothesis_id,
-                "claim": item.hypothesis.claim,
+                "analysis_id": item.hypothesis.analysis_id,
+                "analysis_summary": item.hypothesis.analysis_summary,
                 "evidence_ids": list(item.hypothesis.evidence_ids),
                 "uncertainty": item.hypothesis.uncertainty,
+                "candidate_hypothesis_ids": [
+                    candidate.hypothesis_id
+                    for candidate in item.hypothesis.candidate_hypotheses
+                ],
             }
             for item in approved
         ],
         "conflicts": [item.model_dump(mode="json") for item in conflicts],
         "limitations": [
-            "Channel outputs are hypotheses, not measured fitness or validated mechanisms."
+            "Channel outputs are analysis cards, not measured fitness or validated mechanisms."
         ],
     }
 
@@ -107,7 +123,7 @@ class HypothesisReviewGraph:
         required_channels: tuple[ChannelName, ...] = FEATURE_CHANNELS,
         max_parallel_branches: int = 3,
         max_child_revision_attempts: int = 1,
-        max_main_revision_attempts: int = 1,
+        max_main_revision_attempts: int = 2,
         partitioner: KGContextPartitioner | None = None,
     ) -> None:
         if max_parallel_branches not in {1, 2, 3}:
@@ -168,6 +184,7 @@ class HypothesisReviewGraph:
         retry_control = None
         last_code = "CHILD_REVIEW_EXHAUSTED"
         last_completion: dict[str, Any] = {}
+        attempt_artifacts: list[ChildReviewAttemptArtifact] = []
         for attempt in range(self.max_child_revision_attempts + 1):
             context = self.partitioner.child_context(
                 base_context=base_context,
@@ -176,31 +193,92 @@ class HypothesisReviewGraph:
                 packs=packs,
                 retry_control=retry_control,
             )
+            branch_evidence_universe = RoleVisibleEvidenceUniverse.from_role_sources(
+                role=f"subcritic:{channel}",
+                evidence=context.evidence,
+                interaction={"packs": context.kg_packs},
+            )
+            hypothesis = None
+            analysis_batches = ()
+            output_hash = None
             try:
                 reset_completion_receipt()
-                hypothesis = self.child_scientists[channel].propose(context=context)
-                last_completion = completion_receipt_snapshot()
+                proposal = self.child_scientists[channel].propose(context=context)
+                if isinstance(proposal, BatchedChannelAnalysisResult):
+                    hypothesis = proposal.analysis
+                    analysis_batches = proposal.batches
+                    batch_input_chars = [
+                        item.input_chars
+                        for item in analysis_batches
+                        if item.input_chars is not None
+                    ]
+                    last_completion = {
+                        "input_chars": max(batch_input_chars) if batch_input_chars else None,
+                        "failure_category": None,
+                        "request_started": any(
+                            item.request_started for item in analysis_batches
+                        ),
+                    }
+                else:
+                    hypothesis = proposal
+                    last_completion = completion_receipt_snapshot()
                 validate_channel_hypothesis(
                     hypothesis.model_dump(mode="json"), context=context
                 )
+                output_hash = canonical_sha256(hypothesis.model_dump(mode="json"))
                 review = self.child_critics[channel].review(
                     context=context, hypothesis=hypothesis
                 )
             except Exception as error:  # noqa: BLE001 - graph receipts capture role failures
+                failure = _failure_fields(
+                    error,
+                    completion=completion_receipt_snapshot() or last_completion,
+                )
+                attempt_artifacts.append(
+                    ChildReviewAttemptArtifact(
+                        channel=channel,
+                        attempt=attempt,
+                        disposition="FAILED",
+                        input_sha256=input_hash,
+                        evidence_universe=branch_evidence_universe,
+                        output_sha256=output_hash,
+                        analysis=hypothesis,
+                        analysis_batches=analysis_batches,
+                        error_code=failure["error_code"],
+                        input_chars=failure["input_chars"],
+                        request_started=failure["request_started"],
+                    )
+                )
                 return BranchReceipt(
                     channel=channel,
                     status="FAILED",
                     attempts=attempt + 1,
-                    **_failure_fields(
-                        error,
-                        completion=completion_receipt_snapshot() or last_completion,
-                    ),
+                    review_attempts=tuple(attempt_artifacts),
+                    **failure,
                 )
-            output_hash = canonical_sha256(hypothesis.model_dump(mode="json"))
-            if review.verdict == "APPROVE":
-                approved = ApprovedSubHypothesis(
+            attempt_artifacts.append(
+                ChildReviewAttemptArtifact(
                     channel=channel,
-                    hypothesis=hypothesis,
+                    attempt=attempt,
+                    disposition={
+                        "APPROVE": "APPROVED",
+                        "REVISE": "REVISE",
+                        "REJECT": "REJECTED",
+                    }[review.verdict],
+                    input_sha256=input_hash,
+                    evidence_universe=branch_evidence_universe,
+                    output_sha256=output_hash,
+                    analysis=hypothesis,
+                    analysis_batches=analysis_batches,
+                    review=review,
+                    input_chars=last_completion.get("input_chars"),
+                    request_started=bool(last_completion.get("request_started", False)),
+                )
+            )
+            if review.verdict == "APPROVE":
+                approved = ApprovedChannelAnalysis(
+                    channel=channel,
+                    analysis=hypothesis,
                     review=review,
                     attempt=attempt,
                     input_sha256=input_hash,
@@ -213,6 +291,7 @@ class HypothesisReviewGraph:
                     input_chars=last_completion.get("input_chars"),
                     failure_category=last_completion.get("failure_category"),
                     request_started=bool(last_completion.get("request_started", False)),
+                    review_attempts=tuple(attempt_artifacts),
                     approved=approved,
                 )
             if review.verdict == "REJECT":
@@ -238,6 +317,7 @@ class HypothesisReviewGraph:
             input_chars=last_completion.get("input_chars"),
             failure_category="review",
             request_started=bool(last_completion.get("request_started", False)),
+            review_attempts=tuple(attempt_artifacts),
         )
 
     def run(
@@ -306,11 +386,38 @@ class HypothesisReviewGraph:
             if item.status == "SUCCEEDED" and item.approved is not None
         )
         conflicts = _conflicts(approved)
-        allowed_ids = frozenset(item.evidence_id for item in base_evidence)
+        evidence_universe = RoleVisibleEvidenceUniverse.from_role_sources(
+            role="main_scientist_and_critic",
+            evidence=base_evidence,
+            interaction=base_interaction,
+            approved_channel_analyses=approved,
+        )
+        all_main_evidence_cards = main_synthesis_evidence_cards(
+            evidence=evidence,
+            interaction=interaction,
+            approved=approved,
+        )
+        evidence_universe_sha256 = canonical_sha256(
+            evidence_universe.model_dump(mode="json")
+        )
+        main_review_attempts: list[MainReviewAttemptArtifact] = []
+        last_hypothesis: Hypothesis | None = None
+        last_review = None
         revision = None
         for attempt in range(self.max_main_revision_attempts + 1):
+            hypothesis = None
+            review = None
+            selected_evidence_cards = ()
+            input_payload = {
+                "attempt": attempt,
+                "approved": [item.model_dump(mode="json") for item in approved],
+                "conflicts": [item.model_dump(mode="json") for item in conflicts],
+                "evidence_universe_sha256": evidence_universe_sha256,
+                "revision": revision,
+            }
+            input_sha256 = canonical_sha256(input_payload)
             try:
-                hypothesis = main_proposer(
+                proposal = main_proposer(
                     approved_subhypotheses=approved,
                     cross_channel_conflicts=conflicts,
                     base_interaction=base_interaction,
@@ -318,32 +425,149 @@ class HypothesisReviewGraph:
                     critic_revision=revision,
                     hypothesis_attempt=attempt,
                 )
+                if isinstance(proposal, SynthesisAbstention):
+                    selected_evidence_cards = select_main_review_evidence_cards(
+                        proposal, all_main_evidence_cards
+                    )
+                    input_sha256 = canonical_sha256(
+                        {
+                            **input_payload,
+                            "proposal": proposal.model_dump(mode="json"),
+                            "evidence_cards": [
+                                item.model_dump(mode="json")
+                                for item in selected_evidence_cards
+                            ],
+                        }
+                    )
+                    main_review_attempts.append(
+                        MainReviewAttemptArtifact(
+                            hypothesis_attempt=attempt,
+                            disposition="ABSTAINED",
+                            input_sha256=input_sha256,
+                            output_sha256=canonical_sha256(
+                                proposal.model_dump(mode="json")
+                            ),
+                            evidence_universe_sha256=evidence_universe_sha256,
+                            evidence_cards=selected_evidence_cards,
+                            abstention=proposal,
+                        )
+                    )
+                    return HypothesisPipelineResult(
+                        status="FAILED",
+                        branches=tuple(receipts),
+                        conflicts=conflicts,
+                        evidence_universe=evidence_universe,
+                        main_abstention=proposal,
+                        main_review_attempts=tuple(main_review_attempts),
+                        main_attempts=attempt + 1,
+                        failure_code="NO_SUPPORTED_HYPOTHESIS",
+                    )
+                hypothesis = proposal
                 if not hypothesis.explanation:
                     hypothesis = replace(
                         hypothesis,
                         explanation=_default_explanation(approved, conflicts),
                     )
-                review = self.main_critic.review(
-                    hypothesis=hypothesis,
-                    approved=approved,
-                    conflicts=conflicts,
-                    allowed_evidence_ids=allowed_ids,
+                selected_evidence_cards = select_main_review_evidence_cards(
+                    hypothesis, all_main_evidence_cards
                 )
+                critic_evidence_universe = RoleVisibleEvidenceUniverse.from_role_sources(
+                    role="main_critic", evidence=selected_evidence_cards
+                )
+                input_sha256 = canonical_sha256(
+                    {
+                        **input_payload,
+                        "hypothesis": hypothesis.__dict__,
+                        "evidence_cards": [
+                            item.model_dump(mode="json")
+                            for item in selected_evidence_cards
+                        ],
+                        "critic_evidence_universe": critic_evidence_universe.model_dump(
+                            mode="json"
+                        ),
+                    }
+                )
+                review_parameters = signature(self.main_critic.review).parameters.values()
+                review_kwargs = {
+                    "hypothesis": hypothesis,
+                    "approved": approved,
+                    "conflicts": conflicts,
+                    "evidence_universe": critic_evidence_universe,
+                }
+                if any(
+                    item.name == "evidence_cards"
+                    or item.kind is Parameter.VAR_KEYWORD
+                    for item in review_parameters
+                ):
+                    review_kwargs["evidence_cards"] = selected_evidence_cards
+                review = self.main_critic.review(**review_kwargs)
             except Exception as error:  # noqa: BLE001 - graph must emit a terminal receipt
+                if hypothesis is not None:
+                    last_hypothesis = hypothesis
+                main_review_attempts.append(
+                    MainReviewAttemptArtifact(
+                        hypothesis_attempt=attempt,
+                        disposition="FAILED",
+                        input_sha256=input_sha256,
+                        output_sha256=(
+                            canonical_sha256(hypothesis.__dict__)
+                            if hypothesis is not None
+                            else None
+                        ),
+                        evidence_universe_sha256=evidence_universe_sha256,
+                        evidence_cards=selected_evidence_cards,
+                        hypothesis=(
+                            hypothesis.__dict__ if hypothesis is not None else None
+                        ),
+                        error_code=f"{type(error).__name__}:{str(error)[:240]}",
+                    )
+                )
                 return HypothesisPipelineResult(
                     status="FAILED",
                     branches=tuple(receipts),
                     conflicts=conflicts,
+                    evidence_universe=evidence_universe,
+                    main_hypothesis=(
+                        last_hypothesis.__dict__ if last_hypothesis is not None else None
+                    ),
+                    main_review=last_review,
+                    main_review_attempts=tuple(main_review_attempts),
                     main_attempts=attempt + 1,
                     failure_code=f"MAIN_NODE_FAILED:{type(error).__name__}:{str(error)[:240]}",
                 )
+            last_hypothesis = hypothesis
+            last_review = review
+            disposition = {
+                "APPROVE": "APPROVED",
+                "REVISE": "REVISE",
+                "REJECT": "REJECTED",
+            }[review.verdict]
+            main_review_attempts.append(
+                MainReviewAttemptArtifact(
+                    hypothesis_attempt=attempt,
+                    disposition=disposition,
+                    input_sha256=input_sha256,
+                    output_sha256=canonical_sha256(
+                        {
+                            "hypothesis": hypothesis.__dict__,
+                            "review": review.model_dump(mode="json"),
+                        }
+                    ),
+                    evidence_universe_sha256=evidence_universe_sha256,
+                    evidence_cards=selected_evidence_cards,
+                    hypothesis=hypothesis.__dict__,
+                    review=review,
+                )
+            )
             if review.verdict == "APPROVE":
                 return HypothesisPipelineResult(
                     status="SUCCEEDED",
                     branches=tuple(receipts),
                     conflicts=conflicts,
+                    evidence_universe=evidence_universe,
                     main_hypothesis=hypothesis.__dict__,
                     main_review=review,
+                    main_review_attempts=tuple(main_review_attempts),
                     main_attempts=attempt + 1,
                 )
             if review.verdict == "REJECT":
@@ -366,6 +590,12 @@ class HypothesisReviewGraph:
             status="FAILED",
             branches=tuple(receipts),
             conflicts=conflicts,
-            main_attempts=self.max_main_revision_attempts + 1,
+            evidence_universe=evidence_universe,
+            main_hypothesis=(
+                last_hypothesis.__dict__ if last_hypothesis is not None else None
+            ),
+            main_review=last_review,
+            main_review_attempts=tuple(main_review_attempts),
+            main_attempts=len(main_review_attempts),
             failure_code="MAIN_CRITIC_NOT_APPROVED",
         )
