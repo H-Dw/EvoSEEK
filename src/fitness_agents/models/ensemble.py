@@ -10,6 +10,7 @@ from sklearn.gaussian_process import GaussianProcessRegressor
 from sklearn.gaussian_process.kernels import RBF, ConstantKernel, WhiteKernel
 from sklearn.linear_model import Ridge
 
+from fitness_agents.contracts.capabilities import PredictorCapabilities
 from fitness_agents.contracts.interfaces import FeatureProvider
 from fitness_agents.contracts.schemas import FitnessObservation, Prediction, Variant
 from fitness_agents.features.gb1 import hamming_distance
@@ -41,6 +42,7 @@ class OneHotHeterogeneousEnsemble:
         conformal_alpha: float = 0.10,
         include_gaussian_process: bool = False,
         seed: int = 0,
+        capabilities: PredictorCapabilities | None = None,
     ) -> None:
         self.feature_provider = feature_provider
         self.ridge_members = ridge_members
@@ -50,11 +52,16 @@ class OneHotHeterogeneousEnsemble:
         self.conformal_alpha = conformal_alpha
         self.include_gaussian_process = include_gaussian_process
         self.seed = seed
+        self.capabilities = capabilities or PredictorCapabilities()
         self.model_version = f"onehot-ensemble-seed{seed}"
         self._models: _FittedModels | None = None
         self._calibration_radius = 0.0
         self._train_codes: list[str] = []
         self._reference_code: str | None = None
+
+    def _code_for(self, variant: Variant) -> str:
+        resolver = getattr(self.feature_provider, "code_for", None)
+        return str(resolver(variant) if callable(resolver) else variant.variant)
 
     @staticmethod
     def _align_targets(
@@ -110,7 +117,7 @@ class OneHotHeterogeneousEnsemble:
             with TimedHeartbeat("ensemble Gaussian process fit"):
                 gp.fit(x_train, y_train)
         self._models = _FittedModels(ridge=ridge_models, extra_trees=forest, gaussian_process=gp)
-        self._train_codes = [variant.variant for variant in variants]
+        self._train_codes = [self._code_for(variant) for variant in variants]
         self._reference_code = "".join(
             min(Counter(column).items(), key=lambda item: (-item[1], item[0]))[0]
             for column in zip(*self._train_codes, strict=True)
@@ -172,9 +179,13 @@ class OneHotHeterogeneousEnsemble:
             )
             stds = np.sqrt(epistemic**2 + calibrated_sigma**2)
             for index, variant in enumerate(batch):
-                nearest = min(hamming_distance(variant.variant, code) for code in self._train_codes)
+                candidate_code = self._code_for(variant)
+                nearest = min(hamming_distance(candidate_code, code) for code in self._train_codes)
                 depth_novelty = max(0, variant.mutation_count - max_train_depth)
-                ood = min(1.0, nearest / 4.0 + 0.15 * depth_novelty)
+                ood = min(
+                    1.0,
+                    nearest / max(len(self._reference_code), 1) + 0.15 * depth_novelty,
+                )
                 radius = max(self._calibration_radius, 1.645 * float(stds[index]))
                 predictions.append(
                     Prediction(

@@ -35,11 +35,14 @@ from fitness_agents.validation.batch import BatchHardValidator, build_draft_batc
 
 def _variant(code: str, variant_id: str) -> Variant:
     positions = (39, 40, 41, 54)
-    notation = ";".join(
-        f"{source}{position}{target}"
-        for source, position, target in zip("VDGV", positions, code, strict=True)
-        if source != target
-    ) or "WT"
+    notation = (
+        ";".join(
+            f"{source}{position}{target}"
+            for source, position, target in zip("VDGV", positions, code, strict=True)
+            if source != target
+        )
+        or "WT"
+    )
     return Variant(
         variant_id=variant_id,
         variant=code,
@@ -326,17 +329,21 @@ def test_falsification_preregistration_cannot_be_changed_after_review():
 
 def test_scientific_critic_skill_is_structured_english():
     profile = load_critic_profile("scientific_v1")
-    assert "## 4. Review Lenses" in profile
-    assert "## 7. Output Contract" in profile
+    assert "## 3. Activation-state routing" in profile
+    assert "## 4. Review lenses" in profile
+    assert "## 7. Output contract" in profile
     assert "supported or contradicted before results exist" in profile
     assert "REGENERATE_WITH_CONSTRAINTS" in profile
     assert "ADD_CONTROL" in profile
-    assert "Hypothesis–Feature" in profile
-    assert "support|mixed|oppose|unavailable" in profile
-    assert "physchem" in profile
-    assert "conservation" in profile
-    assert "structure" in profile
-    assert "Neff" in profile
+    assert "support`, `mixed`, `oppose`, or" in profile
+    assert "open_design" in profile
+    assert "executed_kg_tools" in profile
+    assert "active_learning" in profile
+    for forbidden_prior in ("AAIndex", "Neff", "SASA", "salt-bridge", "hydropathy"):
+        assert forbidden_prior not in profile
+    assert "physicochemical context" in profile
+    assert "evolutionary context" in profile
+    assert "structural context" in profile
     assert not any("\u4e00" <= character <= "\u9fff" for character in profile)
 
 
@@ -437,9 +444,7 @@ def test_add_control_revise_rebuilds_batch_instead_of_aborting(experiment_config
         expected_batch_size=1,
     )
     assert result.approved_batch.candidate_ids == ("b",)
-    assert any(
-        isinstance(item, RevisionConstraints) and item.require_controls for item in seen[1:]
-    )
+    assert any(isinstance(item, RevisionConstraints) and item.require_controls for item in seen[1:])
 
 
 def test_regenerate_with_constraints_requests_new_hypothesis(experiment_config):

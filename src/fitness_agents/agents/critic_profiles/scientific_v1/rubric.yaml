@@ -1,8 +1,11 @@
 profile_id: scientific_v1
-version: 1.0.0
+version: 2.0.0
 language: en
 review_order:
+  - activation_route
   - deterministic_conflicts
+  - objective_and_measurement
+  - design_space
   - evidence_audit
   - sequence_and_epistasis_risk
   - batch_design

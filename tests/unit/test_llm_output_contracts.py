@@ -214,10 +214,16 @@ def test_scientist_profile_defines_output_and_authority_boundaries() -> None:
     assert "critic_revision" in profile
     assert "400" in profile
     assert "visible_observations" in profile
-    assert "physchem" in profile
-    assert "conservation" in profile
-    assert "structure" in profile
-    assert "Neff" in profile
+    assert "## 3. Activation-state routing" in profile
+    assert "## 4. Directed-evolution reasoning hierarchy" in profile
+    assert "executed_kg_tools" in profile
+    assert "open_design" in profile
+    assert "active_learning" in profile
+    for forbidden_prior in ("AAIndex", "Neff", "SASA", "salt-bridge", "hydropathy"):
+        assert forbidden_prior not in profile
+    assert "physicochemical context" in profile
+    assert "evolutionary context" in profile
+    assert "structural context" in profile
     assert "JSON object" in profile
 
 
@@ -307,6 +313,8 @@ def test_scientist_prompt_keeps_decision_provenance_but_drops_backend_bulk() -> 
     )
 
     payload = json.loads(messages[1]["content"])
+    assert payload["context"]["activation_state"]["design_space"] == "closed_pool"
+    assert payload["context"]["activation_state"]["executed_kg_tools"] == []
     assert payload["evidence"][0]["evidence_id"] == "ev:1"
     assert payload["evidence"][0]["provenance"] == {
         "artifact_uri": "claim.md",
@@ -367,7 +375,7 @@ def test_scientist_prompt_keeps_bounded_feature_tool_evidence() -> None:
                                 "provider": "MSAProfileProvider",
                                 "resource_sha256": "msa-hash",
                             },
-                        }
+                        },
                     ],
                     "provenance": [],
                 }
@@ -390,9 +398,7 @@ def test_scientist_prompt_keeps_bounded_feature_tool_evidence() -> None:
     conservation = payload["context"]["kg_interaction"]["packs"][0]["evidence"][1]
     assert conservation["raw_features"]["neff_per_length"] == 0.27
     assert conservation["raw_features"]["pairwise_enabled"] is False
-    assert conservation["raw_features"]["estimated_parameters"] == [
-        "pseudocount_weight"
-    ]
+    assert conservation["raw_features"]["estimated_parameters"] == ["pseudocount_weight"]
     assert "backend_coordinate_dump" not in messages[1]["content"]
     assert "private_cache_state" not in messages[1]["content"]
 

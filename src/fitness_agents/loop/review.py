@@ -6,6 +6,7 @@ from typing import Any
 
 from fitness_agents.agents.critic import CriticAgent
 from fitness_agents.agents.output_guards import RevisionConstraints
+from fitness_agents.contracts.agent_io import RoleActivationState
 from fitness_agents.contracts.schemas import (
     ApprovedBatch,
     ConflictReport,
@@ -108,7 +109,9 @@ class RevisionPlanner:
             constraints=constraints,
             exclusions=excluded,
             regenerate_hypothesis=regenerate,
-            executable=executable or bool(excluded) or any(
+            executable=executable
+            or bool(excluded)
+            or any(
                 (
                     constraints.require_controls,
                     constraints.increase_diversity,
@@ -147,6 +150,7 @@ class BoundedReviewLoop:
         expected_batch_size: int,
         context_evidence: Sequence[Evidence] = (),
         hypothesis: Any | None = None,
+        activation_state: RoleActivationState | dict[str, Any] | None = None,
         on_attempt: Callable[[DraftBatch, ConflictReport, CritiqueDecision], Any] | None = None,
         on_attempt_start: Callable[[DraftBatch, ConflictReport], Any] | None = None,
     ) -> ReviewLoopResult:
@@ -179,6 +183,7 @@ class BoundedReviewLoop:
                 conflict_report=report,
                 context_evidence=context_evidence,
                 hypothesis=hypothesis,
+                activation_state=activation_state,
             )
             attempts.append(decision)
             if on_attempt is not None:
@@ -187,7 +192,9 @@ class BoundedReviewLoop:
                 approved = self.gateway.approve(draft=draft, report=report, decision=decision)
                 return ReviewLoopResult(draft, report, decision, approved, tuple(attempts))
             if decision.verdict is ReviewVerdict.REJECT:
-                raise ReviewRejected(decision.summary or "Critic rejected the draft", decisions=attempts)
+                raise ReviewRejected(
+                    decision.summary or "Critic rejected the draft", decisions=attempts
+                )
             if attempt >= self.max_revision_attempts:
                 raise ReviewRejected("Critic revision limit exhausted", decisions=attempts)
             plan = self.revision_planner.plan(decision)
@@ -197,7 +204,9 @@ class BoundedReviewLoop:
                     decisions=attempts,
                 )
             if not plan.executable:
-                raise ReviewRejected("Revision request cannot be executed safely", decisions=attempts)
+                raise ReviewRejected(
+                    "Revision request cannot be executed safely", decisions=attempts
+                )
             exclusions.update(plan.exclusions)
             constraints = constraints.merge(plan.constraints)
             parent_id = draft.draft_batch_id

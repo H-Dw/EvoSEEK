@@ -213,19 +213,46 @@ class MockScientistLLMClient:
         observations = list(context.get("visible_observations", []))
         positions = tuple(int(item) for item in context["mutable_positions"])
         wild_type_sites = str(context["wild_type_sites"])
+        sparse_preferences = context.get("preference_policy") == "sparse_subset"
+        selected_positions = positions
+        if sparse_preferences:
+            position_scores = []
+            for index, position in enumerate(positions):
+                residues = [
+                    str(item.get("residues_by_position", {}).get(str(position), ""))
+                    for item in observations
+                    if str(item.get("residues_by_position", {}).get(str(position), ""))
+                ]
+                non_wild = sum(item != wild_type_sites[index] for item in residues)
+                position_scores.append((non_wild, len(set(residues)), -position, position))
+            limit = min(int(context.get("max_preferred_positions", 12)), len(positions))
+            informative = [item for item in position_scores if item[0] > 0]
+            pool = informative or position_scores
+            selected_positions = tuple(
+                item[-1] for item in sorted(pool, reverse=True)[:limit]
+            )
         if not observations:
             preferred = {
                 position: (wild_type_sites[index],)
                 for index, position in enumerate(positions)
+                if position in selected_positions
             }
         else:
             ranked = sorted(observations, key=lambda item: item["measured_fitness"], reverse=True)
             elite = ranked[: max(4, len(ranked) // 3)]
             preferred = {}
             for index, position in enumerate(positions):
+                if position not in selected_positions:
+                    continue
                 residue_values: dict[str, list[float]] = defaultdict(list)
                 for item in elite:
-                    residue_values[item["variant"][index]].append(item["measured_fitness"])
+                    residue = str(
+                        item.get("residues_by_position", {}).get(str(position), "")
+                    )
+                    if residue:
+                        residue_values[residue].append(item["measured_fitness"])
+                if not residue_values:
+                    residue_values[wild_type_sites[index]].append(0.0)
                 order = sorted(
                     residue_values,
                     key=lambda residue: (
@@ -253,7 +280,7 @@ class MockScientistLLMClient:
                 residue = str(item["residue"])
                 if residue not in graph_preferences[position]:
                     graph_preferences[position].append(residue)
-        for position in positions:
+        for position in selected_positions:
             merged = graph_preferences[position] + list(preferred.get(position, ()))
             preferred[position] = tuple(dict.fromkeys(merged))[:2]
 
@@ -366,6 +393,14 @@ class NativeScientistClient:
             {entry.evidence_id for entry in evidence}.union(context_evidence_ids)
         )
         expected_positions = tuple(int(item) for item in context["mutable_positions"])
+        sparse_preferences = context.get("preference_policy") == "sparse_subset"
+        exact_positions = None if sparse_preferences else expected_positions
+        allowed_positions = expected_positions if sparse_preferences else None
+        max_positions = (
+            int(context.get("max_preferred_positions", 12))
+            if sparse_preferences
+            else None
+        )
         output = complete_structured(
             client=self.client,
             transport=getattr(self, "transport", None),
@@ -386,7 +421,9 @@ class NativeScientistClient:
                 expected_hypothesis_id=expected_id,
                 expected_parent_hypothesis_id=expected_parent_id,
                 allowed_evidence_ids=allowed_evidence_ids,
-                expected_positions=expected_positions,
+                expected_positions=exact_positions,
+                allowed_positions=allowed_positions,
+                max_positions=max_positions,
             ),
             trace_context={
                 **(trace_context or {}),
@@ -402,7 +439,9 @@ class NativeScientistClient:
             expected_hypothesis_id=expected_id,
             expected_parent_hypothesis_id=expected_parent_id,
             allowed_evidence_ids=allowed_evidence_ids,
-            expected_positions=expected_positions,
+            expected_positions=exact_positions,
+            allowed_positions=allowed_positions,
+            max_positions=max_positions,
         )
 
 

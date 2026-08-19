@@ -1,11 +1,14 @@
 {
   "profile_id": "scientific_v1",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "language": "en",
   "decision_schema": "CritiqueDecision/v1",
   "review_lenses": [
+    "activation_route_auditor",
+    "objective_measurement_auditor",
+    "design_space_auditor",
     "evidence_auditor",
-    "epistasis_skeptic",
+    "complete_sequence_interaction_auditor",
     "batch_design_reviewer",
     "falsification_auditor"
   ]

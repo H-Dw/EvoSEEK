@@ -132,6 +132,8 @@ class HypothesisOutput(BaseModel):
         expected_parent_hypothesis_id: str | None | object = _UNSET,
         allowed_evidence_ids: frozenset[str] | None = None,
         expected_positions: tuple[int, ...] | None = None,
+        allowed_positions: tuple[int, ...] | None = None,
+        max_positions: int | None = None,
         on_unknown_evidence: Literal["error", "strip"] = "error",
     ) -> Hypothesis:
         hypothesis_id = self.hypothesis_id
@@ -157,6 +159,17 @@ class HypothesisOutput(BaseModel):
                     "preferred_residues position mismatch; "
                     f"missing={sorted(expected - actual)}, unexpected={sorted(actual - expected)}"
                 )
+        if allowed_positions is not None:
+            allowed = {str(item) for item in allowed_positions}
+            unexpected = sorted(set(preferred).difference(allowed))
+            if unexpected:
+                raise ValueError(
+                    f"preferred_residues contains positions outside design space: {unexpected}"
+                )
+        if max_positions is not None and len(preferred) > max_positions:
+            raise ValueError(
+                f"preferred_residues exceeds max_positions={max_positions}"
+            )
         return Hypothesis(
             hypothesis_id=hypothesis_id,
             statement=self.statement,
@@ -226,6 +239,8 @@ def validate_hypothesis_payload(
     expected_parent_hypothesis_id: str | None | object = _UNSET,
     allowed_evidence_ids: frozenset[str] | None = None,
     expected_positions: tuple[int, ...] | None = None,
+    allowed_positions: tuple[int, ...] | None = None,
+    max_positions: int | None = None,
     on_unknown_evidence: Literal["error", "strip"] = "error",
 ) -> dict[str, Any]:
     model = HypothesisOutput.model_validate(payload)
@@ -235,6 +250,8 @@ def validate_hypothesis_payload(
             expected_parent_hypothesis_id=expected_parent_hypothesis_id,
             allowed_evidence_ids=allowed_evidence_ids,
             expected_positions=expected_positions,
+            allowed_positions=allowed_positions,
+            max_positions=max_positions,
             on_unknown_evidence=on_unknown_evidence,
         )
     except UnknownEvidenceIdsError as error:
@@ -243,6 +260,8 @@ def validate_hypothesis_payload(
             expected_parent_hypothesis_id=expected_parent_hypothesis_id,
             allowed_evidence_ids=allowed_evidence_ids,
             expected_positions=expected_positions,
+            allowed_positions=allowed_positions,
+            max_positions=max_positions,
             on_unknown_evidence="strip",
         )
         dumped = model.model_dump(mode="json", by_alias=True)

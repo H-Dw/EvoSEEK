@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from fitness_agents.config import ModelConfig
+from fitness_agents.contracts.capabilities import PredictorCapabilities
 from fitness_agents.contracts.schemas import FitnessObservation, Prediction, Variant
 
 from .device import resolve_device
@@ -94,6 +95,7 @@ class ExternalPredictorAdapter:
                     f"Backend {config.backend_factory!r} must implement {method}()"
                 )
         self.model_name = model_name
+        self.capabilities = config.capabilities or PredictorCapabilities()
         self.context = context
         self.backend = backend
         backend_version = str(getattr(backend, "model_version", "plugin"))

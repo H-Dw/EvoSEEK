@@ -6,6 +6,7 @@ from fitness_agents.config import ModelConfig
 from fitness_agents.contracts.interfaces import FitnessPredictor
 from fitness_agents.features import create_feature_provider
 
+from .capabilities import predictor_capabilities
 from .ensemble import OneHotHeterogeneousEnsemble
 from .external import create_external_predictor
 
@@ -23,6 +24,7 @@ def _onehot_ensemble(config: ModelConfig, seed: int) -> FitnessPredictor:
         conformal_alpha=config.conformal_alpha,
         include_gaussian_process=config.include_gaussian_process,
         seed=seed,
+        capabilities=predictor_capabilities(config),
     )
 
 

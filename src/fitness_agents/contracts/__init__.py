@@ -1,3 +1,11 @@
+from .agent_io import RoleActivationState
+from .capabilities import PredictorCapabilities
+from .design import (
+    RankedSequenceDesign,
+    ResolvedDesignSpace,
+    SequenceEdit,
+    SequenceProposal,
+)
 from .interfaces import (
     AcquisitionPolicy,
     ApprovedExperimentBackend,
@@ -42,6 +50,12 @@ __all__ = [
     "HypothesisAssessment",
     "LLMClient",
     "Prediction",
+    "PredictorCapabilities",
+    "RankedSequenceDesign",
+    "ResolvedDesignSpace",
+    "RoleActivationState",
     "SelectionRecord",
+    "SequenceEdit",
+    "SequenceProposal",
     "Variant",
 ]

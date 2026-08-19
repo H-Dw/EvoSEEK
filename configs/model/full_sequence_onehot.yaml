@@ -1,0 +1,14 @@
+name: onehot_heterogeneous_ensemble
+device: cpu
+allow_device_fallback: false
+batch_size: 64
+feature_provider: full_sequence_onehot
+ridge_members: 5
+extra_trees_estimators: 120
+ridge_alpha: 10.0
+bootstrap_fraction: 0.85
+conformal_alpha: 0.10
+include_gaussian_process: false
+capabilities:
+  supports_full_sequence: true
+  supports_generated_sequences: true

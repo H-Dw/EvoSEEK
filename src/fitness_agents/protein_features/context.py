@@ -174,6 +174,45 @@ class ProteinTaskContext:
             structure_resources=resources,
         )
 
+    def for_open_design(
+        self, positions: tuple[int, ...] | None = None
+    ) -> ProteinTaskContext:
+        """Return a context whose compact code is the complete reference sequence."""
+
+        if self.sequence_mode != "full_length":
+            raise ValueError("open_design requires a complete full-length reference sequence")
+        offset = min(self.position_to_sequence_index, default=1)
+        # Recover the configured task offset from any valid position/index pair.
+        if self.position_to_sequence_index:
+            first_position = next(iter(self.position_to_sequence_index))
+            offset = first_position - self.position_to_sequence_index[first_position]
+        requested = positions or tuple(
+            range(offset, offset + len(self.full_sequence))
+        )
+        requested = tuple(int(item) for item in requested)
+        if not requested or len(set(requested)) != len(requested):
+            raise ValueError("open_design positions must be non-empty and unique")
+        mapping = {position: position - offset for position in requested}
+        invalid = [position for position, index in mapping.items() if not 0 <= index < len(self.full_sequence)]
+        if invalid:
+            raise ValueError(f"open_design positions are outside the reference sequence: {invalid}")
+        return ProteinTaskContext(
+            task_id=self.task_id,
+            protein_id=self.protein_id,
+            assay_id=self.assay_id,
+            full_sequence=self.full_sequence,
+            mutable_positions=requested,
+            wild_type_residues=tuple(self.full_sequence[mapping[item]] for item in requested),
+            position_to_variant_index={
+                position: index for index, position in enumerate(requested)
+            },
+            position_to_sequence_index=mapping,
+            numbering_scheme=self.numbering_scheme,
+            sequence_mode="full_length",
+            assay_conditions=self.assay_conditions,
+            structure_resources=self.structure_resources,
+        )
+
     @property
     def wild_type_code(self) -> str:
         return "".join(self.wild_type_residues)

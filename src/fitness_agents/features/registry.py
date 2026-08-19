@@ -5,10 +5,12 @@ from collections.abc import Callable
 from fitness_agents.contracts.interfaces import FeatureProvider
 
 from .gb1 import GB1OneHotPairwiseProvider
+from .sequence import FullSequenceOneHotProvider
 
 FEATURE_PROVIDERS: dict[str, Callable[[], FeatureProvider]] = {
     "gb1_onehot": lambda: GB1OneHotPairwiseProvider(include_pairwise=False),
     "gb1_onehot_pairwise": lambda: GB1OneHotPairwiseProvider(include_pairwise=True),
+    "full_sequence_onehot": FullSequenceOneHotProvider,
 }
 
 

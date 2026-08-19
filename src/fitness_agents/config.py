@@ -7,6 +7,8 @@ from urllib.parse import urlparse
 
 import yaml
 
+from fitness_agents.contracts.capabilities import PredictorCapabilities
+
 DEFAULT_CANDIDATE_LIMIT = 64
 REMOVED_SDK_LLM_KEYS = frozenset(
     {"agents_sdk", "sdk_tracing_enabled", "sdk_max_turns", "sdk_model_retries"}
@@ -45,6 +47,7 @@ class TaskConfig:
     objective: str
     public_data_path: Path | None = None
     oracle_data_path: Path | None = None
+    initial_observations_path: Path | None = None
     split_root: Path | None = None
     fold_index: int = 0
     expected_split_strategy: str | None = None
@@ -68,13 +71,18 @@ class TaskConfig:
     def __post_init__(self) -> None:
         uses_manifest = self.split_root is not None
         uses_legacy = self.public_data_path is not None or self.oracle_data_path is not None
-        if uses_manifest and uses_legacy:
-            raise ValueError("Task config cannot mix split_root with legacy public/oracle paths")
-        if not uses_manifest and not (
+        uses_initial_only = self.initial_observations_path is not None
+        if sum((uses_manifest, uses_legacy, uses_initial_only)) > 1:
+            raise ValueError(
+                "Task config cannot mix split_root, legacy public/oracle paths, and "
+                "initial_observations_path"
+            )
+        if not uses_manifest and not uses_initial_only and not (
             self.public_data_path is not None and self.oracle_data_path is not None
         ):
             raise ValueError(
-                "Task config requires split_root or both public_data_path and oracle_data_path"
+                "Task config requires split_root, initial_observations_path, or both "
+                "public_data_path and oracle_data_path"
             )
         if self.fold_index < 0:
             raise ValueError("fold_index must be non-negative")
@@ -104,6 +112,11 @@ class ModelConfig:
     bootstrap_fraction: float = 0.85
     conformal_alpha: float = 0.10
     include_gaussian_process: bool = False
+    capabilities: PredictorCapabilities | dict[str, bool] | None = None
+
+    def __post_init__(self) -> None:
+        if isinstance(self.capabilities, dict):
+            self.capabilities = PredictorCapabilities(**self.capabilities)
 
 
 @dataclass(frozen=True)
@@ -741,6 +754,66 @@ class GenerationConfig:
 
 
 @dataclass(frozen=True)
+class DesignerConfig:
+    """Sequence-space definition for closed-pool or de novo mutation design.
+
+    ``open_design`` is deliberately opt-in.  Its first implementation enumerates
+    every configured single substitution and lets the posterior/acquisition layer
+    rank the resulting full sequences; it never accepts a candidate pool as the
+    proposal source.
+    """
+
+    space: str = "closed_pool"
+    position_policy: str = "configured"
+    proposer: str = "all_position_substitution"
+    include_positions: tuple[int, ...] = ()
+    exclude_positions: tuple[int, ...] = ()
+    allowed_residues: tuple[str, ...] = tuple("ACDEFGHIKLMNPQRSTVWY")
+    mutation_depth: int = 1
+    max_preferred_positions: int = 12
+    hypothesis_prior_weight: float = 0.20
+    structure_constraint_weight: float = 0.20
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "include_positions", tuple(int(item) for item in self.include_positions)
+        )
+        object.__setattr__(
+            self, "exclude_positions", tuple(int(item) for item in self.exclude_positions)
+        )
+        residues = tuple(str(item).strip().upper() for item in self.allowed_residues)
+        object.__setattr__(self, "allowed_residues", residues)
+        if self.space not in {"closed_pool", "open_design"}:
+            raise ValueError("designer.space must be closed_pool or open_design")
+        if self.position_policy not in {"configured", "all", "include", "all_except"}:
+            raise ValueError("designer.position_policy is invalid")
+        if self.space == "open_design" and self.proposer != "all_position_substitution":
+            raise ValueError(
+                "open_design currently requires proposer=all_position_substitution"
+            )
+        if self.position_policy == "include" and not self.include_positions:
+            raise ValueError("designer.position_policy=include requires include_positions")
+        if len(set(self.include_positions)) != len(self.include_positions):
+            raise ValueError("designer.include_positions must be unique")
+        if len(set(self.exclude_positions)) != len(self.exclude_positions):
+            raise ValueError("designer.exclude_positions must be unique")
+        canonical = frozenset("ACDEFGHIKLMNPQRSTVWY")
+        if not residues or any(len(item) != 1 or item not in canonical for item in residues):
+            raise ValueError("designer.allowed_residues must be canonical one-letter residues")
+        if len(set(residues)) != len(residues):
+            raise ValueError("designer.allowed_residues must be unique")
+        if self.mutation_depth != 1:
+            raise ValueError(
+                "open_design MVP supports mutation_depth=1; multi-edit search requires "
+                "combination-level posterior rescoring"
+            )
+        if self.max_preferred_positions < 1:
+            raise ValueError("designer.max_preferred_positions must be positive")
+        if self.hypothesis_prior_weight < 0 or self.structure_constraint_weight < 0:
+            raise ValueError("designer soft-prior weights must be non-negative")
+
+
+@dataclass(frozen=True)
 class CalibratedPosteriorConfig:
     """Visible-label-only posterior configuration for active learning."""
 
@@ -1100,6 +1173,7 @@ class ExperimentConfig:
     critic: CriticConfig = field(default_factory=CriticConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
     generation: GenerationConfig = field(default_factory=GenerationConfig)
+    designer: DesignerConfig = field(default_factory=DesignerConfig)
     active_learning: ActiveLearningConfig = field(default_factory=ActiveLearningConfig)
     validation: ValidationConfig = field(default_factory=ValidationConfig)
     evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
@@ -1139,6 +1213,56 @@ class ExperimentConfig:
         if self.structured_kg_snapshot_mode not in {"live_only", "incremental_ids"}:
             raise ValueError(
                 "structured_kg_snapshot_mode must be 'live_only' or 'incremental_ids'"
+            )
+        if self.designer.space == "open_design":
+            if not (self.task.reference_sequence or self.task.reference_sequence_path):
+                raise ValueError("open_design requires a complete task reference sequence")
+            if self.designer.position_policy == "configured":
+                raise ValueError(
+                    "open_design requires an explicit position_policy; use 'all' to open "
+                    "the complete reference sequence"
+                )
+            if self.generation.selection_driver != "active_learning":
+                raise ValueError(
+                    "open_design requires generation.selection_driver=active_learning so "
+                    "posterior uncertainty participates in residue selection"
+                )
+            if self.candidate_limit > 0:
+                raise ValueError(
+                    "open_design does not use candidate_limit; set candidate_limit=0 so "
+                    "the generated sequence space is not silently truncated"
+                )
+            # Local import avoids coupling configuration parsing to predictor backends.
+            from fitness_agents.models.capabilities import predictor_capabilities
+
+            posterior_models = (
+                self.active_learning.posterior.predictor_models or (self.model,)
+            )
+            incompatible = [
+                (
+                    item.name,
+                    item.feature_provider,
+                    predictor_capabilities(item),
+                )
+                for item in posterior_models
+                if not predictor_capabilities(item).supports_open_design
+            ]
+            if incompatible:
+                details = ", ".join(
+                    f"{name}/{provider} "
+                    f"(supports_full_sequence={caps.supports_full_sequence}, "
+                    f"supports_generated_sequences={caps.supports_generated_sequences})"
+                    for name, provider, caps in incompatible
+                )
+                raise ValueError(
+                    "open_design requires every posterior predictor to support full "
+                    "generated sequences; incompatible predictors: "
+                    f"{details}. GB1 four-site predictors cannot be used for open design."
+                )
+        elif self.task.initial_observations_path is not None:
+            raise ValueError(
+                "initial_observations_path is an open-design measurement source and cannot "
+                "supply a closed_pool campaign"
             )
 
 
@@ -1263,6 +1387,7 @@ def load_experiment_config(
     for key in (
         "public_data_path",
         "oracle_data_path",
+        "initial_observations_path",
         "split_root",
         "reference_sequence_path",
     ):
@@ -1363,6 +1488,11 @@ def load_experiment_config(
         dict(generation_raw.get("quota_allocation", {}) or {}),
     )
     generation = _dataclass_from_mapping(GenerationConfig, generation_raw)
+    designer_raw = dict(raw.get("designer", {}) or {})
+    for key in ("include_positions", "exclude_positions", "allowed_residues"):
+        if key in designer_raw:
+            designer_raw[key] = tuple(designer_raw[key])
+    designer = _dataclass_from_mapping(DesignerConfig, designer_raw)
     active_learning_raw = dict(raw.get("active_learning", {}) or {})
     posterior_raw = dict(active_learning_raw.get("posterior", {}) or {})
     posterior_raw["predictor_models"] = load_model_entries(
@@ -1439,6 +1569,7 @@ def load_experiment_config(
         critic=critic,
         llm=llm,
         generation=generation,
+        designer=designer,
         active_learning=active_learning,
         validation=validation,
         evaluation=evaluation,

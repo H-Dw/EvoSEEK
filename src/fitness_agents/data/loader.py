@@ -41,6 +41,15 @@ class DatasetBundle:
 
 
 @dataclass(frozen=True)
+class InitialObservationBundle:
+    """Visible labels only; intentionally has no candidate-pool field."""
+
+    variants: list[Variant]
+    observations: list[FitnessObservation]
+    source: str
+
+
+@dataclass(frozen=True)
 class FoldBundle:
     """Manifest-driven data view with capability-scoped tables."""
 
@@ -204,6 +213,7 @@ def load_fold_bundle(
 
     allowed = {
         "agent",
+        "designer",
         "controller",
         "oracle",
         "evaluator_inputs",
@@ -239,8 +249,9 @@ def load_fold_bundle(
         return pd.read_csv(_verify_fold_file(fold_root, records[relative]))
 
     observed = candidates = validation = queryable = final_inputs = final_labels = quarantine = None
-    if consumer_role in {"agent", "controller", "auditor"}:
+    if consumer_role in {"agent", "controller", "auditor", "designer"}:
         observed = read("agent/initial_or_train_observed.csv.gz")
+    if consumer_role in {"agent", "controller", "auditor"}:
         candidates = read("agent/candidate_pool.csv.gz")
     if consumer_role in {"controller", "auditor"}:
         validation = read("controller/benchmark_validation.csv.gz")
@@ -290,6 +301,122 @@ def load_campaign_fold_bundle(root: str | Path, fold_index: int) -> DatasetBundl
         oracle_pool=candidates,
         final_test=[],
     )
+
+
+def load_open_design_initial_bundle(
+    *,
+    split_root: str | Path | None = None,
+    fold_index: int = 0,
+    public_path: str | Path | None = None,
+    oracle_path: str | Path | None = None,
+    initial_path: str | Path | None = None,
+) -> InitialObservationBundle:
+    """Load initial measurements without exposing candidate rows to the caller."""
+
+    if split_root is not None:
+        if public_path is not None or oracle_path is not None or initial_path is not None:
+            raise ValueError("Open-design initial data cannot mix fold and legacy paths")
+        view = load_fold_bundle(split_root, fold_index, "designer")
+        if view.observed is None:
+            raise AssertionError("Designer fold view has no observed table")
+        variants = variants_from_fold_frame(view.observed, "initial_observed")
+        observations = _observations_from_fold_frame(view.observed, variants)
+        return InitialObservationBundle(variants, observations, "manifest_observed_only")
+
+    if initial_path is not None:
+        if public_path is not None or oracle_path is not None:
+            raise ValueError(
+                "Open-design initial data cannot mix a measurement file and legacy paths"
+            )
+        frame = pd.read_csv(initial_path)
+        required = {"variant_id", "variant"}
+        if missing := required.difference(frame.columns):
+            raise ValueError(
+                f"Initial observation file missing columns: {sorted(missing)}"
+            )
+        target_column = "fitness" if "fitness" in frame else "target" if "target" in frame else None
+        if target_column is None:
+            raise ValueError("Initial observation file requires fitness or target")
+        if frame.empty or frame["variant_id"].duplicated().any():
+            raise ValueError("Initial observation rows must be non-empty with unique IDs")
+        variants = [
+            Variant(
+                variant_id=str(row.variant_id),
+                variant=str(row.variant),
+                sequence=str(getattr(row, "sequence", row.variant)),
+                mutation_notation=str(getattr(row, "mutation_notation", "WT")),
+                mutation_count=int(getattr(row, "mutation_count", 0)),
+                split_role="initial_observed",
+            )
+            for row in frame.itertuples(index=False)
+        ]
+        observations = [
+            FitnessObservation(
+                variant_id=item.variant_id,
+                fitness=float(frame.iloc[index][target_column]),
+                split_role="initial_observed",
+                round_revealed=0,
+                source="initial_measurement_file",
+            )
+            for index, item in enumerate(variants)
+        ]
+        return InitialObservationBundle(
+            variants, observations, "standalone_initial_observations"
+        )
+
+    if public_path is None or oracle_path is None:
+        raise ValueError("Open design requires visible initial measurements for posterior fitting")
+    public_header = pd.read_csv(public_path, nrows=0)
+    if missing := PUBLIC_REQUIRED.difference(public_header.columns):
+        raise ValueError(f"Public dataset missing columns: {sorted(missing)}")
+    if hidden := {"fitness", "raw_fitness", "normalized_fitness"}.intersection(
+        public_header.columns
+    ):
+        raise ValueError(f"Public candidate table contains hidden labels: {sorted(hidden)}")
+    initial_chunks = [
+        selected.copy()
+        for chunk in pd.read_csv(public_path, chunksize=10_000)
+        if not (
+            selected := chunk.loc[chunk["split_role"] == "initial_observed"]
+        ).empty
+    ]
+    initial_frame = (
+        pd.concat(initial_chunks, ignore_index=True)
+        if initial_chunks
+        else pd.DataFrame(columns=public_header.columns)
+    )
+    if initial_frame.empty:
+        raise ValueError("Open design requires at least one initial_observed row")
+    if initial_frame["variant_id"].duplicated().any():
+        raise ValueError("Initial visible variant IDs must be unique")
+    label_header = pd.read_csv(
+        oracle_path, nrows=0, usecols=lambda name: name in ORACLE_REQUIRED
+    )
+    if missing := ORACLE_REQUIRED.difference(label_header.columns):
+        raise ValueError(f"Oracle dataset missing columns: {sorted(missing)}")
+    initial_ids = set(initial_frame["variant_id"].astype(str))
+    visible_chunks = []
+    for chunk in pd.read_csv(
+        oracle_path,
+        usecols=lambda name: name in ORACLE_REQUIRED,
+        chunksize=10_000,
+    ):
+        selected = chunk.loc[
+            chunk["variant_id"].astype(str).isin(initial_ids)
+            & (chunk["split_role"] == "initial_observed")
+        ]
+        if not selected.empty:
+            visible_chunks.append(selected.copy())
+    visible_labels = (
+        pd.concat(visible_chunks, ignore_index=True)
+        if visible_chunks
+        else pd.DataFrame(columns=label_header.columns)
+    )
+    if set(visible_labels["variant_id"].astype(str)) != initial_ids:
+        raise ValueError("Initial public rows and visible labels have different variant IDs")
+    variants = [_row_to_variant(row) for row in initial_frame.itertuples(index=False)]
+    observations = _visible_observations(variants, visible_labels, 0)
+    return InitialObservationBundle(variants, observations, "legacy_initial_observed_only")
 
 
 def load_fold_final_variants(root: str | Path, fold_index: int) -> list[Variant]:

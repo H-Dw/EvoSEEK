@@ -13,11 +13,11 @@ from fitness_agents.acquisition import create_policy
 from fitness_agents.active_learning import create_active_learning_module
 from fitness_agents.agents.client_registry import create_role_client_bundle
 from fitness_agents.agents.critic import CriticAgent, OpenAICriticClient, RuleBasedCriticClient
-from fitness_agents.agents.rethink import create_rethink_client
 from fitness_agents.agents.output_guards import RevisionConstraints, critic_revision_payload
+from fitness_agents.agents.rethink import create_rethink_client
 from fitness_agents.agents.scientist import ScientistAgent
 from fitness_agents.config import ExperimentConfig
-from fitness_agents.contracts.agent_io import ReThinkContextInput
+from fitness_agents.contracts.agent_io import ReThinkContextInput, RoleActivationState
 from fitness_agents.contracts.schemas import (
     CampaignPhase,
     CampaignState,
@@ -137,7 +137,10 @@ def _shuffle_prediction_scores(
 ) -> list[Prediction]:
     means = np.asarray([prediction.fitness_mean for prediction in predictions])
     shuffled = rng.permutation(means)
-    return [replace(prediction, fitness_mean=float(shuffled[index])) for index, prediction in enumerate(predictions)]
+    return [
+        replace(prediction, fitness_mean=float(shuffled[index]))
+        for index, prediction in enumerate(predictions)
+    ]
 
 
 def _validation_record_id(
@@ -271,12 +274,10 @@ class CampaignRunner:
             snapshot_mode=config.structured_kg_snapshot_mode,
         )
         self._scientist_local_context_allowed = bool(
-            config.knowledge.local_knowledge.allow_remote_context
-            or config.llm.provider == "mock"
+            config.knowledge.local_knowledge.allow_remote_context or config.llm.provider == "mock"
         )
         self._critic_local_context_allowed = bool(
-            config.knowledge.local_knowledge.allow_remote_context
-            or config.critic.mode != "remote"
+            config.knowledge.local_knowledge.allow_remote_context or config.critic.mode != "remote"
         )
         graph_tool = (
             self.knowledge.agent_tool()
@@ -299,6 +300,9 @@ class CampaignRunner:
             task_context=self.task_context,
             objective=config.task.objective,
             knowledge_graph=graph_tool,
+            design_space=config.designer.space,
+            position_policy=config.designer.position_policy,
+            max_preferred_positions=config.designer.max_preferred_positions,
         )
         self.kg_interaction = None
         if graph_tool is not None and config.kg_interaction.enabled:
@@ -312,15 +316,11 @@ class CampaignRunner:
             )
             operators.register(
                 "query_evolutionary_profile",
-                FeatureEvidenceOperator(
-                    "query_evolutionary_profile", "conservation", graph_tool
-                ),
+                FeatureEvidenceOperator("query_evolutionary_profile", "conservation", graph_tool),
             )
             operators.register(
                 "query_structure_environment",
-                FeatureEvidenceOperator(
-                    "query_structure_environment", "structure", graph_tool
-                ),
+                FeatureEvidenceOperator("query_structure_environment", "structure", graph_tool),
             )
             operators.register("query_feature_bundle", FeatureBundleOperator(graph_tool))
             operators.register(
@@ -331,13 +331,8 @@ class CampaignRunner:
                 "query_assay_association",
                 FeatureEvidenceOperator("query_assay_association", "kg", graph_tool),
             )
-            operators.register(
-                "query_evidence_provenance", EvidenceProvenanceOperator(graph_tool)
-            )
-            if (
-                self.knowledge.local_knowledge is not None
-                and self._scientist_local_context_allowed
-            ):
+            operators.register("query_evidence_provenance", EvidenceProvenanceOperator(graph_tool))
+            if self.knowledge.local_knowledge is not None and self._scientist_local_context_allowed:
                 operators.register(
                     "query_local_knowledge", LocalKnowledgeQueryOperator(self.knowledge)
                 )
@@ -423,6 +418,93 @@ class CampaignRunner:
             return self.config.generation.use_fitness_predictors
         return selection_driver in {"active_learning", "predictor"}
 
+    def _role_activation_state(
+        self,
+        role: str,
+        *,
+        evidence: Sequence[Any] = (),
+        local_evidence: Sequence[Any] = (),
+        interaction_result: Any | None = None,
+    ) -> RoleActivationState:
+        selection_driver = self._selection_driver()
+        rag_configured = bool(
+            self.config.knowledge_enabled and self.config.knowledge.local_knowledge.enabled
+        )
+        local_visible = bool(
+            role == "scientist"
+            and self._scientist_local_context_allowed
+            or role == "critic"
+            and self._critic_local_context_allowed
+        )
+        visible_evidence = [*evidence]
+        if local_visible:
+            visible_evidence.extend(local_evidence)
+        available_channels = {
+            item.channel
+            for item in visible_evidence
+            if getattr(item, "quality_status", None) != "unavailable"
+        }
+        unavailable_channels = {
+            item.channel
+            for item in visible_evidence
+            if getattr(item, "quality_status", None) == "unavailable"
+        }
+        executed_tools = tuple(
+            dict.fromkeys(pack.operator for pack in getattr(interaction_result, "packs", ()))
+        )
+        if (
+            not executed_tools
+            and getattr(self.agent, "knowledge_graph", None) is not None
+            and self.config.mode in {"llm_agent", "knowledge_agent"}
+        ):
+            executed_tools = ("hypothesis_context",)
+        configured_tools = (
+            tuple(self.config.kg_interaction.enabled_operators)
+            if self.kg_interaction is not None
+            else (("hypothesis_context",) if getattr(self.agent, "knowledge_graph", None) else ())
+        )
+        rag_tools = {"query_local_knowledge", "query_structured_claims"}
+        rag_tool_payload_present = any(
+            pack.operator in rag_tools
+            and bool(getattr(pack, "evidence", ()) or getattr(pack, "facts", ()))
+            for pack in getattr(interaction_result, "packs", ())
+        )
+        rag_evidence_present = bool(
+            local_visible
+            and (
+                any(
+                    getattr(item, "channel", None) == "local_rag"
+                    for item in visible_evidence
+                )
+                or rag_tool_payload_present
+            )
+        )
+        return RoleActivationState(
+            role=role,
+            design_space="closed_pool",
+            candidate_source="candidate_pool",
+            candidate_pool_consulted=True,
+            position_policy=self.config.designer.position_policy,
+            selection_driver=selection_driver,
+            active_learning_enabled=bool(
+                selection_driver == "active_learning" and self.config.active_learning.enabled
+            ),
+            fitness_predictors_used_for_generation=(
+                self._fitness_predictors_used_for_generation(selection_driver)
+            ),
+            rag_configured=rag_configured,
+            rag_context_visible=bool(rag_configured and local_visible),
+            rag_retrieval_performed=bool(self.knowledge.local_knowledge is not None),
+            rag_evidence_present=rag_evidence_present,
+            kg_configured=getattr(self.agent, "knowledge_graph", None) is not None,
+            kg_interaction_enabled=self.kg_interaction is not None,
+            configured_kg_tools=configured_tools,
+            executed_kg_tools=executed_tools,
+            kg_tool_results_present=bool(role == "scientist" and executed_tools),
+            available_evidence_channels=tuple(sorted(available_channels)),
+            unavailable_evidence_channels=tuple(sorted(unavailable_channels)),
+        )
+
     def _create_and_fit_predictor(self, model_config: Any, observed_variants: list[Any], seed: int):
         predictor = self.predictor_factory(model_config, seed=seed)
         self._fit_predictor(predictor, observed_variants)
@@ -466,9 +548,7 @@ class CampaignRunner:
             "conservation": "query_evolutionary_profile",
             "structure": "query_structure_environment",
         }
-        feature_variants = representative_ids[
-            : self.config.kg_interaction.feature_variant_limit
-        ]
+        feature_variants = representative_ids[: self.config.kg_interaction.feature_variant_limit]
         if self.config.kg_interaction.feature_tool_strategy in {
             "independent",
             "independent_and_joint",
@@ -504,8 +584,7 @@ class CampaignRunner:
                     )
                 )
         rag_allowed = (
-            self.knowledge.local_knowledge is not None
-            and self._scientist_local_context_allowed
+            self.knowledge.local_knowledge is not None and self._scientist_local_context_allowed
         )
         if rag_allowed and "query_local_knowledge" in enabled_operators:
             steps.append(
@@ -554,9 +633,7 @@ class CampaignRunner:
                     QueryIntent.UNCERTAINTY,
                     {
                         "items": list(self.config.kg_interaction.truncation_audit_items),
-                        "sample_rows": (
-                            self.config.kg_interaction.truncation_audit_sample_rows
-                        ),
+                        "sample_rows": (self.config.kg_interaction.truncation_audit_sample_rows),
                     },
                     ("context",),
                     "Count keyword matches before max_rows and report missing bounded rows.",
@@ -650,9 +727,7 @@ class CampaignRunner:
         if not evidence:
             return
         selected = [
-            item
-            for item in variants
-            if variant_ids is None or item.variant_id in variant_ids
+            item for item in variants if variant_ids is None or item.variant_id in variant_ids
         ]
         if selected:
             self.knowledge.graph.add_variants(selected)
@@ -709,8 +784,7 @@ class CampaignRunner:
                     ),
                     "retrieval_overlay_path": (
                         str(self.config.knowledge.local_knowledge.retrieval_overlay_path)
-                        if self.config.knowledge.local_knowledge.retrieval_overlay_path
-                        is not None
+                        if self.config.knowledge.local_knowledge.retrieval_overlay_path is not None
                         else None
                     ),
                     "retrieval_mode": self.config.knowledge.local_knowledge.retrieval.mode,
@@ -763,9 +837,7 @@ class CampaignRunner:
                 "provider": self.config.llm.provider,
                 "runtime": "native_chat_completions",
                 "profile": self.config.llm.profile,
-                "profile_sha256": getattr(
-                    self.agent.client, "profile_sha256", None
-                ),
+                "profile_sha256": getattr(self.agent.client, "profile_sha256", None),
                 "model": self.config.llm.model,
                 "base_url": self.config.llm.base_url,
                 "temperature": self.config.llm.temperature,
@@ -808,9 +880,7 @@ class CampaignRunner:
                 "uncertainty_beta": self.config.generation.uncertainty_beta,
                 "predictor_weight": self.config.generation.predictor_weight,
                 "gp_length_scale": self.config.generation.gp_length_scale,
-                "hypothesis_recency_decay": (
-                    self.config.generation.hypothesis_recency_decay
-                ),
+                "hypothesis_recency_decay": (self.config.generation.hypothesis_recency_decay),
                 "quota_allocation": {
                     "enabled": self.config.generation.quota_allocation.enabled,
                     "plugin": (
@@ -843,19 +913,17 @@ class CampaignRunner:
                 ),
                 "acquisition_plugin": self.config.active_learning.acquisition.plugin,
                 "fractions": {
-                    "exploitation": (
-                        self.config.active_learning.acquisition.exploitation_fraction
-                    ),
-                    "exploration": (
-                        self.config.active_learning.acquisition.exploration_fraction
-                    ),
+                    "exploitation": (self.config.active_learning.acquisition.exploitation_fraction),
+                    "exploration": (self.config.active_learning.acquisition.exploration_fraction),
                     "knowledge": self.config.active_learning.acquisition.knowledge_fraction,
                 },
             },
             "validation": {
                 "enabled": self.config.validation.enabled,
                 "primary_model": self.config.model.name,
-                "additional_models": [item.name for item in self.config.validation.predictor_models],
+                "additional_models": [
+                    item.name for item in self.config.validation.predictor_models
+                ],
                 "wet_weight": self.config.validation.wet_weight,
                 "dry_weight_cap": self.config.validation.dry_weight_cap,
                 "recency_decay": self.config.validation.recency_decay,
@@ -867,12 +935,8 @@ class CampaignRunner:
                 "feature_tool_strategy": self.config.kg_interaction.feature_tool_strategy,
                 "feature_channels": list(self.config.kg_interaction.feature_channels),
                 "feature_variant_limit": self.config.kg_interaction.feature_variant_limit,
-                "truncation_audit_enabled": (
-                    self.config.kg_interaction.truncation_audit_enabled
-                ),
-                "truncation_audit_items": list(
-                    self.config.kg_interaction.truncation_audit_items
-                ),
+                "truncation_audit_enabled": (self.config.kg_interaction.truncation_audit_enabled),
+                "truncation_audit_items": list(self.config.kg_interaction.truncation_audit_items),
                 "truncation_audit_sample_rows": (
                     self.config.kg_interaction.truncation_audit_sample_rows
                 ),
@@ -917,12 +981,19 @@ class CampaignRunner:
             *(local_evidence if self._scientist_local_context_allowed else ()),
             *self._flatten_round_evidence(evidence),
         ]
+        activation_state = self._role_activation_state(
+            "scientist",
+            evidence=self._flatten_round_evidence(evidence),
+            local_evidence=local_evidence,
+            interaction_result=interaction_result,
+        )
         hypothesis = self.agent.propose_hypothesis(
             self.state,
             observed_variants,
             self.state.observed,
             evidence_list,
             kg_interaction=interaction_result,
+            activation_state=activation_state,
             critic_revision=revision,
             hypothesis_attempt=1,
         )
@@ -933,6 +1004,7 @@ class CampaignRunner:
                 self.state.observed,
                 evidence_list,
                 kg_interaction=interaction_result,
+                activation_state=activation_state,
                 critic_revision={**revision, "identical_residues_rejected": True},
                 hypothesis_attempt=2,
             )
@@ -1013,10 +1085,7 @@ class CampaignRunner:
     def _run_campaign(self) -> dict[str, Any]:
         public_by_id = {
             variant.variant_id: variant
-            for variant in (
-                self.bundle.initial_variants
-                + self.bundle.oracle_pool
-            )
+            for variant in (self.bundle.initial_variants + self.bundle.oracle_pool)
         }
         observed_variants = list(self.bundle.initial_variants)
         self.state.observed = list(self.bundle.initial_observations)
@@ -1144,9 +1213,7 @@ class CampaignRunner:
                 if evidence:
                     all_evidence = [item for bundle in evidence.values() for item in bundle]
                     persisted_evidence = [
-                        item
-                        for bundle in observed_evidence.values()
-                        for item in bundle
+                        item for bundle in observed_evidence.values() for item in bundle
                     ]
                     self.writer.write_json(
                         f"round_{round_id:02d}/evidence_contract.json",
@@ -1164,9 +1231,7 @@ class CampaignRunner:
                             },
                             "quality_counts": {
                                 status: sum(item.quality_status == status for item in all_evidence)
-                                for status in sorted(
-                                    {item.quality_status for item in all_evidence}
-                                )
+                                for status in sorted({item.quality_status for item in all_evidence})
                             },
                             "calibrated_count": sum(item.calibrated for item in all_evidence),
                             "selection_eligible_count": sum(
@@ -1226,9 +1291,7 @@ class CampaignRunner:
                         "query_id": local_result.query_id if local_result else None,
                         "chunk_count": len(local_result.chunks) if local_result else 0,
                         "evidence_count": len(local_evidence),
-                        "policy_decision": (
-                            local_result.policy_decision if local_result else None
-                        ),
+                        "policy_decision": (local_result.policy_decision if local_result else None),
                     },
                 )
 
@@ -1282,15 +1345,22 @@ class CampaignRunner:
                     phase=CampaignPhase.LLM_HYPOTHESIS,
                     model=self.config.llm.model or self.config.llm.provider,
                 )
+                round_evidence = self._flatten_round_evidence(evidence)
                 hypothesis = self.agent.propose_hypothesis(
                     self.state,
                     observed_variants,
                     self.state.observed,
                     [
                         *(local_evidence if self._scientist_local_context_allowed else ()),
-                        *self._flatten_round_evidence(evidence),
+                        *round_evidence,
                     ],
                     kg_interaction=interaction_result,
+                    activation_state=self._role_activation_state(
+                        "scientist",
+                        evidence=round_evidence,
+                        local_evidence=local_evidence,
+                        interaction_result=interaction_result,
+                    ),
                 )
                 self.state.hypotheses.append(hypothesis)
                 self.knowledge.graph.add_hypothesis(
@@ -1350,9 +1420,7 @@ class CampaignRunner:
                             observed_variants,
                             self.config.seed + round_id * 101 + model_index,
                         )
-                        generation_prediction_sets.append(
-                            generation_predictor.predict(eligible)
-                        )
+                        generation_prediction_sets.append(generation_predictor.predict(eligible))
                 prior_scores = self.knowledge.validation_prior_scores(
                     eligible,
                     round_id=round_id,
@@ -1368,15 +1436,9 @@ class CampaignRunner:
                 )
                 design_predictions = self.agent_selector.as_predictions(design_scores)
                 if self.config.score_shuffle:
-                    design_predictions = _shuffle_prediction_scores(
-                        design_predictions, self.rng
-                    )
-                all_scores = {
-                    item.variant_id: item.fitness_mean for item in design_predictions
-                }
-                working_by_id = {
-                    item.variant_id: item for item in design_predictions
-                }
+                    design_predictions = _shuffle_prediction_scores(design_predictions, self.rng)
+                all_scores = {item.variant_id: item.fitness_mean for item in design_predictions}
+                working_by_id = {item.variant_id: item for item in design_predictions}
             elif selection_driver == "active_learning":
                 if self.active_learning is None:
                     raise AssertionError("Active-learning selection has no configured module")
@@ -1421,9 +1483,7 @@ class CampaignRunner:
                 working_predictions = list(selection_posterior.predictions)
                 all_scores = active_score_result.composite_by_id()
                 active_scores_by_id = active_score_result.by_id()
-                working_by_id = {
-                    item.variant_id: item for item in working_predictions
-                }
+                working_by_id = {item.variant_id: item for item in working_predictions}
                 design_scores = [
                     DesignScore(
                         item.variant_id,
@@ -1479,9 +1539,7 @@ class CampaignRunner:
                 ]
                 design_predictions = self.agent_selector.as_predictions(design_scores)
                 all_scores = self.policy.score(design_predictions, {}, self.rng)
-                working_by_id = {
-                    item.variant_id: item for item in design_predictions
-                }
+                working_by_id = {item.variant_id: item for item in design_predictions}
             else:
                 if predictor is None:
                     raise AssertionError("Predictor selection driver has no fitted predictor")
@@ -1498,12 +1556,8 @@ class CampaignRunner:
                     if self.config.score_shuffle
                     else generation_predictions
                 )
-                all_scores = self.policy.score(
-                    working_predictions, knowledge_scores, self.rng
-                )
-                working_by_id = {
-                    item.variant_id: item for item in working_predictions
-                }
+                all_scores = self.policy.score(working_predictions, knowledge_scores, self.rng)
+                working_by_id = {item.variant_id: item for item in working_predictions}
                 design_scores = [
                     DesignScore(
                         item.variant_id,
@@ -1520,9 +1574,7 @@ class CampaignRunner:
                 ]
 
             design_score_by_id = {item.variant_id: item for item in design_scores}
-            self.writer.write_json(
-                f"round_{round_id:02d}/design_scores.json", design_scores
-            )
+            self.writer.write_json(f"round_{round_id:02d}/design_scores.json", design_scores)
             self._progress(
                 "design_scored",
                 f"round {round_id}/{self.config.rounds} design utilities ready via {selection_driver}",
@@ -1583,9 +1635,7 @@ class CampaignRunner:
                         "selected_ids": selected_ids,
                         "quotas": agent_quota_selection.quotas,
                         "selected_by_arm": agent_quota_selection.selected_by_arm,
-                        "matched_control_pairs": (
-                            agent_quota_selection.matched_control_pairs
-                        ),
+                        "matched_control_pairs": (agent_quota_selection.matched_control_pairs),
                         "shortfalls": agent_quota_selection.shortfalls,
                         "fallback_ids": agent_quota_selection.fallback_ids,
                     },
@@ -1614,10 +1664,7 @@ class CampaignRunner:
             if evidence:
                 self.writer.write_json(
                     f"round_{round_id:02d}/selected_evidence.json",
-                    {
-                        variant_id: evidence.get(variant_id, [])
-                        for variant_id in selected_ids
-                    },
+                    {variant_id: evidence.get(variant_id, []) for variant_id in selected_ids},
                 )
 
             validation_prediction_sets: list[list[Prediction]] = []
@@ -1684,12 +1731,8 @@ class CampaignRunner:
             if validation_prediction_sets:
                 original_predictions = validation_prediction_sets[0]
             else:
-                original_predictions = [
-                    working_by_id[item.variant_id] for item in predict_targets
-                ]
-            prediction_by_id = {
-                item.variant_id: item for item in original_predictions
-            }
+                original_predictions = [working_by_id[item.variant_id] for item in predict_targets]
+            prediction_by_id = {item.variant_id: item for item in original_predictions}
             self._progress(
                 "dry_validation_completed",
                 f"round {round_id}/{self.config.rounds} dry validation ready",
@@ -1735,9 +1778,7 @@ class CampaignRunner:
                 "round_id": round_id,
                 "evidence": evidence,
                 "hypothesis": hypothesis,
-                "rationale_claims": {
-                    item.variant_id: item.reason for item in design_scores
-                },
+                "rationale_claims": {item.variant_id: item.reason for item in design_scores},
             }
 
             def draft_builder(
@@ -1753,15 +1794,10 @@ class CampaignRunner:
                     candidate_ids = list(_context["initial_selected_ids"])
                 else:
                     revised_eligible = [
-                        item
-                        for item in _context["eligible"]
-                        if item.variant_id not in exclusions
+                        item for item in _context["eligible"] if item.variant_id not in exclusions
                     ]
                     if selection_driver == "active_learning":
-                        if (
-                            self.active_learning is None
-                            or _context["active_score_result"] is None
-                        ):
+                        if self.active_learning is None or _context["active_score_result"] is None:
                             raise AssertionError(
                                 "Active-learning acquisition is unavailable during revision"
                             )
@@ -1773,8 +1809,7 @@ class CampaignRunner:
                         )
                         candidate_ids = list(revised_selection.selected_ids)
                     elif (
-                        selection_driver == "agent_uq"
-                        and self.agent_quota_acquisition is not None
+                        selection_driver == "agent_uq" and self.agent_quota_acquisition is not None
                     ):
                         diversity = self.config.diversity_lambda
                         if constraints is not None and constraints.increase_diversity:
@@ -1815,9 +1850,7 @@ class CampaignRunner:
                     if item.variant_id not in _context["prediction_by_id"]
                 ]
                 if missing_predictions and _context["predictor"] is not None:
-                    refreshed_predictions = _context["predictor"].predict(
-                        missing_predictions
-                    )
+                    refreshed_predictions = _context["predictor"].predict(missing_predictions)
                     _context["prediction_by_id"].update(
                         {item.variant_id: item for item in refreshed_predictions}
                     )
@@ -1847,9 +1880,7 @@ class CampaignRunner:
                     predictions=_context["prediction_by_id"],
                     evidence=_context["evidence"],
                     hypothesis_id=(
-                        _context["hypothesis"].hypothesis_id
-                        if _context["hypothesis"]
-                        else None
+                        _context["hypothesis"].hypothesis_id if _context["hypothesis"] else None
                     ),
                     falsification_spec=falsification_spec,
                     parent_draft_batch_id=parent_draft_batch_id,
@@ -1917,9 +1948,7 @@ class CampaignRunner:
                     critic_provider=self.critic_agent.client.provider_name,
                 )
 
-            def record_review_attempt(
-                draft, report, decision, _round_id: int = round_id
-            ) -> None:
+            def record_review_attempt(draft, report, decision, _round_id: int = round_id) -> None:
                 self.state.critique_decisions.append(decision)
                 folder = f"round_{_round_id:02d}"
                 self.writer.write_json(
@@ -1967,10 +1996,14 @@ class CampaignRunner:
                     pending_ids=set(),
                     allowed_ids={item.variant_id for item in remaining},
                     expected_batch_size=expected_batch_size,
-                    context_evidence=(
-                        local_evidence if self._critic_local_context_allowed else ()
-                    ),
+                    context_evidence=(local_evidence if self._critic_local_context_allowed else ()),
                     hypothesis=hypothesis,
+                    activation_state=self._role_activation_state(
+                        "critic",
+                        evidence=self._flatten_round_evidence(evidence),
+                        local_evidence=local_evidence,
+                        interaction_result=interaction_result,
+                    ),
                     on_attempt=record_review_attempt,
                     on_attempt_start=record_review_start,
                 )
@@ -2040,7 +2073,11 @@ class CampaignRunner:
                     else:
                         selected_ids = self.policy.select(
                             eligible,
-                            [working_by_id[item.variant_id] for item in eligible if item.variant_id in working_by_id],
+                            [
+                                working_by_id[item.variant_id]
+                                for item in eligible
+                                if item.variant_id in working_by_id
+                            ],
                             all_scores,
                             expected_batch_size,
                             self.config.diversity_lambda,
@@ -2081,6 +2118,12 @@ class CampaignRunner:
                             local_evidence if self._critic_local_context_allowed else ()
                         ),
                         hypothesis=hypothesis,
+                        activation_state=self._role_activation_state(
+                            "critic",
+                            evidence=self._flatten_round_evidence(evidence),
+                            local_evidence=local_evidence,
+                            interaction_result=interaction_result,
+                        ),
                         on_attempt=record_review_attempt,
                         on_attempt_start=record_review_start,
                     )
@@ -2205,9 +2248,7 @@ class CampaignRunner:
                         {
                             "round_id": round_id,
                             "reason": str(error),
-                            "decision_ids": [
-                                item.decision_id for item in error.decisions
-                            ],
+                            "decision_ids": [item.decision_id for item in error.decisions],
                         },
                     )
                     break
@@ -2222,8 +2263,7 @@ class CampaignRunner:
                         "selection": final_agent_quota_selection,
                         "approved_candidate_ids": selected_ids,
                         "matches_approved_batch": (
-                            tuple(selected_ids)
-                            == tuple(final_agent_quota_selection.selected_ids)
+                            tuple(selected_ids) == tuple(final_agent_quota_selection.selected_ids)
                         ),
                     },
                 )
@@ -2234,9 +2274,7 @@ class CampaignRunner:
                 phase=CampaignPhase.APPROVED,
                 persist=False,
             )
-            self.writer.write_json(
-                f"round_{round_id:02d}/approved_batch.json", approved_batch
-            )
+            self.writer.write_json(f"round_{round_id:02d}/approved_batch.json", approved_batch)
             self.writer.event("batch_approved", approved_batch.__dict__)
 
             model_ranks = _descending_ranks(
@@ -2350,37 +2388,41 @@ class CampaignRunner:
                 for variant_id in selected_ids:
                     if variant_id in mapping:
                         dry_by_variant[variant_id].append(mapping[variant_id])
-            rethink_context = ReThinkContextInput.model_validate({
-                "run_id": self.run_id,
-                "round_id": round_id,
-                "visible_baseline": pre_round_visible_baseline,
-                "candidates": [
-                    {
-                        "variant_id": variant_id,
-                        "mutation_notation": public_by_id[variant_id].mutation_notation,
-                        "agent_reason": selection_by_id[variant_id].reason,
-                        "hypothesis": hypothesis.statement if hypothesis else None,
-                        "evidence_ids": list(selection_by_id[variant_id].evidence_ids),
-                        "wet_value": revealed_by_id[variant_id].fitness,
-                        "dry_validations": [
-                            {
-                                "value": prediction.fitness_mean,
-                                "uncertainty": prediction.fitness_std,
-                                "ood_score": prediction.ood_score,
-                                "model_version": prediction.model_version,
-                            }
-                            for prediction in dry_by_variant[variant_id]
-                        ],
-                    }
-                    for variant_id in selected_ids
-                ],
-            })
+            rethink_context = ReThinkContextInput.model_validate(
+                {
+                    "run_id": self.run_id,
+                    "round_id": round_id,
+                    "visible_baseline": pre_round_visible_baseline,
+                    "activation_state": self._role_activation_state(
+                        "rethink",
+                        interaction_result=interaction_result,
+                    ).model_dump(mode="json"),
+                    "candidates": [
+                        {
+                            "variant_id": variant_id,
+                            "mutation_notation": public_by_id[variant_id].mutation_notation,
+                            "agent_reason": selection_by_id[variant_id].reason,
+                            "hypothesis": hypothesis.statement if hypothesis else None,
+                            "evidence_ids": list(selection_by_id[variant_id].evidence_ids),
+                            "wet_value": revealed_by_id[variant_id].fitness,
+                            "dry_validations": [
+                                {
+                                    "value": prediction.fitness_mean,
+                                    "uncertainty": prediction.fitness_std,
+                                    "ood_score": prediction.ood_score,
+                                    "model_version": prediction.model_version,
+                                }
+                                for prediction in dry_by_variant[variant_id]
+                            ],
+                        }
+                        for variant_id in selected_ids
+                    ],
+                }
+            )
             reflections = ()
             if self.config.validation.rethink_enabled:
                 try:
-                    reflections = self.rethink_client.reflect_round(
-                        context=rethink_context
-                    )
+                    reflections = self.rethink_client.reflect_round(context=rethink_context)
                     if {item.variant_id for item in reflections} != set(selected_ids):
                         raise ValueError("ReThink output did not cover every selected variant")
                 except Exception as error:  # noqa: BLE001 - provider boundary must degrade safely
@@ -2455,15 +2497,9 @@ class CampaignRunner:
                             agent_reason=selection.reason,
                             hypothesis_id=selection.hypothesis_id,
                             evidence_ids=selection.evidence_ids,
-                            reflection_id=(
-                                reflection.reflection_id if reflection else None
-                            ),
-                            reflection_verdict=(
-                                reflection.verdict if reflection else None
-                            ),
-                            reflection_summary=(
-                                reflection.summary if reflection else ""
-                            ),
+                            reflection_id=(reflection.reflection_id if reflection else None),
+                            reflection_verdict=(reflection.verdict if reflection else None),
+                            reflection_summary=(reflection.summary if reflection else ""),
                         )
                     )
             self.validation_records.extend(current_validation_records)
@@ -2674,4 +2710,8 @@ class CampaignRunner:
 
 
 def run_campaign(config: ExperimentConfig) -> dict[str, Any]:
+    if config.designer.space == "open_design":
+        from .open_design import run_open_design
+
+        return run_open_design(config)
     return CampaignRunner(config).run()

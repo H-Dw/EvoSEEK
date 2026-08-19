@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from fitness_agents.agents.llm import _compact_prompt_evidence
 from fitness_agents.agents.remote_llm import complete_json, create_openai_client, resolve_model
+from fitness_agents.contracts.agent_io import RoleActivationState
 from fitness_agents.contracts.schemas import (
     BatchRisk,
     CandidateIssue,
@@ -32,7 +33,6 @@ from fitness_agents.contracts.schemas import (
 )
 from fitness_agents.utils.progress import report_event
 from fitness_agents.validation.batch import CritiqueDecisionValidator
-
 
 CRITIC_NESTED_TEXT_MAX = 240
 _NESTED_TEXT_KEYS = (
@@ -77,9 +77,7 @@ def hypothesis_snapshot(hypothesis: Any | None) -> dict[str, Any] | None:
     return {
         "hypothesis_id": getattr(hypothesis, "hypothesis_id", None),
         "statement": getattr(hypothesis, "statement", None),
-        "preferred_residues": {
-            str(site): list(residues) for site, residues in preferred.items()
-        },
+        "preferred_residues": {str(site): list(residues) for site, residues in preferred.items()},
         "evidence_ids": list(getattr(hypothesis, "evidence_ids", ()) or ()),
         "expected_outcome": getattr(hypothesis, "expected_outcome", None),
         "falsification_criterion": getattr(hypothesis, "falsification_criterion", None),
@@ -104,10 +102,20 @@ CRITIQUE_DECISION_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
     "required": [
-        "decision_id", "draft_batch_id", "round_id", "review_attempt", "verdict",
-        "falsification_readiness", "candidate_issues", "batch_level_risks",
-        "evidence_conflicts", "unsupported_claims", "required_changes",
-        "cited_evidence_ids", "confidence", "summary",
+        "decision_id",
+        "draft_batch_id",
+        "round_id",
+        "review_attempt",
+        "verdict",
+        "falsification_readiness",
+        "candidate_issues",
+        "batch_level_risks",
+        "evidence_conflicts",
+        "unsupported_claims",
+        "required_changes",
+        "cited_evidence_ids",
+        "confidence",
+        "summary",
     ],
     "properties": {
         "decision_id": {"type": "string"},
@@ -116,7 +124,8 @@ CRITIQUE_DECISION_SCHEMA: dict[str, Any] = {
         "review_attempt": {"type": "integer"},
         "verdict": {"type": "string", "enum": [item.value for item in ReviewVerdict]},
         "falsification_readiness": {
-            "type": "string", "enum": [item.value for item in FalsificationReadiness]
+            "type": "string",
+            "enum": [item.value for item in FalsificationReadiness],
         },
         "candidate_issues": {
             "type": "array",
@@ -149,23 +158,48 @@ CRITIQUE_DECISION_SCHEMA: dict[str, Any] = {
     },
     "$defs": {
         "candidate_issue": {
-            "type": "object", "additionalProperties": False,
-            "required": ["issue_id", "candidate_id", "scope", "severity", "code", "claim", "evidence_ids", "conflict_ids", "suggested_action"],
+            "type": "object",
+            "additionalProperties": False,
+            "required": [
+                "issue_id",
+                "candidate_id",
+                "scope",
+                "severity",
+                "code",
+                "claim",
+                "evidence_ids",
+                "conflict_ids",
+                "suggested_action",
+            ],
             "properties": {
-                "issue_id": {"type": "string"}, "candidate_id": {"type": "string"},
+                "issue_id": {"type": "string"},
+                "candidate_id": {"type": "string"},
                 "scope": {"type": "string", "enum": [item.value for item in IssueScope]},
                 "severity": {"type": "string", "enum": [item.value for item in IssueSeverity]},
-                "code": {"type": "string"}, "claim": {"type": "string", "maxLength": 240},
+                "code": {"type": "string"},
+                "claim": {"type": "string", "maxLength": 240},
                 "evidence_ids": {"type": "array", "items": {"type": "string"}},
                 "conflict_ids": {"type": "array", "items": {"type": "string"}},
-                "suggested_action": {"type": ["string", "null"], "enum": [item.value for item in RequiredChangeAction] + [None]},
+                "suggested_action": {
+                    "type": ["string", "null"],
+                    "enum": [item.value for item in RequiredChangeAction] + [None],
+                },
             },
         },
         "batch_risk": {
-            "type": "object", "additionalProperties": False,
-            "required": ["risk_id", "code", "severity", "statement", "candidate_ids", "evidence_ids"],
+            "type": "object",
+            "additionalProperties": False,
+            "required": [
+                "risk_id",
+                "code",
+                "severity",
+                "statement",
+                "candidate_ids",
+                "evidence_ids",
+            ],
             "properties": {
-                "risk_id": {"type": "string"}, "code": {"type": "string"},
+                "risk_id": {"type": "string"},
+                "code": {"type": "string"},
                 "severity": {"type": "string", "enum": [item.value for item in IssueSeverity]},
                 "statement": {"type": "string", "maxLength": 240},
                 "candidate_ids": {"type": "array", "items": {"type": "string"}},
@@ -173,10 +207,20 @@ CRITIQUE_DECISION_SCHEMA: dict[str, Any] = {
             },
         },
         "evidence_conflict": {
-            "type": "object", "additionalProperties": False,
-            "required": ["conflict_id", "topic", "supporting_ids", "opposing_ids", "source_independence", "unresolved_reason", "impact"],
+            "type": "object",
+            "additionalProperties": False,
+            "required": [
+                "conflict_id",
+                "topic",
+                "supporting_ids",
+                "opposing_ids",
+                "source_independence",
+                "unresolved_reason",
+                "impact",
+            ],
             "properties": {
-                "conflict_id": {"type": "string"}, "topic": {"type": "string", "maxLength": 240},
+                "conflict_id": {"type": "string"},
+                "topic": {"type": "string", "maxLength": 240},
                 "supporting_ids": {"type": "array", "items": {"type": "string"}},
                 "opposing_ids": {"type": "array", "items": {"type": "string"}},
                 "source_independence": {"type": "string", "maxLength": 240},
@@ -185,17 +229,31 @@ CRITIQUE_DECISION_SCHEMA: dict[str, Any] = {
             },
         },
         "unsupported_claim": {
-            "type": "object", "additionalProperties": False,
+            "type": "object",
+            "additionalProperties": False,
             "required": ["claim_id", "claim", "reason", "missing_evidence_type", "required_action"],
             "properties": {
-                "claim_id": {"type": "string"}, "claim": {"type": "string", "maxLength": 240},
-                "reason": {"type": "string", "maxLength": 240}, "missing_evidence_type": {"type": "string"},
-                "required_action": {"type": "string", "enum": [item.value for item in RequiredChangeAction]},
+                "claim_id": {"type": "string"},
+                "claim": {"type": "string", "maxLength": 240},
+                "reason": {"type": "string", "maxLength": 240},
+                "missing_evidence_type": {"type": "string"},
+                "required_action": {
+                    "type": "string",
+                    "enum": [item.value for item in RequiredChangeAction],
+                },
             },
         },
         "required_change": {
-            "type": "object", "additionalProperties": False,
-            "required": ["action", "target_ids", "parameters", "rationale", "evidence_ids", "priority"],
+            "type": "object",
+            "additionalProperties": False,
+            "required": [
+                "action",
+                "target_ids",
+                "parameters",
+                "rationale",
+                "evidence_ids",
+                "priority",
+            ],
             "properties": {
                 "action": {"type": "string", "enum": [item.value for item in RequiredChangeAction]},
                 "target_ids": {"type": "array", "items": {"type": "string"}},
@@ -245,9 +303,7 @@ class CritiqueDecisionOutput(BaseModel):
                 for key in _NESTED_TEXT_KEYS:
                     value = item.get(key)
                     if isinstance(value, str) and len(value) > CRITIC_NESTED_TEXT_MAX:
-                        raise ValueError(
-                            f"{key} exceeds {CRITIC_NESTED_TEXT_MAX} characters"
-                        )
+                        raise ValueError(f"{key} exceeds {CRITIC_NESTED_TEXT_MAX} characters")
         return self
 
 
@@ -264,7 +320,13 @@ class RuleBasedCriticClient:
 
     provider_name = "rule"
 
-    def review(self, *, context: dict[str, Any], output_schema: dict[str, Any], validator: Any | None = None) -> CritiqueDecision:
+    def review(
+        self,
+        *,
+        context: dict[str, Any],
+        output_schema: dict[str, Any],
+        validator: Any | None = None,
+    ) -> CritiqueDecision:
         del validator
         draft: DraftBatch = context["draft"]
         report: ConflictReport = context["conflict_report"]
@@ -280,7 +342,9 @@ class RuleBasedCriticClient:
                 evidence_ids=item.evidence_ids,
                 conflict_ids=(item.conflict_id,),
                 suggested_action=(
-                    RequiredChangeAction.EXCLUDE_CANDIDATE if item.candidate_ids else RequiredChangeAction.ABORT_ROUND
+                    RequiredChangeAction.EXCLUDE_CANDIDATE
+                    if item.candidate_ids
+                    else RequiredChangeAction.ABORT_ROUND
                 ),
             )
             for item in report.hard_conflicts
@@ -428,7 +492,12 @@ class OpenAICriticClient:
                         + " Do not include markdown."
                     ),
                 },
-                {"role": "user", "content": json.dumps(_jsonable(_compact_critic_context(context)), ensure_ascii=False)},
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        _jsonable(_compact_critic_context(context)), ensure_ascii=False
+                    ),
+                },
             ],
             schema=output_schema,
             temperature=self.temperature,
@@ -450,34 +519,63 @@ def _decision_from_payload(payload: dict[str, Any]) -> CritiqueDecision:
         falsification_readiness=FalsificationReadiness(payload["falsification_readiness"]),
         candidate_issues=tuple(
             CandidateIssue(
-                issue_id=item["issue_id"], candidate_id=item["candidate_id"],
-                scope=IssueScope(item["scope"]), severity=IssueSeverity(item["severity"]),
-                code=item["code"], claim=item["claim"], evidence_ids=tuple(item["evidence_ids"]),
+                issue_id=item["issue_id"],
+                candidate_id=item["candidate_id"],
+                scope=IssueScope(item["scope"]),
+                severity=IssueSeverity(item["severity"]),
+                code=item["code"],
+                claim=item["claim"],
+                evidence_ids=tuple(item["evidence_ids"]),
                 conflict_ids=tuple(item["conflict_ids"]),
-                suggested_action=(RequiredChangeAction(item["suggested_action"]) if item["suggested_action"] else None),
+                suggested_action=(
+                    RequiredChangeAction(item["suggested_action"])
+                    if item["suggested_action"]
+                    else None
+                ),
             )
             for item in payload["candidate_issues"]
         ),
         batch_level_risks=tuple(
             BatchRisk(
-                risk_id=item["risk_id"], code=item["code"], severity=IssueSeverity(item["severity"]),
-                statement=item["statement"], candidate_ids=tuple(item["candidate_ids"]),
+                risk_id=item["risk_id"],
+                code=item["code"],
+                severity=IssueSeverity(item["severity"]),
+                statement=item["statement"],
+                candidate_ids=tuple(item["candidate_ids"]),
                 evidence_ids=tuple(item["evidence_ids"]),
             )
             for item in payload["batch_level_risks"]
         ),
-        evidence_conflicts=tuple(EvidenceConflict(**{**item, "supporting_ids": tuple(item["supporting_ids"]), "opposing_ids": tuple(item["opposing_ids"])}) for item in payload["evidence_conflicts"]),
-        unsupported_claims=tuple(UnsupportedClaim(**{**item, "required_action": RequiredChangeAction(item["required_action"])}) for item in payload["unsupported_claims"]),
+        evidence_conflicts=tuple(
+            EvidenceConflict(
+                **{
+                    **item,
+                    "supporting_ids": tuple(item["supporting_ids"]),
+                    "opposing_ids": tuple(item["opposing_ids"]),
+                }
+            )
+            for item in payload["evidence_conflicts"]
+        ),
+        unsupported_claims=tuple(
+            UnsupportedClaim(
+                **{**item, "required_action": RequiredChangeAction(item["required_action"])}
+            )
+            for item in payload["unsupported_claims"]
+        ),
         required_changes=tuple(
             RequiredChange(
-                action=RequiredChangeAction(item["action"]), target_ids=tuple(item["target_ids"]),
-                parameters=dict(item["parameters"]), rationale=item["rationale"],
-                evidence_ids=tuple(item["evidence_ids"]), priority=int(item["priority"]),
+                action=RequiredChangeAction(item["action"]),
+                target_ids=tuple(item["target_ids"]),
+                parameters=dict(item["parameters"]),
+                rationale=item["rationale"],
+                evidence_ids=tuple(item["evidence_ids"]),
+                priority=int(item["priority"]),
             )
             for item in payload["required_changes"]
         ),
         cited_evidence_ids=tuple(payload["cited_evidence_ids"]),
-        confidence=float(payload["confidence"]), summary=str(payload["summary"]),
+        confidence=float(payload["confidence"]),
+        summary=str(payload["summary"]),
     )
 
 
@@ -500,8 +598,15 @@ class CriticAgent:
         conflict_report: ConflictReport,
         context_evidence: Sequence[Evidence] = (),
         hypothesis: Any | None = None,
+        activation_state: RoleActivationState | dict[str, Any] | None = None,
     ) -> CritiqueDecision:
+        validated_activation = RoleActivationState.model_validate(
+            activation_state or RoleActivationState(role="critic")
+        )
+        if validated_activation.role != "critic":
+            raise ValueError("Critic requires activation_state.role='critic'")
         context = {
+            "activation_state": validated_activation.model_dump(mode="json"),
             "draft": draft,
             "hypothesis": hypothesis_snapshot(hypothesis),
             "variants": {item: variants[item] for item in draft.candidate_ids},
@@ -540,7 +645,9 @@ class CriticAgent:
                         context=context, output_schema=CRITIQUE_DECISION_SCHEMA
                     )
                 self.validator.validate(
-                    decision, draft=draft, report=conflict_report,
+                    decision,
+                    draft=draft,
+                    report=conflict_report,
                     visible_evidence_ids=visible_ids,
                 )
                 return decision
@@ -563,7 +670,9 @@ class CriticAgent:
             )
             decision = self.fallback.review(context=context, output_schema=CRITIQUE_DECISION_SCHEMA)
             self.validator.validate(
-                decision, draft=draft, report=conflict_report,
+                decision,
+                draft=draft,
+                report=conflict_report,
                 visible_evidence_ids=visible_ids,
             )
             return decision

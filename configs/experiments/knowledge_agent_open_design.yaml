@@ -1,0 +1,62 @@
+mode: knowledge_agent
+seed: 11
+rounds: 1
+budget_per_round: 16
+# The open-design runner ignores legacy pool prefiltering and scores its generated space.
+candidate_limit: 0
+acquisition: greedy
+ucb_beta: 1.5
+diversity_lambda: 0.10
+task_config: configs/task/gb1_binding.yaml
+model_config: configs/model/full_sequence_onehot.yaml
+knowledge_config: configs/knowledge/gb1.yaml
+output_root: artifacts/runs
+llm_provider: mock
+knowledge_enabled: true
+condition: knowledge_agent_open_design
+
+designer:
+  space: open_design
+  position_policy: all
+  proposer: all_position_substitution
+  allowed_residues: [A, C, D, E, F, G, H, I, K, L, M, N, P, Q, R, S, T, V, W, Y]
+  mutation_depth: 1
+  max_preferred_positions: 12
+  hypothesis_prior_weight: 0.20
+  structure_constraint_weight: 0.20
+
+generation:
+  selection_driver: active_learning
+  use_fitness_predictors: false
+
+active_learning:
+  enabled: true
+  module: lightweight_calibrated_hybrid
+  posterior:
+    plugin: visible_holdout_ensemble
+    predictor_models:
+      - configs/model/full_sequence_onehot.yaml
+    calibration_fraction: 0.20
+    min_calibration_size: 8
+    min_training_size: 8
+    conformal_alpha: 0.10
+    min_std: 1.0e-6
+    variance_scale_bounds: [0.25, 4.0]
+    refit_full: true
+  acquisition:
+    plugin: hybrid_batch
+    exploitation_fraction: 0.50
+    exploration_fraction: 0.25
+    knowledge_fraction: 0.25
+    ucb_beta: 1.0
+    diversity_lambda: 0.10
+    ood_penalty: 0.25
+    knowledge_fitness_weight: 0.25
+    validation_prior_weight: 0.0
+
+validation:
+  enabled: false
+
+output:
+  artifacts: [json, csv, reasoning]
+  top_k: 16
