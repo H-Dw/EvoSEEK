@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -32,7 +32,12 @@ class ClientRegistry:
         return factory(**kwargs)
 
 
-def create_role_client_bundle(provider: str, **kwargs: Any) -> RoleClientBundle:
+def create_role_client_bundle(
+    provider: str,
+    *,
+    rethink_options: Mapping[str, Any] | None = None,
+    **kwargs: Any,
+) -> RoleClientBundle:
     """Build both cognitive roles from one explicit provider allowlist."""
 
     from .llm import create_llm_client
@@ -41,9 +46,10 @@ def create_role_client_bundle(provider: str, **kwargs: Any) -> RoleClientBundle:
     registry = ClientRegistry()
 
     def build(**settings: Any) -> RoleClientBundle:
+        rethink_settings = {**settings, **dict(rethink_options or {})}
         return RoleClientBundle(
             scientist=create_llm_client(provider, **settings),
-            rethink=create_rethink_client(provider, **settings),
+            rethink=create_rethink_client(provider, **rethink_settings),
         )
 
     registry.register(provider, build)

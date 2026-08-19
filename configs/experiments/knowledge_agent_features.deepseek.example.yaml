@@ -29,11 +29,14 @@ hierarchical_hypothesis:
   enabled: true
   required_channels: [physchem, conservation, structure]
   max_parallel_branches: 3
+  child_sample_batch_size: 8
+  child_max_parallel_batches: 2
   # One correction after the initial scientific draft. API/format retries are
   # counted separately by the single LLM runtime.
   max_child_revision_attempts: 1
-  max_main_revision_attempts: 1
+  max_main_revision_attempts: 2
   formal_fail_closed: true
+  subcritic_mode: remote
   child_scientist_profiles:
     physchem: physchem_v1
     conservation: conservation_v1
@@ -47,9 +50,9 @@ hierarchical_hypothesis:
   child_max_tokens: 4096
   child_critic_max_tokens: 2048
   main_critic_max_tokens: 4096
-  main_max_input_chars: 80000
-  child_max_input_chars: 60000
-  critic_max_input_chars: 60000
+  main_max_input_chars: 160000
+  child_max_input_chars: 120000
+  critic_max_input_chars: 120000
 kg_interaction:
   enabled: true
   enabled_operators:

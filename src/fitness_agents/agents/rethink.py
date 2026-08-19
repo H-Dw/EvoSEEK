@@ -4,13 +4,16 @@ import hashlib
 import json
 from typing import Any
 
+from fitness_agents.agents.adaptive_batch import AdaptiveBatchWork, adaptive_batch_submit
 from fitness_agents.agents.remote_llm import (
+    RemoteLLMCompletionError,
     create_openai_client,
     resolve_base_url,
     resolve_model,
 )
 from fitness_agents.contracts.agent_io import AgentTraceContext, ReThinkContextInput
 from fitness_agents.contracts.schemas import ReThinkReflection
+from fitness_agents.utils.progress import report_event
 
 from .output_contracts import ReThinkOutput, validate_rethink_payload
 from .profile_loader import load_role_profile
@@ -106,11 +109,17 @@ class NativeReThinkClient:
         api_key: str | None = None,
         profile: str = "scientific_v1",
         max_transport_retries: int = 2,
-        max_output_retries: int = 1,
+        max_truncation_retries: int = 1,
+        max_syntax_retries: int = 1,
+        max_schema_retries: int = 2,
+        max_semantic_retries: int = 1,
+        max_unknown_evidence_retries: int = 1,
         retry_backoff_seconds: float = 1.0,
         request_timeout_seconds: float = 120.0,
-        allow_unknown_evidence_stripping: bool = True,
+        allow_unknown_evidence_stripping: bool = False,
         max_input_chars: int | None = None,
+        reasoning_batch_size: int = 8,
+        max_parallel_batches: int = 4,
     ) -> None:
         self.model = resolve_model(model, provider=provider)
         self.temperature = temperature
@@ -118,10 +127,20 @@ class NativeReThinkClient:
         self.reasoning_effort = reasoning_effort
         self.thinking = thinking
         self.max_transport_retries = max_transport_retries
-        self.max_output_retries = max_output_retries
+        self.max_truncation_retries = max_truncation_retries
+        self.max_syntax_retries = max_syntax_retries
+        self.max_schema_retries = max_schema_retries
+        self.max_semantic_retries = max_semantic_retries
+        self.max_unknown_evidence_retries = max_unknown_evidence_retries
         self.retry_backoff_seconds = retry_backoff_seconds
         self.allow_unknown_evidence_stripping = allow_unknown_evidence_stripping
         self.max_input_chars = max_input_chars
+        if not 1 <= reasoning_batch_size <= 8:
+            raise ValueError("ReThink reasoning_batch_size must be between 1 and 8")
+        if max_parallel_batches < 1:
+            raise ValueError("ReThink max_parallel_batches must be positive")
+        self.reasoning_batch_size = reasoning_batch_size
+        self.max_parallel_batches = max_parallel_batches
         role_profile = load_role_profile("rethink", profile)
         self.profile_name = profile
         self.profile = role_profile.instructions
@@ -134,14 +153,27 @@ class NativeReThinkClient:
         )
         self.transport = OpenAICompatibleChatTransport(self.client)
 
-    def reflect_round(self, *, context: ReThinkContextInput) -> tuple[ReThinkReflection, ...]:
-        validated_context = ReThinkContextInput.model_validate(context)
+    @staticmethod
+    def _is_truncation(error: Exception) -> bool:
+        return isinstance(error, RemoteLLMCompletionError) and (
+            error.error_code == "OUTPUT_TRUNCATED"
+        )
+
+    def _reflect_batch(
+        self,
+        *,
+        context: ReThinkContextInput,
+        batch_id: str,
+        split_depth: int,
+    ) -> tuple[ReThinkReflection, ...]:
+        expected_ids = context.expected_variant_ids
+        batch_hash = hashlib.sha256("|".join(sorted(expected_ids)).encode()).hexdigest()[:12]
         trace_context = AgentTraceContext(
-            run_id=validated_context.run_id,
-            round_id=validated_context.round_id,
+            run_id=context.run_id,
+            round_id=context.round_id,
             role="rethink",
             request_id=(
-                f"rethink:{validated_context.run_id}:r{validated_context.round_id}"
+                f"rethink:{context.run_id}:r{context.round_id}:{batch_id}:{batch_hash}"
             ),
         )
         output = complete_structured(
@@ -153,10 +185,10 @@ class NativeReThinkClient:
                     "role": "system",
                     "content": (
                         self.profile + "\nReturn JSON matching "
-                        + json.dumps(RETHINK_SCHEMA, ensure_ascii=False)
+                        + json.dumps(ReThinkOutput.model_json_schema(), ensure_ascii=False)
                     ),
                 },
-                {"role": "user", "content": validated_context.model_dump_json()},
+                {"role": "user", "content": context.model_dump_json()},
             ],
             output_type=ReThinkOutput,
             temperature=self.temperature,
@@ -165,30 +197,97 @@ class NativeReThinkClient:
             thinking=self.thinking,
             retries=0,
             transport_retries=getattr(self, "max_transport_retries", 2),
-            output_retries=getattr(self, "max_output_retries", 1),
+            truncation_retries=getattr(self, "max_truncation_retries", 1),
+            syntax_retries=getattr(self, "max_syntax_retries", 1),
+            schema_retries=getattr(self, "max_schema_retries", 2),
+            semantic_retries=getattr(self, "max_semantic_retries", 1),
+            unknown_evidence_retries=getattr(
+                self, "max_unknown_evidence_retries", 1
+            ),
             retry_backoff_seconds=getattr(self, "retry_backoff_seconds", 0.0),
             allow_unknown_evidence_stripping=getattr(
-                self, "allow_unknown_evidence_stripping", True
+                self, "allow_unknown_evidence_stripping", False
             ),
             max_input_chars=getattr(self, "max_input_chars", None),
+            separate_json_render=True,
+            repair_hints={
+                "reflections[].variant_id": tuple(expected_ids)
+            },
             contextual_validator=lambda value: validate_rethink_payload(
-                value, expected_variant_ids=validated_context.expected_variant_ids
+                value, expected_variant_ids=expected_ids
             ),
+            reasoning_truncation_retries=0,
+            preserve_reasoning_on_retry=True,
             trace_context={
                 **trace_context.model_dump(mode="json"),
                 "profile": self.profile_name,
                 "profile_sha256": self.profile_sha256,
                 "schema_name": "ReThinkOutput",
+                "retry_scope": f"rethink:{batch_id}",
+                "rethink_batch_id": batch_id,
+                "rethink_batch_size": len(context.candidates),
+                "rethink_split_depth": split_depth,
                 "context_sha256": hashlib.sha256(
-                    validated_context.model_dump_json().encode()
+                    context.model_dump_json().encode()
                 ).hexdigest(),
             },
         )
         return _parse_reflections(
             output.model_dump(mode="json"),
-            run_id=validated_context.run_id,
-            round_id=validated_context.round_id,
+            run_id=context.run_id,
+            round_id=context.round_id,
             provider=self.provider_name,
+        )
+
+    def reflect_round(self, *, context: ReThinkContextInput) -> tuple[ReThinkReflection, ...]:
+        validated_context = ReThinkContextInput.model_validate(context)
+        candidates = tuple(validated_context.candidates)
+        if not candidates:
+            return ()
+        by_variant_id: dict[str, ReThinkReflection] = {}
+        batches = adaptive_batch_submit(
+            candidates,
+            item_id=lambda item: str(item["variant_id"]),
+            submit_batch=lambda work: self._reflect_batch_work(
+                context=validated_context,
+                work=work,
+            ),
+            initial_batch_size=getattr(self, "reasoning_batch_size", 8),
+            max_parallel_batches=getattr(self, "max_parallel_batches", 4),
+            should_split_failure=self._is_truncation,
+            role="rethink",
+            round_id=validated_context.round_id,
+            event_reporter=report_event,
+        )
+        for batch in batches:
+            for reflection in batch.output:
+                if reflection.variant_id in by_variant_id:
+                    raise ValueError(
+                        "Adaptive ReThink batches returned duplicate variant_id "
+                        f"{reflection.variant_id!r}"
+                    )
+                by_variant_id[reflection.variant_id] = reflection
+        expected_ids = tuple(str(item["variant_id"]) for item in candidates)
+        missing = sorted(set(expected_ids).difference(by_variant_id))
+        unexpected = sorted(set(by_variant_id).difference(expected_ids))
+        if missing or unexpected:
+            raise ValueError(
+                "Adaptive ReThink batch coverage mismatch; "
+                f"missing={missing}, unexpected={unexpected}"
+            )
+        return tuple(by_variant_id[item] for item in expected_ids)
+
+    def _reflect_batch_work(
+        self,
+        *,
+        context: ReThinkContextInput,
+        work: AdaptiveBatchWork[dict[str, Any]],
+    ) -> tuple[ReThinkReflection, ...]:
+        batch_context = context.model_copy(update={"candidates": list(work.items)})
+        return self._reflect_batch(
+            context=batch_context,
+            batch_id=work.batch_id,
+            split_depth=work.split_depth,
         )
 
 

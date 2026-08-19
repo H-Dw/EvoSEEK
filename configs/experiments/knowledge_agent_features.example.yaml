@@ -27,9 +27,12 @@ hierarchical_hypothesis:
   enabled: true
   required_channels: [physchem, conservation, structure]
   max_parallel_branches: 3
+  child_sample_batch_size: 8
+  child_max_parallel_batches: 2
   max_child_revision_attempts: 1
-  max_main_revision_attempts: 1
+  max_main_revision_attempts: 2
   formal_fail_closed: true
+  subcritic_mode: remote
   child_scientist_profiles:
     physchem: physchem_v1
     conservation: conservation_v1
