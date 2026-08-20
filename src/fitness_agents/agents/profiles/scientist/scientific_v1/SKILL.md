@@ -114,7 +114,7 @@ When `context.critic_revision` is present:
 ## 6. Output contract
 
 Copy `context.expected_hypothesis_id` exactly. Return one JSON object containing exactly:
-`hypothesis_id`, `statement`, `preferred_residues`, `evidence_ids`, `expected_outcome`,
+`hypothesis_id`, `statement`, `preferred_residues`, `hard_residue_constraints`, `evidence_ids`, `expected_outcome`,
 `falsification_criterion`, `parent_hypothesis_id`, and `explanation`.
 
 - Keep `statement`, `expected_outcome`, and `falsification_criterion` at or under 400 characters.
@@ -125,6 +125,9 @@ Copy `context.expected_hypothesis_id` exactly. Return one JSON object containing
 - In `sparse_subset` mode, use a non-empty subset of those keys no larger than
   `max_preferred_positions`.
 - Use non-empty arrays of canonical one-letter residues as values.
+- Treat `preferred_residues` as soft priors. Return `hard_residue_constraints: {}` unless the
+  supplied deterministic design/safety contract explicitly requires a residue set; never infer
+  hardness from prose or confidence.
 - Copy the supplied parent identifier or use null.
 - When `approved_channel_analyses` is present, treat each item as an approved channel analysis card:
   preserve its observation/interpretation/limitation distinctions, consider optional

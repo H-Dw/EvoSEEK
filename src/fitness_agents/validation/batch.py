@@ -18,6 +18,7 @@ from fitness_agents.contracts.schemas import (
     Evidence,
     FalsificationReadiness,
     FalsificationSpec,
+    Hypothesis,
     IssueScope,
     IssueSeverity,
     MutationConflict,
@@ -150,6 +151,7 @@ class BatchHardValidator:
         allowed_ids: set[str],
         expected_batch_size: int,
         prediction_decision_eligible: Mapping[str, bool] | None = None,
+        hypothesis: Hypothesis | None = None,
     ) -> ConflictReport:
         selected = [variants[item] for item in draft.candidate_ids if item in variants]
         conflicts = self.residue.detect(
@@ -169,6 +171,38 @@ class BatchHardValidator:
                 prediction_decision_eligible=prediction_decision_eligible,
             )
         )
+        if hypothesis is not None and hypothesis.hard_residue_constraints:
+            position_to_index = {
+                position: index
+                for index, position in enumerate(self.task.mutable_positions)
+            }
+            for candidate in selected:
+                violations = {
+                    position: tuple(allowed)
+                    for position, allowed in hypothesis.hard_residue_constraints.items()
+                    if position not in position_to_index
+                    or position_to_index[position] >= len(candidate.variant)
+                    or candidate.variant[position_to_index[position]] not in allowed
+                }
+                if violations:
+                    conflicts.append(
+                        MutationConflict(
+                            conflict_id=(
+                                "conflict:hard-residue:"
+                                f"{content_hash((candidate.variant_id, violations))[:16]}"
+                            ),
+                            code="HARD_RESIDUE_CONSTRAINT_VIOLATION",
+                            scope=IssueScope.RESIDUE,
+                            severity=IssueSeverity.BLOCKER,
+                            message=(
+                                "Candidate violates explicit hard_residue_constraints; "
+                                "preferred_residues are not part of this gate"
+                            ),
+                            candidate_ids=(candidate.variant_id,),
+                            hard=True,
+                            detector=f"hard_residue_constraints:{self.version}",
+                        )
+                    )
         visible_evidence_ids = {
             item.evidence_id
             for candidate_id in draft.candidate_ids

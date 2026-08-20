@@ -168,6 +168,105 @@ def test_bounded_revision_changes_batch_and_creates_approval(experiment_config):
         backend.submit(replace(result.approved_batch, candidate_ids=("a",)))
 
 
+def test_residue_revision_cannot_recur_under_a_new_candidate_id(
+    experiment_config,
+) -> None:
+    from fitness_agents.loop.review import RevisionConstraintInfeasible
+
+    variants = {
+        "a": _variant("VDGA", "a"),
+        "a2": _variant("VDGA", "a2"),
+    }
+    predictions = {
+        variant_id: _prediction(variant_id, 1.0)
+        for variant_id in variants
+    }
+    class _ExcludeResidueOnce:
+        provider_name = "exclude_residue_once"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def review(self, *, context, output_schema):
+            del output_schema
+            self.calls += 1
+            if self.calls != 1:
+                raise AssertionError("postcondition must fail before a second Critic call")
+            draft = context["draft"]
+            return CritiqueDecision(
+                decision_id="decision:exclude-v54a",
+                draft_batch_id=draft.draft_batch_id,
+                round_id=draft.round_id,
+                review_attempt=draft.review_attempt,
+                verdict=ReviewVerdict.REVISE,
+                falsification_readiness=FalsificationReadiness.READY,
+                required_changes=(
+                    RequiredChange(
+                        action=RequiredChangeAction.REPLACE_CANDIDATE,
+                        target_ids=("a",),
+                        parameters={
+                            "excluded_residues": ["V54A"],
+                            "required_residues_by_position": {"54": ["V", "L"]},
+                            "applies_to_arms": ["fallback"],
+                        },
+                        rationale="Exclude the V54A substitution from the revised batch.",
+                    ),
+                ),
+                confidence=0.9,
+                summary="Replace V54A.",
+            )
+
+    client = _ExcludeResidueOnce()
+
+    def builder(
+        attempt,
+        parent_id,
+        exclusions,
+        constraints=None,
+        revision_feedback=None,
+    ):
+        del exclusions, constraints
+        if revision_feedback is not None:
+            assert revision_feedback.excluded_substitutions[0].position == 54
+            assert revision_feedback.required_residues_by_position == {
+                "54": ("L", "V")
+            }
+        candidate_id = "a" if attempt == 0 else "a2"
+        return build_draft_batch(
+            round_id=1,
+            review_attempt=attempt,
+            candidate_ids=(candidate_id,),
+            variants=variants,
+            predictions=predictions,
+            evidence={},
+            hypothesis_id=None,
+            falsification_spec=None,
+            parent_draft_batch_id=parent_id,
+        )
+
+    loop = BoundedReviewLoop(
+        validator=BatchHardValidator(experiment_config.task, experiment_config.critic),
+        critic=CriticAgent(client, max_retries=0),
+        max_revision_attempts=1,
+    )
+    with pytest.raises(RevisionConstraintInfeasible) as caught:
+        loop.run(
+            draft_builder=builder,
+            variants=variants,
+            predictions=predictions,
+            evidence={},
+            revealed_ids=set(),
+            pending_ids=set(),
+            allowed_ids=set(variants),
+            expected_batch_size=1,
+            position_to_index={39: 0, 40: 1, 41: 2, 54: 3},
+        )
+
+    assert client.calls == 1
+    assert caught.value.receipt.postcondition_failure_ids == ("a2",)
+    assert caught.value.receipt.code == "REVISION_CONSTRAINT_INFEASIBLE"
+
+
 def test_review_loop_notifies_start_before_critic(experiment_config):
     variants = {"a": _variant("VDGA", "a")}
     predictions = {"a": _prediction("a", 1.0)}

@@ -12,6 +12,7 @@ from fitness_agents.contracts.schemas import (
     ConflictReport,
     DraftBatch,
     Evidence,
+    Hypothesis,
     IssueScope,
     IssueSeverity,
     MutationConflict,
@@ -172,6 +173,7 @@ class OpenDesignHardValidator:
         allowed_ids: set[str],
         expected_batch_size: int,
         prediction_decision_eligible: Mapping[str, bool] | None = None,
+        hypothesis: Hypothesis | None = None,
     ) -> ConflictReport:
         detector = f"open_design_contract:{self.version}"
         conflicts: list[MutationConflict] = []
@@ -185,6 +187,29 @@ class OpenDesignHardValidator:
                     detector=detector,
                 )
             )
+        if hypothesis is not None and hypothesis.hard_residue_constraints:
+            for candidate_id in draft.candidate_ids:
+                if candidate_id not in variants:
+                    continue
+                candidate = variants[candidate_id]
+                violates = any(
+                    position not in self.design_space.position_to_sequence_index
+                    or candidate.sequence[
+                        self.design_space.position_to_sequence_index[position]
+                    ]
+                    not in allowed
+                    for position, allowed in hypothesis.hard_residue_constraints.items()
+                )
+                if violates:
+                    conflicts.append(
+                        _conflict(
+                            "HARD_RESIDUE_CONSTRAINT_VIOLATION",
+                            "Candidate violates explicit hard_residue_constraints; soft preferences are not a gate",
+                            candidate_ids=(candidate_id,),
+                            scope=IssueScope.RESIDUE,
+                            detector=detector,
+                        )
+                    )
         missing_variants = tuple(item for item in draft.candidate_ids if item not in variants)
         if missing_variants:
             conflicts.append(

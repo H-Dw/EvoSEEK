@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
 TRUNCATION_FINISH_REASONS = frozenset({"length", "max_tokens", "max_output_tokens"})
@@ -378,6 +378,46 @@ def validation_detail(error: Exception) -> str:
     return type(error).__name__
 
 
+CANONICAL_RESIDUES = frozenset("ACDEFGHIKLMNPQRSTVWY")
+REVISION_ARMS = frozenset(
+    {
+        "hypothesis_target",
+        "evidence_prior",
+        "coverage_exploration",
+        "matched_control",
+        "fallback",
+    }
+)
+DEFAULT_RESIDUE_CONSTRAINT_ARMS = frozenset(
+    {
+        "hypothesis_target",
+        "evidence_prior",
+        "coverage_exploration",
+        "fallback",
+    }
+)
+
+
+@dataclass(frozen=True, order=True)
+class ResidueSubstitutionConstraint:
+    position: int
+    to_residue: str
+    from_residue: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.position <= 0:
+            raise ValueError("substitution position must be positive")
+        if self.to_residue not in CANONICAL_RESIDUES:
+            raise ValueError("substitution to_residue must be canonical")
+        if self.from_residue is not None and self.from_residue not in CANONICAL_RESIDUES:
+            raise ValueError("substitution from_residue must be canonical")
+
+    @property
+    def token(self) -> str:
+        prefix = self.from_residue or ""
+        return f"{prefix}{self.position}{self.to_residue}"
+
+
 @dataclass
 class RevisionConstraints:
     """Machine-executable batch constraints derived from a critic REVISE decision."""
@@ -389,8 +429,101 @@ class RevisionConstraints:
     add_exploration: bool = False
     reduce_mutation_depth: bool = False
     regenerate_hypothesis: bool = False
+    excluded_substitutions: tuple[ResidueSubstitutionConstraint, ...] = ()
+    required_residues_by_position: dict[int, tuple[str, ...]] = field(
+        default_factory=dict
+    )
+    applies_to_arms: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        unknown_arms = set(self.applies_to_arms).difference(REVISION_ARMS)
+        if unknown_arms:
+            raise ValueError(f"unknown revision arms: {sorted(unknown_arms)}")
+        for position, residues in self.required_residues_by_position.items():
+            if position <= 0:
+                raise ValueError("required residue constraint positions must be positive")
+            invalid = set(residues).difference(CANONICAL_RESIDUES)
+            if invalid:
+                raise ValueError(
+                    f"required residue constraints contain non-canonical residues: {sorted(invalid)}"
+                )
+
+    @property
+    def has_residue_constraints(self) -> bool:
+        return bool(self.excluded_substitutions or self.required_residues_by_position)
+
+    def applies_to(self, arm: str) -> bool:
+        if not self.has_residue_constraints:
+            return False
+        scoped = set(self.applies_to_arms) or set(DEFAULT_RESIDUE_CONSTRAINT_ARMS)
+        return arm in scoped
+
+    def variant_violations(
+        self,
+        variant: Any,
+        *,
+        arm: str,
+        position_to_index: dict[int, int],
+        wild_type_by_position: dict[int, str] | None = None,
+    ) -> tuple[str, ...]:
+        if not self.applies_to(arm):
+            return ()
+        sequence = str(getattr(variant, "variant", ""))
+        violations: list[str] = []
+        for rule in self.excluded_substitutions:
+            index = position_to_index.get(rule.position)
+            if index is None or index >= len(sequence):
+                violations.append(f"unmapped:{rule.token}")
+                continue
+            if sequence[index] != rule.to_residue:
+                continue
+            if (
+                rule.from_residue is not None
+                and wild_type_by_position is not None
+                and wild_type_by_position.get(rule.position) != rule.from_residue
+            ):
+                continue
+            violations.append(f"excluded:{rule.token}")
+        for position, allowed in self.required_residues_by_position.items():
+            index = position_to_index.get(position)
+            if index is None or index >= len(sequence):
+                violations.append(f"unmapped:{position}")
+            elif sequence[index] not in allowed:
+                violations.append(
+                    f"required:{position}:{','.join(sorted(allowed))}"
+                )
+        return tuple(violations)
+
+    def prompt_payload(self) -> dict[str, Any]:
+        return {
+            "excluded_substitutions": [
+                {
+                    "position": item.position,
+                    "from_residue": item.from_residue,
+                    "to_residue": item.to_residue,
+                }
+                for item in self.excluded_substitutions
+            ],
+            "required_residues_by_position": {
+                str(position): list(residues)
+                for position, residues in sorted(
+                    self.required_residues_by_position.items()
+                )
+            },
+            "applies_to_arms": list(self.applies_to_arms),
+        }
 
     def merge(self, other: RevisionConstraints) -> RevisionConstraints:
+        required: dict[int, tuple[str, ...]] = {}
+        for position in set(self.required_residues_by_position).union(
+            other.required_residues_by_position
+        ):
+            left = self.required_residues_by_position.get(position)
+            right = other.required_residues_by_position.get(position)
+            if left is not None and right is not None:
+                required[position] = tuple(sorted(set(left).intersection(right)))
+            else:
+                required[position] = tuple(left or right or ())
         return RevisionConstraints(
             require_controls=self.require_controls or other.require_controls,
             increase_diversity=self.increase_diversity or other.increase_diversity,
@@ -419,6 +552,17 @@ class RevisionConstraints:
             add_exploration=self.add_exploration or other.add_exploration,
             reduce_mutation_depth=self.reduce_mutation_depth or other.reduce_mutation_depth,
             regenerate_hypothesis=self.regenerate_hypothesis or other.regenerate_hypothesis,
+            excluded_substitutions=tuple(
+                sorted(
+                    set(self.excluded_substitutions).union(
+                        other.excluded_substitutions
+                    )
+                )
+            ),
+            required_residues_by_position=required,
+            applies_to_arms=tuple(
+                sorted(set(self.applies_to_arms).union(other.applies_to_arms))
+            ),
         )
 
 

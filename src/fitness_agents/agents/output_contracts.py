@@ -148,6 +148,9 @@ class HypothesisOutput(BaseModel):
     falsification_criterion: HypothesisText
     parent_hypothesis_id: NonEmptyText | None
     explanation: HypothesisExplanationOutput | None = None
+    hard_residue_constraints: dict[str, list[NonEmptyText]] = Field(
+        default_factory=dict
+    )
 
     @model_validator(mode="after")
     def validate_identifier_relationships(self) -> HypothesisOutput:
@@ -181,6 +184,13 @@ class HypothesisOutput(BaseModel):
             on_unknown=on_unknown_evidence,
         )
         preferred = PreferredResiduesOutput(residues=self.preferred_residues).residues
+        hard_constraints = (
+            PreferredResiduesOutput(
+                residues=self.hard_residue_constraints
+            ).residues
+            if self.hard_residue_constraints
+            else {}
+        )
         if expected_positions is not None:
             expected = {str(item) for item in expected_positions}
             actual = set(preferred)
@@ -195,6 +205,12 @@ class HypothesisOutput(BaseModel):
             if unexpected:
                 raise ValueError(
                     f"preferred_residues contains positions outside design space: {unexpected}"
+                )
+            unexpected_hard = sorted(set(hard_constraints).difference(allowed))
+            if unexpected_hard:
+                raise ValueError(
+                    "hard_residue_constraints contains positions outside design space: "
+                    f"{unexpected_hard}"
                 )
         if max_positions is not None and len(preferred) > max_positions:
             raise ValueError(
@@ -215,6 +231,10 @@ class HypothesisOutput(BaseModel):
                 if self.explanation is not None
                 else None
             ),
+            hard_residue_constraints={
+                int(site): tuple(residues)
+                for site, residues in hard_constraints.items()
+            },
         )
 
 

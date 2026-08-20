@@ -2,6 +2,10 @@ from dataclasses import replace
 
 import pytest
 
+from fitness_agents.agents.output_guards import (
+    ResidueSubstitutionConstraint,
+    RevisionConstraints,
+)
 from fitness_agents.config import AgentQuotaAllocationConfig
 from fitness_agents.contracts.schemas import DesignScore, Variant
 from fitness_agents.mutation import AgentQuotaBatchAcquisition
@@ -107,6 +111,69 @@ def test_agent_quota_acquisition_audits_shortfall_and_fills_batch() -> None:
     assert result.shortfalls["hypothesis_target"] == 1
     assert result.shortfalls["evidence_prior"] == 1
     assert result.fallback_ids
+
+
+def test_revision_constraints_filter_complete_variants_and_expose_control_intent() -> None:
+    config = AgentQuotaAllocationConfig(
+        enabled=True,
+        hypothesis_target=2,
+        evidence_prior=1,
+        coverage_exploration=1,
+        matched_control=1,
+    )
+    variants = [
+        _variant("a1", "ADGV"),
+        _variant("a2", "AAGV"),
+        _variant("c1", "VDGV", 0),
+        _variant("e1", "CDGV"),
+        _variant("u1", "GDGV"),
+    ]
+    scores = [
+        _score("a1", utility=1.0, hypothesis=0.9),
+        _score("a2", utility=0.9, hypothesis=0.8),
+        _score("c1", utility=0.2, hypothesis=0.2),
+        _score("e1", utility=0.5, hypothesis=0.0, evidence=0.9),
+        _score("u1", utility=0.4, hypothesis=0.0, uncertainty=0.9),
+    ]
+    constraints = RevisionConstraints(
+        excluded_substitutions=(
+            ResidueSubstitutionConstraint(
+                position=39,
+                from_residue="V",
+                to_residue="A",
+            ),
+        ),
+        applies_to_arms=(
+            "hypothesis_target",
+            "evidence_prior",
+            "coverage_exploration",
+            "matched_control",
+            "fallback",
+        ),
+    )
+
+    result = AgentQuotaBatchAcquisition(config).select(
+        variants,
+        scores,
+        5,
+        diversity_lambda=0.0,
+        constraints=constraints,
+        position_to_index={39: 0, 40: 1, 41: 2, 54: 3},
+        wild_type_by_position={39: "V", 40: "D", 41: "G", 54: "V"},
+    )
+
+    assert not {"a1", "a2"}.intersection(result.selected_ids)
+    assert result.eligible_after_filter == 3
+    assert len(result.selected_ids) == 3
+    assert result.constraint_excluded_ids == ("a1", "a2")
+
+    unconstrained = AgentQuotaBatchAcquisition(config).select(
+        variants, scores, 5, diversity_lambda=0.0
+    )
+    control_id = unconstrained.selected_by_arm["matched_control"][0]
+    control = unconstrained.intent_by_id()[control_id]
+    assert control.matched_to == unconstrained.matched_control_pairs[control_id]
+    assert control.allow_hypothesis_mismatch is True
 
 
 def test_quota_configuration_must_match_round_budget(experiment_config) -> None:

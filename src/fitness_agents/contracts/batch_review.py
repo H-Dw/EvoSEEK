@@ -27,6 +27,90 @@ CalibrationStatus = Literal[
     "uncalibrated",
     "calibrated",
 ]
+CandidateIntentArm = Literal[
+    "hypothesis_target",
+    "evidence_prior",
+    "coverage_exploration",
+    "matched_control",
+    "fallback",
+]
+
+
+class CandidateIntentCard(BaseModel):
+    """Runtime-owned experimental intent for one selected candidate."""
+
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    candidate_id: str = Field(min_length=1, max_length=160)
+    arm: CandidateIntentArm
+    matched_to: str | None = Field(default=None, min_length=1, max_length=160)
+    allow_hypothesis_mismatch: bool = False
+
+    @model_validator(mode="after")
+    def enforce_control_intent(self) -> CandidateIntentCard:
+        if self.arm == "matched_control":
+            if self.matched_to is None:
+                raise ValueError("matched_control requires matched_to")
+            if not self.allow_hypothesis_mismatch:
+                raise ValueError(
+                    "matched_control must explicitly allow hypothesis mismatch"
+                )
+        elif self.matched_to is not None:
+            raise ValueError("matched_to is only valid for matched_control")
+        return self
+
+
+class ResidueSubstitutionCard(BaseModel):
+    """Structured position/residue rule; never inferred from critic prose."""
+
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    position: int = Field(gt=0)
+    to_residue: str = Field(
+        min_length=1,
+        max_length=1,
+        pattern=r"^[ACDEFGHIKLMNPQRSTVWY]$",
+    )
+    from_residue: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=1,
+        pattern=r"^[ACDEFGHIKLMNPQRSTVWY]$",
+    )
+
+
+class BatchRevisionFeedbackReceipt(BaseModel):
+    """Sanitized prior-REVISE feedback supplied to the next critic attempt."""
+
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    previous_decision_id: str = Field(min_length=1, max_length=200)
+    previous_review_attempt: int = Field(ge=0)
+    issue_codes: tuple[str, ...] = Field(max_length=16)
+    required_actions: tuple[str, ...] = Field(max_length=16)
+    excluded_candidate_ids: tuple[str, ...] = Field(max_length=64)
+    excluded_substitutions: tuple[ResidueSubstitutionCard, ...] = Field(max_length=64)
+    required_residues_by_position: dict[str, tuple[str, ...]] = Field(default_factory=dict)
+    applies_to_arms: tuple[CandidateIntentArm, ...] = ()
+
+
+class RevisionQuotaShortfallReceipt(BaseModel):
+    """Pre-LLM proof that a revised batch cannot reach its required size."""
+
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    code: Literal["REVISION_CONSTRAINT_INFEASIBLE"] = (
+        "REVISION_CONSTRAINT_INFEASIBLE"
+    )
+    required_batch_size: int = Field(ge=0)
+    eligible_before_filter: int = Field(ge=0)
+    eligible_after_filter: int = Field(ge=0)
+    selected_count: int = Field(ge=0)
+    shortfall: int = Field(ge=0)
+    quota_shortfalls: dict[str, int] = Field(default_factory=dict)
+    excluded_candidate_count: int = Field(ge=0)
+    constraints_sha256: str = Field(min_length=64, max_length=64)
+    postcondition_failure_ids: tuple[str, ...] = ()
 
 
 class PredictionReviewCard(BaseModel):
@@ -193,13 +277,35 @@ class BatchReviewContext(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
     prediction_status_by_id: dict[str, PredictionReviewCard]
+    candidate_intent_by_id: dict[str, CandidateIntentCard] = Field(default_factory=dict)
     review_controls: bool = True
     review_diversity: bool = True
     control_feasibility: ControlFeasibilityReceipt | None = None
     diversity: BatchDiversityReceipt | None = None
+    revision_feedback: BatchRevisionFeedbackReceipt | None = None
 
     @model_validator(mode="after")
     def enforce_review_scope(self) -> BatchReviewContext:
+        if self.candidate_intent_by_id:
+            expected = set(self.prediction_status_by_id)
+            actual = set(self.candidate_intent_by_id)
+            if actual != expected:
+                raise ValueError(
+                    "candidate_intent_by_id must exactly cover reviewed candidates"
+                )
+            invalid_matches = {
+                candidate_id: card.matched_to
+                for candidate_id, card in self.candidate_intent_by_id.items()
+                if card.matched_to is not None
+                and (
+                    card.matched_to not in expected
+                    or card.matched_to == candidate_id
+                )
+            }
+            if invalid_matches:
+                raise ValueError(
+                    "matched_to must reference a different reviewed candidate"
+                )
         if not self.review_controls and self.control_feasibility is not None:
             raise ValueError(
                 "control_feasibility must be omitted when control review is disabled"
@@ -417,8 +523,13 @@ __all__ = [
     "AssayControl",
     "BatchDiversityReceipt",
     "BatchReviewContext",
+    "BatchRevisionFeedbackReceipt",
+    "CandidateIntentArm",
+    "CandidateIntentCard",
     "ControlFeasibilityReceipt",
     "PredictionReviewCard",
+    "ResidueSubstitutionCard",
+    "RevisionQuotaShortfallReceipt",
     "batch_diversity_receipt",
     "control_feasibility_receipt",
     "prediction_review_card",

@@ -213,6 +213,55 @@ def test_disabled_diversity_review_removes_validator_distance_warning(
     assert "BATCH_MODE_COLLAPSE" not in {item.code for item in report.conflicts}
 
 
+def test_only_explicit_hard_residue_constraints_block_a_candidate(
+    experiment_config,
+) -> None:
+    variant = _variant("v1", "ADGV")
+    prediction = _prediction("real-model:v1")
+    draft = build_draft_batch(
+        round_id=1,
+        review_attempt=0,
+        candidate_ids=("v1",),
+        variants={"v1": variant},
+        predictions={"v1": prediction},
+        evidence={},
+        hypothesis_id="hyp:1",
+        falsification_spec=None,
+    )
+    soft = Hypothesis(
+        hypothesis_id="hyp:1",
+        statement="Prefer A at position 39.",
+        preferred_residues={39: ("A",)},
+        evidence_ids=(),
+        expected_outcome="Test the preference.",
+        falsification_criterion="Reject if the comparison opposes it.",
+    )
+    validator = BatchHardValidator(experiment_config.task, experiment_config.critic)
+    common = {
+        "variants": {"v1": variant},
+        "predictions": {"v1": prediction},
+        "evidence": {},
+        "revealed_ids": set(),
+        "pending_ids": set(),
+        "allowed_ids": {"v1"},
+        "expected_batch_size": 1,
+    }
+
+    soft_report = validator.validate(draft, hypothesis=soft, **common)
+    hard_report = validator.validate(
+        draft,
+        hypothesis=replace(soft, hard_residue_constraints={39: ("V",)}),
+        **common,
+    )
+
+    assert "HARD_RESIDUE_CONSTRAINT_VIOLATION" not in {
+        item.code for item in soft_report.conflicts
+    }
+    assert "HARD_RESIDUE_CONSTRAINT_VIOLATION" in {
+        item.code for item in hard_report.hard_conflicts
+    }
+
+
 def test_control_feasibility_fails_before_critic_call(experiment_config) -> None:
     class NeverCalledCritic:
         calls = 0

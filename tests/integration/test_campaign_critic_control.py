@@ -39,6 +39,43 @@ class _RejectingClient:
         )
 
 
+class _InfeasibleResidueRevisionClient:
+    provider_name = "infeasible_residue_revision_test_critic"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def review(self, *, context, output_schema):
+        del output_schema
+        self.calls += 1
+        if self.calls != 1:
+            raise AssertionError("infeasible revision must stop before another Critic call")
+        draft = context["draft"]
+        return CritiqueDecision(
+            decision_id=f"revise:{draft.draft_batch_id}",
+            draft_batch_id=draft.draft_batch_id,
+            round_id=draft.round_id,
+            review_attempt=draft.review_attempt,
+            verdict=ReviewVerdict.REVISE,
+            falsification_readiness=FalsificationReadiness.NEEDS_REVISION,
+            required_changes=(
+                RequiredChange(
+                    action=RequiredChangeAction.REPLACE_CANDIDATE,
+                    target_ids=(draft.candidate_ids[0],),
+                    parameters={
+                        "excluded_residues": [
+                            f"39{residue}" for residue in "ACDEFGHIKLMNPQRSTVWY"
+                        ],
+                        "applies_to_arms": ["fallback"],
+                    },
+                    rationale="Synthetic infeasible position-wide exclusion.",
+                ),
+            ),
+            confidence=1.0,
+            summary="Force a deterministically infeasible revision.",
+        )
+
+
 @pytest.mark.integration
 def test_campaign_submits_only_after_critic_and_assesses_hypothesis(config_factory):
     config = config_factory(rounds=1, budget_per_round=3, run_label="critic-control")
@@ -113,3 +150,33 @@ def test_round_abort_skips_final_test(config_factory):
     assert "final_fit_started" not in event_types
     assert "final_predict_started" not in event_types
     assert (run_dir / "summary.json").is_file()
+
+
+@pytest.mark.integration
+def test_infeasible_residue_revision_writes_shortfall_without_second_critic_call(
+    config_factory,
+) -> None:
+    config = config_factory(
+        rounds=1,
+        budget_per_round=4,
+        candidate_limit=24,
+        run_label="revision-constraint-infeasible",
+    )
+    client = _InfeasibleResidueRevisionClient()
+    summary = CampaignRunner(
+        config,
+        critic_agent=CriticAgent(client, max_retries=0),
+    ).run()
+    run_dir = config.output_root / summary["run_id"]
+    receipt = json.loads(
+        (run_dir / "round_01/revision_constraint_infeasible.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert client.calls == 1
+    assert summary["rounds_aborted"] == 1
+    assert summary["queries_used"] == 0
+    assert receipt["code"] == "REVISION_CONSTRAINT_INFEASIBLE"
+    assert receipt["selected_count"] == 0
+    assert receipt["shortfall"] == 4

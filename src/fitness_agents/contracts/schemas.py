@@ -169,6 +169,7 @@ class Hypothesis:
     falsification_criterion: str
     parent_hypothesis_id: str | None = None
     explanation: dict[str, Any] | None = None
+    hard_residue_constraints: dict[int, tuple[str, ...]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

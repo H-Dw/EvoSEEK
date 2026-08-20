@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from fitness_agents.agents.output_guards import SemanticOutputValidationError
 from fitness_agents.agents.remote_llm import complete_json, create_openai_client, resolve_model
 from fitness_agents.contracts.agent_io import RoleActivationState
-from fitness_agents.contracts.batch_review import BatchReviewContext
+from fitness_agents.contracts.batch_review import BatchReviewContext, CandidateIntentArm
 from fitness_agents.contracts.evidence_universe import RoleVisibleEvidenceUniverse
 from fitness_agents.contracts.mutation_evidence import (
     mutation_evidence_batch_metadata,
@@ -61,21 +61,31 @@ def hypothesis_snapshot(hypothesis: Any | None) -> dict[str, Any] | None:
     preferred = getattr(hypothesis, "preferred_residues", None) or {}
     if isinstance(hypothesis, dict):
         preferred = hypothesis.get("preferred_residues") or {}
+        hard = hypothesis.get("hard_residue_constraints") or {}
         return {
             "hypothesis_id": hypothesis.get("hypothesis_id"),
             "statement": hypothesis.get("statement"),
             "preferred_residues": {
                 str(site): list(residues) for site, residues in preferred.items()
             },
+            "hard_residue_constraints": {
+                str(site): list(residues) for site, residues in hard.items()
+            },
             "evidence_ids": list(hypothesis.get("evidence_ids") or ()),
             "expected_outcome": hypothesis.get("expected_outcome"),
             "falsification_criterion": hypothesis.get("falsification_criterion"),
             "explanation": hypothesis.get("explanation"),
         }
+    hard = getattr(hypothesis, "hard_residue_constraints", None) or {}
     return {
         "hypothesis_id": getattr(hypothesis, "hypothesis_id", None),
         "statement": getattr(hypothesis, "statement", None),
-        "preferred_residues": {str(site): list(residues) for site, residues in preferred.items()},
+        "preferred_residues": {
+            str(site): list(residues) for site, residues in preferred.items()
+        },
+        "hard_residue_constraints": {
+            str(site): list(residues) for site, residues in hard.items()
+        },
         "evidence_ids": list(getattr(hypothesis, "evidence_ids", ()) or ()),
         "expected_outcome": getattr(hypothesis, "expected_outcome", None),
         "falsification_criterion": getattr(hypothesis, "falsification_criterion", None),
@@ -274,6 +284,7 @@ def _compact_conflict_report(value: Any) -> dict[str, Any]:
 
 
 class BatchReviewCode(str, Enum):
+    HARD_RESIDUE_CONSTRAINT_VIOLATION = "HARD_RESIDUE_CONSTRAINT_VIOLATION"
     INVALID_MUTATION_NOTATION = "INVALID_MUTATION_NOTATION"
     FORBIDDEN_POSITION = "FORBIDDEN_POSITION"
     MULTIPLE_EDITS_SAME_POSITION = "MULTIPLE_EDITS_SAME_POSITION"
@@ -358,6 +369,8 @@ class RequiredChangeParametersOutput(BaseModel):
     max_mutation_depth: int | None = Field(default=None, ge=0)
     evidence_query: str | None = Field(default=None, max_length=160)
     excluded_residues: list[str] = Field(default_factory=list, max_length=20)
+    required_residues_by_position: dict[str, list[str]] = Field(default_factory=dict)
+    applies_to_arms: list[CandidateIntentArm] = Field(default_factory=list, max_length=5)
 
 
 class RequiredChangeOutput(BaseModel):

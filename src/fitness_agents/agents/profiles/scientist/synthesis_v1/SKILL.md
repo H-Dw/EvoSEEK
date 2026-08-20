@@ -2,8 +2,8 @@
 
 ## Contract fingerprints
 
-- schema_sha256: 4383164ab888eb4a758aec13b0d939f44f8d4cc6a25662905fbe3c73b398f91d
-- skill_sha256: 61cb1a4a55a258230776a69dc74091b0efff09103857c4653d24ab3131ab4c16
+- schema_sha256: 80360b4619adb6b3a83f38349b72ed79b1fc8381d6868a974627a5c208b0be73
+- skill_sha256: 0ca611916c5af3d9e8c45445ebb803876bcaa01b321f9df17019c4e138c39398
 
 ## Inputs and responsibility
 
@@ -18,6 +18,9 @@ whether optional candidates can support one final experiment-facing hypothesis. 
 are inputs, not decisions. The main Scientist alone owns cross-channel fusion and the final residue
 preferences. It may not approve batches or turn descriptors, predictions, or RAG into measurements.
 An evidence ID is citable only by exact membership in `evidence_universe`, including RAG IDs.
+`preferred_residues` is always a soft directional prior. Put a residue rule in
+`hard_residue_constraints` only when a supplied deterministic design/safety constraint explicitly
+requires it; never infer hardness from prose, confidence, or preference wording.
 
 Classify each channel contribution as one or more of `support`, `constraint_counterevidence`, and
 `analysis_only`, using the runtime-provided contribution modes. `candidate_hypotheses: []` is a
@@ -54,6 +57,6 @@ summary, channel analysis summary, uncertainty, and each limitation are at most 
 target the explanation summary at or below 280 and other prose at or below 320. Cite at most 12
 visible IDs. Issue/action/verdict enums do not apply to this Scientist.
 
-SYNTHESIZED example for `all_positions=[39,40,41,54]`: `{"outcome":"SYNTHESIZED_HYPOTHESIS","hypothesis_id":"runtime-owned","statement":"Test the bounded four-position direction supported by ev:1.","preferred_residues":{"39":["V"],"40":["D"],"41":["G"],"54":["V"]},"evidence_ids":["ev:1"],"expected_outcome":"The preregistered comparison separates the direction from its control.","falsification_criterion":"Reject the direction if the target does not exceed its matched control.","parent_hypothesis_id":null,"explanation":{"summary":"The direction comes from cited evidence; descriptor-only cards remain constraints.","channel_contributions":[{"channel":"physchem","analysis_id":"analysis:pc:1","analysis_summary":"Descriptor-only analysis.","evidence_ids":["ev:1"],"uncertainty":"Not a fitness measurement.","candidate_hypothesis_ids":[]}],"conflicts":[],"limitations":["The claim remains prospective."]}}`
+SYNTHESIZED example for `all_positions=[39,40,41,54]`: `{"outcome":"SYNTHESIZED_HYPOTHESIS","hypothesis_id":"runtime-owned","statement":"Test the bounded four-position direction supported by ev:1.","preferred_residues":{"39":["V"],"40":["D"],"41":["G"],"54":["V"]},"hard_residue_constraints":{},"evidence_ids":["ev:1"],"expected_outcome":"The preregistered comparison separates the direction from its control.","falsification_criterion":"Reject the direction if the target does not exceed its matched control.","parent_hypothesis_id":null,"explanation":{"summary":"The direction comes from cited evidence; descriptor-only cards remain constraints.","channel_contributions":[{"channel":"physchem","analysis_id":"analysis:pc:1","analysis_summary":"Descriptor-only analysis.","evidence_ids":["ev:1"],"uncertainty":"Not a fitness measurement.","candidate_hypothesis_ids":[]}],"conflicts":[],"limitations":["The claim remains prospective."]}}`
 
 ABSTAIN example: `{"outcome":"NO_SUPPORTED_HYPOTHESIS","abstention_id":"abstain:r1","reason":"All feature channels are analysis-only and no non-feature directional evidence is visible.","evidence_ids":["ev:1"],"unresolved_constraints":["No cited card supports a residue direction."],"recommended_next_evidence":["Obtain an independent directional measurement or candidate hypothesis."]}`

@@ -15,9 +15,16 @@ from fitness_agents.agents.critic import (
     OpenAICriticClient,
     RuleBasedCriticClient,
 )
+from fitness_agents.agents.output_guards import RevisionConstraints
 from fitness_agents.agents.scientist import ScientistAgent
 from fitness_agents.config import ExperimentConfig
 from fitness_agents.contracts.agent_io import RoleActivationState
+from fitness_agents.contracts.batch_review import (
+    BatchReviewContext,
+    CandidateIntentCard,
+    RevisionQuotaShortfallReceipt,
+    prediction_review_card,
+)
 from fitness_agents.contracts.design import (
     RankedSequenceDesign,
     ResolvedDesignSpace,
@@ -42,8 +49,9 @@ from fitness_agents.mutation import (
 from fitness_agents.protein_features import ProteinTaskContext
 from fitness_agents.utils import JsonArtifactWriter, seed_everything
 from fitness_agents.validation import ApprovalGateway, OpenDesignHardValidator, build_draft_batch
+from fitness_agents.validation.batch import content_hash
 
-from .review import BoundedReviewLoop
+from .review import BoundedReviewLoop, RevisionConstraintInfeasible
 
 
 def _flatten_evidence(evidence: dict[str, list[Evidence]], limit: int = 120) -> list[Evidence]:
@@ -455,18 +463,86 @@ class OpenDesignRunner:
         ranked_ids = tuple(item.proposal.proposal_id for item in ranked)
         initial_ids = tuple(selection.selected_ids)
         expected_batch_size = min(self.config.budget_per_round, len(candidates))
+        review_context_holder: dict[str, BatchReviewContext] = {}
+        prediction_cards = {
+            variant_id: prediction_review_card(
+                prediction,
+                source_kind="active_posterior",
+                decision_eligible=True,
+                calibration_status=(
+                    "calibrated"
+                    if posterior.calibration.status == "calibrated"
+                    else "uncalibrated"
+                ),
+            )
+            for variant_id, prediction in prediction_by_id.items()
+        }
+        wild_type_by_position = {
+            position: self.design_space.reference_sequence[index]
+            for position, index in self.design_space.position_to_sequence_index.items()
+        }
 
         def draft_builder(
             review_attempt: int,
             parent_draft_batch_id: str | None,
             exclusions: set[str],
-            _constraints: Any | None = None,
+            constraints: RevisionConstraints | None = None,
+            revision_feedback: Any | None = None,
         ):
-            del _constraints
             ordered = tuple(dict.fromkeys((*initial_ids, *ranked_ids)))
-            candidate_ids = tuple(item for item in ordered if item not in exclusions)[
-                :expected_batch_size
-            ]
+            eligible_ids = tuple(item for item in ordered if item not in exclusions)
+            before_residue_filter = len(eligible_ids)
+            if constraints is not None and constraints.has_residue_constraints:
+                eligible_ids = tuple(
+                    candidate_id
+                    for candidate_id in eligible_ids
+                    if not constraints.variant_violations(
+                        candidate_by_id[candidate_id],
+                        arm="fallback",
+                        position_to_index=(
+                            self.design_space.position_to_sequence_index
+                        ),
+                        wild_type_by_position=wild_type_by_position,
+                    )
+                )
+            candidate_ids = eligible_ids[:expected_batch_size]
+            if review_attempt > 0 and len(candidate_ids) < expected_batch_size:
+                raise RevisionConstraintInfeasible(
+                    RevisionQuotaShortfallReceipt(
+                        required_batch_size=expected_batch_size,
+                        eligible_before_filter=len(ordered),
+                        eligible_after_filter=len(eligible_ids),
+                        selected_count=len(candidate_ids),
+                        shortfall=expected_batch_size - len(candidate_ids),
+                        quota_shortfalls={
+                            "batch_total": expected_batch_size - len(candidate_ids)
+                        },
+                        excluded_candidate_count=(
+                            len(exclusions)
+                            + before_residue_filter
+                            - len(eligible_ids)
+                        ),
+                        constraints_sha256=content_hash(
+                            (constraints or RevisionConstraints()).prompt_payload()
+                        ),
+                    )
+                )
+            review_context_holder["value"] = BatchReviewContext(
+                prediction_status_by_id={
+                    candidate_id: prediction_cards[candidate_id]
+                    for candidate_id in candidate_ids
+                },
+                candidate_intent_by_id={
+                    candidate_id: CandidateIntentCard(
+                        candidate_id=candidate_id,
+                        arm="fallback",
+                    )
+                    for candidate_id in candidate_ids
+                },
+                review_controls=self.config.critic.review_controls,
+                review_diversity=self.config.critic.review_diversity,
+                revision_feedback=revision_feedback,
+            )
             falsification_spec = preregister_batch_median_test(
                 hypothesis_id=hypothesis.hypothesis_id,
                 round_id=1,
@@ -520,20 +596,36 @@ class OpenDesignRunner:
                 verdict=decision.verdict.value,
             )
 
-        review = self.review_loop.run(
-            draft_builder=draft_builder,
-            variants=candidate_by_id,
-            predictions=prediction_by_id,
-            evidence=evidence,
-            revealed_ids={item.variant_id for item in self.observed_variants},
-            pending_ids=set(),
-            allowed_ids=set(candidate_by_id),
-            expected_batch_size=expected_batch_size,
-            context_evidence=_flatten_evidence(evidence),
-            hypothesis=hypothesis,
-            on_attempt_start=record_review_start,
-            on_attempt=record_review,
-        )
+        try:
+            review = self.review_loop.run(
+                draft_builder=draft_builder,
+                variants=candidate_by_id,
+                predictions=prediction_by_id,
+                evidence=evidence,
+                revealed_ids={item.variant_id for item in self.observed_variants},
+                pending_ids=set(),
+                allowed_ids=set(candidate_by_id),
+                expected_batch_size=expected_batch_size,
+                context_evidence=_flatten_evidence(evidence),
+                hypothesis=hypothesis,
+                position_to_index=self.design_space.position_to_sequence_index,
+                review_context_provider=lambda _draft: review_context_holder["value"],
+                on_attempt_start=record_review_start,
+                on_attempt=record_review,
+            )
+        except RevisionConstraintInfeasible as error:
+            self.writer.write_json(
+                "review/revision_constraint_infeasible.json",
+                error.receipt.model_dump(mode="json"),
+            )
+            self.writer.report(
+                "revision_constraint_infeasible",
+                message=error.receipt.code,
+                phase=CampaignPhase.ROUND_ABORTED.value,
+                round_id=1,
+                receipt=error.receipt.model_dump(mode="json"),
+            )
+            raise
         self.approval_gateway.verify(review.approved_batch)
         self.state.phase = CampaignPhase.APPROVED
         self.writer.write_json("review/approved_batch.json", review.approved_batch)

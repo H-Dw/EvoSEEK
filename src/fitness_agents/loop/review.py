@@ -1,13 +1,27 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from inspect import signature
 from typing import Any
 
 from fitness_agents.agents.critic import CriticAgent
-from fitness_agents.agents.output_guards import RevisionConstraints
+from fitness_agents.agents.output_guards import (
+    CANONICAL_RESIDUES,
+    DEFAULT_RESIDUE_CONSTRAINT_ARMS,
+    REVISION_ARMS,
+    ResidueSubstitutionConstraint,
+    RevisionConstraints,
+)
 from fitness_agents.contracts.agent_io import RoleActivationState
-from fitness_agents.contracts.batch_review import BatchReviewContext, ControlFeasibilityReceipt
+from fitness_agents.contracts.batch_review import (
+    BatchReviewContext,
+    BatchRevisionFeedbackReceipt,
+    ControlFeasibilityReceipt,
+    ResidueSubstitutionCard,
+    RevisionQuotaShortfallReceipt,
+)
 from fitness_agents.contracts.schemas import (
     ApprovedBatch,
     ConflictReport,
@@ -19,7 +33,7 @@ from fitness_agents.contracts.schemas import (
     ReviewVerdict,
     Variant,
 )
-from fitness_agents.validation.batch import ApprovalGateway, BatchHardValidator
+from fitness_agents.validation.batch import ApprovalGateway, BatchHardValidator, content_hash
 
 
 class ReviewRejected(RuntimeError):
@@ -48,6 +62,19 @@ class ControlFeasibilityError(ReviewRejected):
         super().__init__(
             f"Control feasibility gate failed: {receipt.reason}", decisions=decisions
         )
+        self.receipt = receipt
+
+
+class RevisionConstraintInfeasible(ReviewRejected):
+    """A revised pool cannot satisfy deterministic residue/quota constraints."""
+
+    def __init__(
+        self,
+        receipt: RevisionQuotaShortfallReceipt,
+        *,
+        decisions: Sequence[CritiqueDecision] = (),
+    ) -> None:
+        super().__init__(receipt.code, decisions=decisions)
         self.receipt = receipt
 
 
@@ -95,11 +122,91 @@ class RevisionPlanner:
     def exclusions(self, decision: CritiqueDecision) -> set[str]:
         return self.plan(decision).exclusions
 
-    def plan(self, decision: CritiqueDecision) -> RevisionPlan:
+    _SUBSTITUTION_RE = re.compile(
+        r"^(?:(?P<from>[ACDEFGHIKLMNPQRSTVWY]))?"
+        r"(?P<position>[1-9][0-9]*)(?::|->)?"
+        r"(?P<to>[ACDEFGHIKLMNPQRSTVWY])$"
+    )
+
+    @classmethod
+    def _parse_excluded_substitution(
+        cls,
+        value: str,
+        *,
+        allowed_positions: set[int] | None,
+        wild_type_by_position: Mapping[int, str] | None,
+    ) -> ResidueSubstitutionConstraint:
+        normalized = "".join(str(value).upper().split())
+        match = cls._SUBSTITUTION_RE.fullmatch(normalized)
+        if match is None:
+            raise ValueError(
+                "excluded_residues entries must use G41K, 41K, or 41:K notation"
+            )
+        position = int(match.group("position"))
+        if allowed_positions is not None and position not in allowed_positions:
+            raise ValueError(
+                f"excluded residue position {position} is outside the design space"
+            )
+        from_residue = match.group("from")
+        if (
+            from_residue is not None
+            and wild_type_by_position is not None
+            and wild_type_by_position.get(position) != from_residue
+        ):
+            raise ValueError(
+                f"excluded residue source {from_residue}{position} does not match wild type"
+            )
+        return ResidueSubstitutionConstraint(
+            position=position,
+            from_residue=from_residue,
+            to_residue=match.group("to"),
+        )
+
+    def plan(
+        self,
+        decision: CritiqueDecision,
+        *,
+        allowed_positions: set[int] | None = None,
+        wild_type_by_position: Mapping[int, str] | None = None,
+    ) -> RevisionPlan:
         excluded: set[str] = set()
         constraints = RevisionConstraints()
+        excluded_substitutions: set[ResidueSubstitutionConstraint] = set()
+        required_residues: dict[int, set[str]] = {}
+        applies_to_arms: set[str] = set()
         actions = {change.action for change in decision.required_changes}
         for change in decision.required_changes:
+            for raw in change.parameters.get("excluded_residues", ()):
+                excluded_substitutions.add(
+                    self._parse_excluded_substitution(
+                        str(raw),
+                        allowed_positions=allowed_positions,
+                        wild_type_by_position=wild_type_by_position,
+                    )
+                )
+            for raw_position, raw_residues in dict(
+                change.parameters.get("required_residues_by_position", {})
+            ).items():
+                position = int(raw_position)
+                if allowed_positions is not None and position not in allowed_positions:
+                    raise ValueError(
+                        f"required residue position {position} is outside the design space"
+                    )
+                residues = {str(item).upper() for item in raw_residues}
+                if not residues or residues.difference(CANONICAL_RESIDUES):
+                    raise ValueError(
+                        "required_residues_by_position must contain canonical residues"
+                    )
+                if position in required_residues:
+                    required_residues[position].intersection_update(residues)
+                else:
+                    required_residues[position] = residues
+            raw_arms = {
+                str(item) for item in change.parameters.get("applies_to_arms", ())
+            }
+            if unknown_arms := raw_arms.difference(REVISION_ARMS):
+                raise ValueError(f"unknown revision arms: {sorted(unknown_arms)}")
+            applies_to_arms.update(raw_arms)
             if change.action in {
                 RequiredChangeAction.EXCLUDE_CANDIDATE,
                 RequiredChangeAction.REPLACE_CANDIDATE,
@@ -129,6 +236,18 @@ class RevisionPlanner:
                 constraints = replace(constraints, reduce_mutation_depth=True)
             elif change.action in HYPOTHESIS_REVISION_ACTIONS:
                 constraints = replace(constraints, regenerate_hypothesis=True)
+        if excluded_substitutions or required_residues:
+            if not applies_to_arms:
+                applies_to_arms.update(DEFAULT_RESIDUE_CONSTRAINT_ARMS)
+            constraints = replace(
+                constraints,
+                excluded_substitutions=tuple(sorted(excluded_substitutions)),
+                required_residues_by_position={
+                    position: tuple(sorted(residues))
+                    for position, residues in sorted(required_residues.items())
+                },
+                applies_to_arms=tuple(sorted(applies_to_arms)),
+            )
         regenerate = bool(actions.intersection(HYPOTHESIS_REVISION_ACTIONS))
         executable = bool(actions) and actions.issubset(
             BATCH_REVISION_ACTIONS.union(HYPOTHESIS_REVISION_ACTIONS)
@@ -147,8 +266,43 @@ class RevisionPlanner:
                     constraints.increase_diversity,
                     constraints.add_exploration,
                     constraints.reduce_mutation_depth,
+                    constraints.has_residue_constraints,
                 )
             ),
+        )
+
+    @staticmethod
+    def feedback_receipt(
+        decision: CritiqueDecision,
+        plan: RevisionPlan,
+    ) -> BatchRevisionFeedbackReceipt:
+        issue_codes = {
+            str(getattr(item.code, "value", item.code))
+            for item in (*decision.candidate_issues, *decision.batch_level_risks)
+        }
+        return BatchRevisionFeedbackReceipt(
+            previous_decision_id=decision.decision_id,
+            previous_review_attempt=decision.review_attempt,
+            issue_codes=tuple(sorted(issue_codes)),
+            required_actions=tuple(
+                sorted({item.action.value for item in decision.required_changes})
+            ),
+            excluded_candidate_ids=tuple(sorted(plan.exclusions)),
+            excluded_substitutions=tuple(
+                ResidueSubstitutionCard(
+                    position=item.position,
+                    from_residue=item.from_residue,
+                    to_residue=item.to_residue,
+                )
+                for item in plan.constraints.excluded_substitutions
+            ),
+            required_residues_by_position={
+                str(position): tuple(residues)
+                for position, residues in sorted(
+                    plan.constraints.required_residues_by_position.items()
+                )
+            },
+            applies_to_arms=plan.constraints.applies_to_arms,
         )
 
 
@@ -181,6 +335,7 @@ class BoundedReviewLoop:
         context_evidence: Sequence[Evidence] = (),
         hypothesis: Any | None = None,
         activation_state: RoleActivationState | dict[str, Any] | None = None,
+        position_to_index: Mapping[int, int] | None = None,
         review_context_provider: Callable[[DraftBatch], BatchReviewContext] | None = None,
         on_attempt: Callable[[DraftBatch, ConflictReport, CritiqueDecision], Any] | None = None,
         on_attempt_start: Callable[[DraftBatch, ConflictReport], Any] | None = None,
@@ -189,16 +344,103 @@ class BoundedReviewLoop:
         exclusions: set[str] = set()
         constraints = RevisionConstraints()
         parent_id: str | None = None
+        revision_feedback: BatchRevisionFeedbackReceipt | None = None
         for attempt in range(self.max_revision_attempts + 1):
             try:
-                draft = draft_builder(attempt, parent_id, exclusions, constraints)
-            except TypeError:
-                draft = draft_builder(attempt, parent_id, exclusions)
+                parameters = signature(draft_builder).parameters
+                builder_kwargs: dict[str, Any] = {}
+                if "constraints" in parameters:
+                    builder_kwargs["constraints"] = constraints
+                if "revision_feedback" in parameters:
+                    builder_kwargs["revision_feedback"] = revision_feedback
+                draft = draft_builder(
+                    attempt,
+                    parent_id,
+                    exclusions,
+                    **builder_kwargs,
+                )
+            except RevisionConstraintInfeasible as error:
+                raise RevisionConstraintInfeasible(
+                    error.receipt, decisions=attempts
+                ) from error
             review_context = (
                 review_context_provider(draft)
                 if review_context_provider is not None
                 else None
             )
+            if attempt > 0 and constraints.has_residue_constraints:
+                validator_task = getattr(self.validator, "task", None)
+                design_space = getattr(self.validator, "design_space", None)
+                resolved_position_to_index = dict(
+                    position_to_index
+                    or (
+                        design_space.position_to_sequence_index
+                        if design_space is not None
+                        else {
+                            position: index
+                            for index, position in enumerate(
+                                validator_task.mutable_positions
+                            )
+                        }
+                    )
+                )
+                if design_space is not None:
+                    wild_type_by_position = {
+                        position: design_space.reference_sequence[index]
+                        for position, index in (
+                            design_space.position_to_sequence_index.items()
+                        )
+                    }
+                else:
+                    wild_type_by_position = {
+                        position: validator_task.wild_type_sites[index]
+                        for index, position in enumerate(
+                            validator_task.mutable_positions
+                        )
+                    }
+                postcondition_failures: list[str] = []
+                for candidate_id in draft.candidate_ids:
+                    intent = (
+                        review_context.candidate_intent_by_id.get(candidate_id)
+                        if review_context is not None
+                        else None
+                    )
+                    arm = intent.arm if intent is not None else "fallback"
+                    if constraints.variant_violations(
+                        variants[candidate_id],
+                        arm=arm,
+                        position_to_index=resolved_position_to_index,
+                        wild_type_by_position=wild_type_by_position,
+                    ):
+                        postcondition_failures.append(candidate_id)
+                if postcondition_failures:
+                    raise RevisionConstraintInfeasible(
+                        RevisionQuotaShortfallReceipt(
+                            required_batch_size=expected_batch_size,
+                            eligible_before_filter=len(variants),
+                            eligible_after_filter=max(
+                                0, len(draft.candidate_ids) - len(postcondition_failures)
+                            ),
+                            selected_count=len(draft.candidate_ids),
+                            shortfall=max(
+                                0,
+                                expected_batch_size
+                                - (
+                                    len(draft.candidate_ids)
+                                    - len(postcondition_failures)
+                                ),
+                            ),
+                            quota_shortfalls={},
+                            excluded_candidate_count=len(exclusions),
+                            constraints_sha256=content_hash(
+                                constraints.prompt_payload()
+                            ),
+                            postcondition_failure_ids=tuple(
+                                sorted(postcondition_failures)
+                            ),
+                        ),
+                        decisions=attempts,
+                    )
             report = self.validator.validate(
                 draft,
                 variants=variants,
@@ -216,6 +458,7 @@ class BoundedReviewLoop:
                     if review_context is not None
                     else None
                 ),
+                hypothesis=hypothesis,
             )
             if on_attempt_start is not None:
                 on_attempt_start(draft, report)
@@ -251,7 +494,37 @@ class BoundedReviewLoop:
                 )
             if attempt >= self.max_revision_attempts:
                 raise ReviewRejected("Critic revision limit exhausted", decisions=attempts)
-            plan = self.revision_planner.plan(decision)
+            try:
+                validator_task = getattr(self.validator, "task", None)
+                design_space = getattr(self.validator, "design_space", None)
+                if validator_task is not None:
+                    allowed_positions = set(validator_task.mutable_positions)
+                    planner_wild_type = {
+                        position: validator_task.wild_type_sites[index]
+                        for index, position in enumerate(
+                            validator_task.mutable_positions
+                        )
+                    }
+                else:
+                    allowed_positions = set(
+                        design_space.allowed_mutation_positions
+                    )
+                    planner_wild_type = {
+                        position: design_space.reference_sequence[index]
+                        for position, index in (
+                            design_space.position_to_sequence_index.items()
+                        )
+                    }
+                plan = self.revision_planner.plan(
+                    decision,
+                    allowed_positions=allowed_positions,
+                    wild_type_by_position=planner_wild_type,
+                )
+            except (TypeError, ValueError) as error:
+                raise ReviewRejected(
+                    f"Revision request cannot be executed safely: {error}",
+                    decisions=attempts,
+                ) from error
             if plan.regenerate_hypothesis:
                 raise HypothesisRevisionRequested(
                     "Critic requested a new hypothesis with revision constraints",
@@ -263,5 +536,14 @@ class BoundedReviewLoop:
                 )
             exclusions.update(plan.exclusions)
             constraints = constraints.merge(plan.constraints)
+            revision_feedback = self.revision_planner.feedback_receipt(
+                decision,
+                RevisionPlan(
+                    constraints=constraints,
+                    exclusions=set(exclusions),
+                    regenerate_hypothesis=False,
+                    executable=True,
+                ),
+            )
             parent_id = draft.draft_batch_id
         raise AssertionError("Bounded review loop terminated unexpectedly")

@@ -37,7 +37,9 @@ from fitness_agents.contracts.agent_io import (
 )
 from fitness_agents.contracts.batch_review import (
     BatchReviewContext,
+    CandidateIntentCard,
     PredictionReviewCard,
+    RevisionQuotaShortfallReceipt,
     batch_diversity_receipt,
     prediction_review_card,
 )
@@ -94,15 +96,65 @@ from fitness_agents.plugin_registry import PluginRegistry
 from fitness_agents.protein_features import ProteinTaskContext
 from fitness_agents.reporting import write_campaign_outputs
 from fitness_agents.utils import JsonArtifactWriter, bind_progress, reset_progress, seed_everything
-from fitness_agents.validation.batch import ApprovalGateway, BatchHardValidator, build_draft_batch
+from fitness_agents.validation.batch import (
+    ApprovalGateway,
+    BatchHardValidator,
+    build_draft_batch,
+    content_hash,
+)
 
 from .backends import ApprovalEnforcingBackend, CsvOracleBackend
-from .review import BoundedReviewLoop, HypothesisRevisionRequested, ReviewRejected
+from .review import (
+    BoundedReviewLoop,
+    HypothesisRevisionRequested,
+    ReviewRejected,
+    RevisionConstraintInfeasible,
+)
 
 
 def _descending_ranks(values: dict[str, float]) -> dict[str, int]:
     ordered = sorted(values, key=lambda key: (values[key], key), reverse=True)
     return {variant_id: rank for rank, variant_id in enumerate(ordered, start=1)}
+
+
+def _filter_hard_residue_constraints(
+    variants: Sequence[Variant],
+    *,
+    hypothesis: Hypothesis | None,
+    position_to_index: dict[int, int],
+) -> list[Variant]:
+    """Apply only explicit hard constraints; preferred_residues remain a soft prior."""
+
+    if hypothesis is None or not hypothesis.hard_residue_constraints:
+        return list(variants)
+    return [
+        variant
+        for variant in variants
+        if all(
+            position in position_to_index
+            and position_to_index[position] < len(variant.variant)
+            and variant.variant[position_to_index[position]] in allowed
+            for position, allowed in hypothesis.hard_residue_constraints.items()
+        )
+    ]
+
+
+def _candidate_intent_cards(
+    candidate_ids: Sequence[str],
+    quota_selection: Any | None,
+) -> dict[str, CandidateIntentCard]:
+    if quota_selection is not None:
+        cards = quota_selection.intent_by_id()
+        if set(candidate_ids).issubset(cards):
+            return {candidate_id: cards[candidate_id] for candidate_id in candidate_ids}
+    return {
+        candidate_id: CandidateIntentCard(
+            candidate_id=candidate_id,
+            arm="fallback",
+            allow_hypothesis_mismatch=False,
+        )
+        for candidate_id in candidate_ids
+    }
 
 
 def _prediction_review_cards(
@@ -1877,6 +1929,11 @@ class CampaignRunner:
                 self.config.candidate_limit,
             )
             eligible = self._reserve_agent_uq_controls(eligible, remaining, hypothesis)
+            eligible = _filter_hard_residue_constraints(
+                eligible,
+                hypothesis=hypothesis,
+                position_to_index=self.task_context.position_to_variant_index,
+            )
             if not eligible:
                 raise RuntimeError("Candidate generator returned an empty pool")
             self._progress(
@@ -2448,9 +2505,11 @@ class CampaignRunner:
                 parent_draft_batch_id: str | None,
                 exclusions: set[str],
                 constraints: RevisionConstraints | None = None,
+                revision_feedback: Any | None = None,
                 _context: dict[str, Any] = draft_context,
             ):
                 _context["revision_constraints"] = constraints
+                _context["revision_feedback"] = revision_feedback
                 if review_attempt == 0:
                     candidate_ids = list(_context["initial_selected_ids"])
                     current_pool_ids = [
@@ -2460,6 +2519,31 @@ class CampaignRunner:
                     revised_eligible = [
                         item for item in _context["eligible"] if item.variant_id not in exclusions
                     ]
+                    if (
+                        constraints is not None
+                        and constraints.has_residue_constraints
+                        and not (
+                            selection_driver == "agent_uq"
+                            and self.agent_quota_acquisition is not None
+                        )
+                    ):
+                        revised_eligible = [
+                            item
+                            for item in revised_eligible
+                            if not constraints.variant_violations(
+                                item,
+                                arm="fallback",
+                                position_to_index=(
+                                    self.task_context.position_to_variant_index
+                                ),
+                                wild_type_by_position={
+                                    position: self.config.task.wild_type_sites[index]
+                                    for index, position in enumerate(
+                                        self.config.task.mutable_positions
+                                    )
+                                },
+                            )
+                        ]
                     _context["scoring_snapshot"].assert_eligible_coverage()
                     if selection_driver == "active_learning":
                         if self.active_learning is None or _context["active_score_result"] is None:
@@ -2488,9 +2572,18 @@ class CampaignRunner:
                                 )
                                 for item in revised_eligible
                             ],
-                            min(_context["expected_batch_size"], len(revised_eligible)),
+                            _context["expected_batch_size"],
                             diversity_lambda=diversity,
                             constraints=constraints,
+                            position_to_index=(
+                                self.task_context.position_to_variant_index
+                            ),
+                            wild_type_by_position={
+                                position: self.config.task.wild_type_sites[index]
+                                for index, position in enumerate(
+                                    self.config.task.mutable_positions
+                                )
+                            },
                         )
                         _context["agent_quota_selection"] = revised_selection
                         candidate_ids = list(revised_selection.selected_ids)
@@ -2508,9 +2601,63 @@ class CampaignRunner:
                             min(_context["expected_batch_size"], len(revised_eligible)),
                             diversity,
                         )
+                    quota_selection = _context.get("agent_quota_selection")
+                    eligible_after_filter = (
+                        quota_selection.eligible_after_filter
+                        if quota_selection is not None
+                        and selection_driver == "agent_uq"
+                        else len(revised_eligible)
+                    )
                     current_pool_ids = [
-                        item.variant_id for item in revised_eligible
+                        item.variant_id
+                        for item in revised_eligible
+                        if (
+                            quota_selection is None
+                            or item.variant_id
+                            not in set(quota_selection.constraint_excluded_ids)
+                        )
                     ]
+                    if len(candidate_ids) < _context["expected_batch_size"]:
+                        raise RevisionConstraintInfeasible(
+                            RevisionQuotaShortfallReceipt(
+                                required_batch_size=_context["expected_batch_size"],
+                                eligible_before_filter=len(_context["eligible"]),
+                                eligible_after_filter=eligible_after_filter,
+                                selected_count=len(candidate_ids),
+                                shortfall=(
+                                    _context["expected_batch_size"]
+                                    - len(candidate_ids)
+                                ),
+                                quota_shortfalls=(
+                                    dict(quota_selection.shortfalls)
+                                    if quota_selection is not None
+                                    and selection_driver == "agent_uq"
+                                    else {
+                                        "batch_total": (
+                                            _context["expected_batch_size"]
+                                            - len(candidate_ids)
+                                        )
+                                    }
+                                ),
+                                excluded_candidate_count=(
+                                    len(exclusions)
+                                    + (
+                                        len(quota_selection.constraint_excluded_ids)
+                                        if quota_selection is not None
+                                        and selection_driver == "agent_uq"
+                                        else max(
+                                            0,
+                                            len(_context["eligible"])
+                                            - len(revised_eligible)
+                                            - len(exclusions),
+                                        )
+                                    )
+                                ),
+                                constraints_sha256=content_hash(
+                                    (constraints or RevisionConstraints()).prompt_payload()
+                                ),
+                            )
+                        )
                 previous_diversity = _context.get("last_diversity_receipt")
                 _context["reviewed_draft_candidate_ids"].update(candidate_ids)
                 ensure_dry_validation(
@@ -2536,6 +2683,9 @@ class CampaignRunner:
                         variant_id: _context["prediction_status_by_id"][variant_id]
                         for variant_id in candidate_ids
                     },
+                    candidate_intent_by_id=_candidate_intent_cards(
+                        candidate_ids, quota_selection
+                    ),
                     review_controls=self.config.critic.review_controls,
                     review_diversity=self.config.critic.review_diversity,
                     control_feasibility=(
@@ -2549,6 +2699,7 @@ class CampaignRunner:
                         if self.config.critic.review_diversity
                         else None
                     ),
+                    revision_feedback=revision_feedback,
                 )
                 _context["last_diversity_receipt"] = diversity_receipt
                 _context["batch_review_context"] = review_context
@@ -2713,6 +2864,7 @@ class CampaignRunner:
                         local_evidence=local_evidence,
                         interaction_result=interaction_result,
                     ),
+                    position_to_index=self.task_context.position_to_variant_index,
                     review_context_provider=lambda _draft, _context=draft_context: _context[
                         "batch_review_context"
                     ],
@@ -2743,6 +2895,11 @@ class CampaignRunner:
                     )
                     eligible = self._reserve_agent_uq_controls(
                         eligible, remaining, hypothesis
+                    )
+                    eligible = _filter_hard_residue_constraints(
+                        eligible,
+                        hypothesis=hypothesis,
+                        position_to_index=self.task_context.position_to_variant_index,
                     )
                     if not eligible:
                         raise RuntimeError("Candidate generator returned an empty pool")
@@ -2970,6 +3127,9 @@ class CampaignRunner:
                             local_evidence=local_evidence,
                             interaction_result=interaction_result,
                         ),
+                        position_to_index=(
+                            self.task_context.position_to_variant_index
+                        ),
                         review_context_provider=lambda _draft, _context=draft_context: _context[
                             "batch_review_context"
                         ],
@@ -2988,11 +3148,28 @@ class CampaignRunner:
                     )
                     raise error from nested
             except ReviewRejected as error:
-                terminal_policy = (
-                    self.config.critic.on_exhausted
-                    if "limit exhausted" in str(error)
-                    else self.config.critic.on_reject
-                )
+                if isinstance(error, RevisionConstraintInfeasible):
+                    terminal_policy = "abort_round"
+                    self.writer.write_json(
+                        f"round_{round_id:02d}/revision_constraint_infeasible.json",
+                        error.receipt.model_dump(mode="json"),
+                    )
+                    self.writer.event(
+                        "revision_constraint_infeasible",
+                        {
+                            "round_id": round_id,
+                            "receipt": error.receipt.model_dump(mode="json"),
+                            "decision_ids": [
+                                item.decision_id for item in error.decisions
+                            ],
+                        },
+                    )
+                else:
+                    terminal_policy = (
+                        self.config.critic.on_exhausted
+                        if "limit exhausted" in str(error)
+                        else self.config.critic.on_reject
+                    )
                 if terminal_policy == "safe_fallback":
                     safest = sorted(
                         eligible,
@@ -3070,6 +3247,9 @@ class CampaignRunner:
                             allowed_ids={item.variant_id for item in remaining},
                             expected_batch_size=expected_batch_size,
                             hypothesis=hypothesis,
+                            position_to_index=(
+                                self.task_context.position_to_variant_index
+                            ),
                             on_attempt=record_review_attempt,
                             on_attempt_start=record_review_start,
                         )

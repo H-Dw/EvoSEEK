@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from fitness_agents.agents.output_guards import RevisionConstraints
 from fitness_agents.config import AgentQuotaAllocationConfig
 from fitness_agents.contracts.batch_review import (
+    CandidateIntentCard,
     ControlFeasibilityReceipt,
     control_feasibility_receipt,
 )
@@ -41,6 +42,9 @@ class AgentQuotaSelection:
     strong_hypothesis_candidate_count: int
     matched_control_candidate_count: int
     control_feasibility: ControlFeasibilityReceipt
+    eligible_before_filter: int
+    eligible_after_filter: int
+    constraint_excluded_ids: tuple[str, ...]
 
     def arm_by_id(self) -> dict[str, str]:
         output = {
@@ -50,6 +54,18 @@ class AgentQuotaSelection:
         }
         output.update({variant_id: "fallback" for variant_id in self.fallback_ids})
         return output
+
+    def intent_by_id(self) -> dict[str, CandidateIntentCard]:
+        arms = self.arm_by_id()
+        return {
+            variant_id: CandidateIntentCard(
+                candidate_id=variant_id,
+                arm=arm,
+                matched_to=self.matched_control_pairs.get(variant_id),
+                allow_hypothesis_mismatch=(arm == "matched_control"),
+            )
+            for variant_id, arm in arms.items()
+        }
 
 
 class AgentQuotaBatchAcquisition:
@@ -85,10 +101,38 @@ class AgentQuotaBatchAcquisition:
         *,
         diversity_lambda: float,
         constraints: RevisionConstraints | None = None,
+        position_to_index: dict[int, int] | None = None,
+        wild_type_by_position: dict[int, str] | None = None,
     ) -> AgentQuotaSelection:
         if budget < 0:
             raise ValueError("Agent quota acquisition budget must be non-negative")
         by_id = {item.variant_id: item for item in variants}
+        original_ids = set(by_id)
+        eligible_before_filter = len(by_id)
+        resolved_position_to_index = position_to_index or {}
+
+        def arm_eligible(variant_id: str, arm: str) -> bool:
+            if constraints is None or not constraints.has_residue_constraints:
+                return True
+            if not resolved_position_to_index:
+                raise ValueError(
+                    "position_to_index is required for residue-constrained acquisition"
+                )
+            return not constraints.variant_violations(
+                by_id[variant_id],
+                arm=arm,
+                position_to_index=resolved_position_to_index,
+                wild_type_by_position=wild_type_by_position,
+            )
+
+        eligible_in_any_arm = {
+            variant_id
+            for variant_id in by_id
+            if any(
+                arm_eligible(variant_id, arm)
+                for arm in (*ARMS, "fallback")
+            )
+        }
         if constraints is not None and constraints.reduce_mutation_depth and by_id:
             max_depth = max(item.mutation_count for item in by_id.values())
             depth_cap = max(0, max_depth - 1)
@@ -100,6 +144,10 @@ class AgentQuotaBatchAcquisition:
             if reduced:
                 by_id = reduced
                 variants = [item for item in variants if item.variant_id in by_id]
+        eligible_after_constraints = set(by_id).intersection(eligible_in_any_arm)
+        constraint_excluded_ids = tuple(
+            sorted(original_ids.difference(eligible_after_constraints))
+        )
         score_by_id = {item.variant_id: item for item in scores if item.variant_id in by_id}
         missing = set(by_id).difference(score_by_id)
         if missing:
@@ -152,6 +200,11 @@ class AgentQuotaBatchAcquisition:
             quota = min(quotas[arm], target - len(selected))
             for _ in range(quota):
                 eligible = candidates.intersection(available)
+                eligible = {
+                    variant_id
+                    for variant_id in eligible
+                    if arm_eligible(variant_id, arm)
+                }
                 if not eligible:
                     break
                 if minimum_batch_distance is not None and selected:
@@ -195,7 +248,11 @@ class AgentQuotaBatchAcquisition:
         control_quota = min(quotas["matched_control"], target - len(selected))
         target_ids = tuple(selected_by_arm["hypothesis_target"])
         for _ in range(control_quota):
-            eligible = controls.intersection(available)
+            eligible = {
+                variant_id
+                for variant_id in controls.intersection(available)
+                if arm_eligible(variant_id, "matched_control")
+            }
             if not eligible or not target_ids:
                 break
 
@@ -262,9 +319,14 @@ class AgentQuotaBatchAcquisition:
             arm: max(0, quotas[arm] - len(selected_by_arm[arm])) for arm in ARMS
         }
         fallback_ids: list[str] = []
-        while available and len(selected) < target:
+        fallback_available = {
+            variant_id
+            for variant_id in available
+            if arm_eligible(variant_id, "fallback")
+        }
+        while fallback_available and len(selected) < target:
             choice = max(
-                available,
+                fallback_available,
                 key=lambda variant_id: (
                     self._diversity_adjusted(
                         variant_id,
@@ -279,6 +341,7 @@ class AgentQuotaBatchAcquisition:
             selected.append(choice)
             fallback_ids.append(choice)
             available.remove(choice)
+            fallback_available.remove(choice)
 
         return AgentQuotaSelection(
             plugin=self.name,
@@ -295,4 +358,7 @@ class AgentQuotaBatchAcquisition:
                 available_control_ids=tuple(controls),
                 selected_control_ids=tuple(selected_by_arm["matched_control"]),
             ),
+            eligible_before_filter=eligible_before_filter,
+            eligible_after_filter=len(eligible_after_constraints),
+            constraint_excluded_ids=constraint_excluded_ids,
         )
