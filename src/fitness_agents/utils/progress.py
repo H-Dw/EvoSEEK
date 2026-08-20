@@ -2,7 +2,7 @@
 
 Live output is stderr (logger ``fitness_agents.progress``) plus an overwritten
 ``status.json``. Audit events still go to ``trace.jsonl`` through the artifact writer.
-Thinking-token text and prompts are never recorded here.
+Prompt conversations are written to role- and stage-labelled local artifacts by the bound writer.
 """
 
 from __future__ import annotations
@@ -39,6 +39,8 @@ class ProgressTarget(Protocol):
     ) -> None: ...
 
     def record_prompt_budget(self, payload: Mapping[str, Any]) -> None: ...
+
+    def record_llm_conversation(self, payload: Mapping[str, Any]) -> None: ...
 
 
 _current: ContextVar[ProgressTarget | None] = ContextVar("fitness_agents_progress", default=None)
@@ -139,6 +141,17 @@ def report_prompt_budget(**payload: Any) -> None:
         )
         return
     _log("LLM prompt budget checked", record)
+
+
+def report_llm_conversation(**payload: Any) -> None:
+    """Persist one complete request/response attempt with an explicit stage label."""
+
+    target = _current.get()
+    if target is None:
+        return
+    recorder = getattr(target, "record_llm_conversation", None)
+    if callable(recorder):
+        recorder(payload)
 
 
 def heartbeat(message: str, *, log: bool = True, **payload: Any) -> None:

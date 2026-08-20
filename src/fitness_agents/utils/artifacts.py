@@ -106,6 +106,7 @@ class JsonArtifactWriter:
         self.status_path = self.run_dir / "status.json"
         self._started = time.monotonic()
         self._write_lock = threading.RLock()
+        self._conversation_sequence = 0
         self._status: dict[str, Any] = {
             "run_id": run_id,
             "phase": "initialized",
@@ -219,6 +220,43 @@ class JsonArtifactWriter:
             temporary = target.with_suffix(".json.tmp")
             temporary.write_text(
                 json.dumps(records, ensure_ascii=False, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+            _atomic_replace_with_retry(temporary, target)
+
+    def record_llm_conversation(self, payload: Mapping[str, Any]) -> None:
+        """Write one full conversation with role, stage, and attempt labels."""
+
+        round_id = int(payload.get("round_id") or self._status.get("round_id") or 0)
+        role = re.sub(
+            r"[^A-Za-z0-9_.-]+", "_", str(payload.get("role") or "unknown")
+        ).strip("_") or "unknown"
+        stage = re.sub(
+            r"[^A-Za-z0-9_.-]+",
+            "_",
+            str(payload.get("conversation_stage") or "single"),
+        ).strip("_") or "single"
+        attempt = int(payload.get("attempt") or 0)
+        with self._write_lock:
+            self._conversation_sequence += 1
+            sequence = self._conversation_sequence
+            target = (
+                self.run_dir
+                / f"round_{round_id:02d}"
+                / "llm"
+                / role
+                / "conversations"
+                / f"{sequence:05d}_{stage}_attempt-{attempt:02d}.json"
+            )
+            target.parent.mkdir(parents=True, exist_ok=True)
+            record = {
+                "conversation_id": f"C{sequence:05d}",
+                "conversation_stage": stage,
+                **{str(key): _jsonable(value) for key, value in payload.items()},
+            }
+            temporary = target.with_suffix(".json.tmp")
+            temporary.write_text(
+                json.dumps(record, ensure_ascii=False, indent=2, sort_keys=True),
                 encoding="utf-8",
             )
             _atomic_replace_with_retry(temporary, target)

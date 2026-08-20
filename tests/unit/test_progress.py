@@ -302,3 +302,35 @@ def test_prompt_budget_high_water_emits_size_only_warning(tmp_path: Path) -> Non
     )
     assert warning["payload"]["budget_band"] == "warning"
     assert "x" * 20 not in json.dumps(warning)
+
+
+def test_full_conversation_is_saved_with_stage_labels(tmp_path: Path) -> None:
+    writer = JsonArtifactWriter(tmp_path, "conversation-run")
+    token = bind_progress(writer)
+    try:
+        complete_json(
+            client=_FakeClient(),
+            model="unit-test-model",
+            messages=[
+                {"role": "system", "content": "Return JSON."},
+                {"role": "user", "content": '{"sample":"S01"}'},
+            ],
+            trace_context={
+                "role": "rethink",
+                "round_id": 1,
+                "request_id": "rethink:test:S01",
+                "completion_stage": "reasoning_draft",
+            },
+        )
+    finally:
+        reset_progress(token)
+
+    files = list(
+        (tmp_path / "conversation-run" / "round_01" / "llm" / "rethink" / "conversations").glob("*.json")
+    )
+    assert len(files) == 1
+    payload = json.loads(files[0].read_text(encoding="utf-8"))
+    assert payload["conversation_stage"] == "reasoning_draft"
+    assert payload["request_id"] == "rethink:test:S01"
+    assert payload["messages"][1]["content"] == '{"sample":"S01"}'
+    assert payload["response_content"] == '{"ok": true}'

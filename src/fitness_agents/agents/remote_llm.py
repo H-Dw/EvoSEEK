@@ -16,7 +16,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from fitness_agents.utils.progress import TimedHeartbeat, report_event, report_prompt_budget
+from fitness_agents.utils.progress import (
+    TimedHeartbeat,
+    report_event,
+    report_llm_conversation,
+    report_prompt_budget,
+)
 
 from .output_guards import (
     MAX_OUTPUT_TOKENS,
@@ -432,6 +437,10 @@ def _message_content(message: Any) -> str:
     return ""
 
 
+def _message_reasoning(message: Any) -> str:
+    return str(getattr(message, "reasoning_content", "") or "")
+
+
 def _usage_payload(response: Any) -> dict[str, Any]:
     usage = getattr(response, "usage", None)
     if usage is None:
@@ -512,6 +521,7 @@ def complete_json(
     schema_retries: int | None = None,
     semantic_retries: int | None = None,
     unknown_evidence_retries: int | None = None,
+    empty_retries: int | None = None,
     retry_backoff_seconds: float = 0.0,
     allow_unknown_evidence_stripping: bool = False,
     max_input_chars: int | None = None,
@@ -565,7 +575,7 @@ def complete_json(
         unknown_evidence=(
             1 if unknown_evidence_retries is None else unknown_evidence_retries
         ),
-        empty=1,
+        empty=1 if empty_retries is None else empty_retries,
         other=0,
     )
     if transport_retry_limit < 0 or any(value < 0 for value in budgets.as_dict().values()):
@@ -604,6 +614,21 @@ def complete_json(
                     trace_context=trace_fields,
                     request_started=False,
                 )
+            )
+            report_llm_conversation(
+                role=trace_fields.get("role", "unknown"),
+                round_id=trace_fields.get("round_id", 0),
+                request_id=trace_fields.get("request_id"),
+                conversation_stage=trace_fields.get("completion_stage", "single"),
+                attempt=request_attempt,
+                model=model,
+                messages=current_messages,
+                response_content="",
+                reasoning_content="",
+                finish_reason=None,
+                disposition="preflight_rejected",
+                error_type=type(last_error).__name__,
+                usage={},
             )
             report_event(
                 "llm_prompt_budget_exceeded",
@@ -671,6 +696,7 @@ def complete_json(
         started = time.perf_counter()
         finish_reason = None
         content = ""
+        reasoning_content = ""
         usage: dict[str, Any] = {}
         try:
             request_started_any = True
@@ -685,6 +711,7 @@ def complete_json(
             finish_reason = getattr(choice, "finish_reason", None)
             usage = _usage_payload(response)
             content = _message_content(choice.message)
+            reasoning_content = _message_reasoning(choice.message)
             normalized_finish = str(finish_reason or "").lower()
             if normalized_finish in {"length", "max_tokens", "max_output_tokens"}:
                 raise OutputTruncatedError(
@@ -709,6 +736,20 @@ def complete_json(
             payload = extract_json_object(content)
             if validator is not None:
                 payload = validator(payload)
+            report_llm_conversation(
+                role=trace_fields.get("role", "unknown"),
+                round_id=trace_fields.get("round_id", 0),
+                request_id=trace_fields.get("request_id"),
+                conversation_stage=trace_fields.get("completion_stage", "single"),
+                attempt=request_attempt,
+                model=model,
+                messages=current_messages,
+                response_content=content,
+                reasoning_content=reasoning_content,
+                finish_reason=finish_reason,
+                disposition="accepted",
+                usage=usage,
+            )
             report_event(
                 "llm_request_completed",
                 message=f"LLM request {model} completed",
@@ -754,6 +795,21 @@ def complete_json(
             )
             last_disposition = disposition
             last_failure = failure
+            report_llm_conversation(
+                role=trace_fields.get("role", "unknown"),
+                round_id=trace_fields.get("round_id", 0),
+                request_id=trace_fields.get("request_id"),
+                conversation_stage=trace_fields.get("completion_stage", "single"),
+                attempt=request_attempt,
+                model=model,
+                messages=current_messages,
+                response_content=content,
+                reasoning_content=reasoning_content,
+                finish_reason=finish_reason,
+                disposition="rejected",
+                error_type=type(error).__name__,
+                usage=usage,
+            )
             failure_budget = budgets.as_dict().get(failure.kind, 0)
             will_retry = (
                 disposition.retryable
