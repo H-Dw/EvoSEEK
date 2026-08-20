@@ -5,8 +5,10 @@ import pytest
 
 from fitness_agents.agents.critic import CriticAgent
 from fitness_agents.contracts.schemas import (
+    BatchRisk,
     CritiqueDecision,
     FalsificationReadiness,
+    IssueSeverity,
     RequiredChange,
     RequiredChangeAction,
     ReviewVerdict,
@@ -58,13 +60,23 @@ class _InfeasibleResidueRevisionClient:
             review_attempt=draft.review_attempt,
             verdict=ReviewVerdict.REVISE,
             falsification_readiness=FalsificationReadiness.NEEDS_REVISION,
+            batch_level_risks=(
+                BatchRisk(
+                    risk_id="R01",
+                    code="BATCH_MODE_COLLAPSE",
+                    severity=IssueSeverity.ERROR,
+                    statement="Synthetic independent batch-level revision basis.",
+                    candidate_ids=(draft.candidate_ids[0],),
+                ),
+            ),
             required_changes=(
                 RequiredChange(
                     action=RequiredChangeAction.REPLACE_CANDIDATE,
                     target_ids=(draft.candidate_ids[0],),
                     parameters={
-                        "excluded_residues": [
-                            f"39{residue}" for residue in "ACDEFGHIKLMNPQRSTVWY"
+                        "excluded_substitutions": [
+                            {"position": 39, "to_residue": residue}
+                            for residue in "ACDEFGHIKLMNPQRSTVWY"
                         ],
                         "applies_to_arms": ["fallback"],
                     },
@@ -91,6 +103,8 @@ def test_campaign_submits_only_after_critic_and_assesses_hypothesis(config_facto
     assert summary["critique_decisions"] == 1
     assert summary["hypothesis_assessments"] == 1
     assert state["critique_decisions"][0]["verdict"] == "APPROVE"
+    assert state["hypothesis_explanations"][0]["hypothesis_id"] == state["hypotheses"][0]["hypothesis_id"]
+    assert state["hypothesis_explanations"][0]["critic_role"] == "batch_critic"
     assert state["hypothesis_assessments"][0]["status"] in {
         "SUPPORTED",
         "CONTRADICTED",

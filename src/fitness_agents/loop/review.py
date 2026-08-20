@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from inspect import signature
@@ -33,7 +32,7 @@ from fitness_agents.contracts.schemas import (
     ReviewVerdict,
     Variant,
 )
-from fitness_agents.validation.batch import ApprovalGateway, BatchHardValidator, content_hash
+from fitness_agents.validation.batch import ApprovalGateway, BatchHardValidator
 
 
 class ReviewRejected(RuntimeError):
@@ -122,32 +121,21 @@ class RevisionPlanner:
     def exclusions(self, decision: CritiqueDecision) -> set[str]:
         return self.plan(decision).exclusions
 
-    _SUBSTITUTION_RE = re.compile(
-        r"^(?:(?P<from>[ACDEFGHIKLMNPQRSTVWY]))?"
-        r"(?P<position>[1-9][0-9]*)(?::|->)?"
-        r"(?P<to>[ACDEFGHIKLMNPQRSTVWY])$"
-    )
-
     @classmethod
     def _parse_excluded_substitution(
         cls,
-        value: str,
+        value: ResidueSubstitutionCard | dict[str, Any],
         *,
         allowed_positions: set[int] | None,
         wild_type_by_position: Mapping[int, str] | None,
     ) -> ResidueSubstitutionConstraint:
-        normalized = "".join(str(value).upper().split())
-        match = cls._SUBSTITUTION_RE.fullmatch(normalized)
-        if match is None:
-            raise ValueError(
-                "excluded_residues entries must use G41K, 41K, or 41:K notation"
-            )
-        position = int(match.group("position"))
+        card = ResidueSubstitutionCard.model_validate(value)
+        position = card.position
         if allowed_positions is not None and position not in allowed_positions:
             raise ValueError(
                 f"excluded residue position {position} is outside the design space"
             )
-        from_residue = match.group("from")
+        from_residue = card.from_residue
         if (
             from_residue is not None
             and wild_type_by_position is not None
@@ -159,7 +147,7 @@ class RevisionPlanner:
         return ResidueSubstitutionConstraint(
             position=position,
             from_residue=from_residue,
-            to_residue=match.group("to"),
+            to_residue=card.to_residue,
         )
 
     def plan(
@@ -176,10 +164,10 @@ class RevisionPlanner:
         applies_to_arms: set[str] = set()
         actions = {change.action for change in decision.required_changes}
         for change in decision.required_changes:
-            for raw in change.parameters.get("excluded_residues", ()):
+            for raw in change.parameters.get("excluded_substitutions", ()):
                 excluded_substitutions.add(
                     self._parse_excluded_substitution(
-                        str(raw),
+                        raw,
                         allowed_positions=allowed_positions,
                         wild_type_by_position=wild_type_by_position,
                     )
@@ -432,9 +420,7 @@ class BoundedReviewLoop:
                             ),
                             quota_shortfalls={},
                             excluded_candidate_count=len(exclusions),
-                            constraints_sha256=content_hash(
-                                constraints.prompt_payload()
-                            ),
+                            constraints_id=f"RC{draft.round_id:02d}-{attempt:02d}",
                             postcondition_failure_ids=tuple(
                                 sorted(postcondition_failures)
                             ),

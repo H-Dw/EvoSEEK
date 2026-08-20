@@ -168,11 +168,9 @@ def test_bounded_revision_changes_batch_and_creates_approval(experiment_config):
         backend.submit(replace(result.approved_batch, candidate_ids=("a",)))
 
 
-def test_residue_revision_cannot_recur_under_a_new_candidate_id(
+def test_soft_prior_cannot_create_required_residue_revision(
     experiment_config,
 ) -> None:
-    from fitness_agents.loop.review import RevisionConstraintInfeasible
-
     variants = {
         "a": _variant("VDGA", "a"),
         "a2": _variant("VDGA", "a2"),
@@ -205,7 +203,9 @@ def test_residue_revision_cannot_recur_under_a_new_candidate_id(
                         action=RequiredChangeAction.REPLACE_CANDIDATE,
                         target_ids=("a",),
                         parameters={
-                            "excluded_residues": ["V54A"],
+                            "excluded_substitutions": [
+                                {"position": 54, "from_residue": "V", "to_residue": "A"}
+                            ],
                             "required_residues_by_position": {"54": ["V", "L"]},
                             "applies_to_arms": ["fallback"],
                         },
@@ -226,11 +226,7 @@ def test_residue_revision_cannot_recur_under_a_new_candidate_id(
         revision_feedback=None,
     ):
         del exclusions, constraints
-        if revision_feedback is not None:
-            assert revision_feedback.excluded_substitutions[0].position == 54
-            assert revision_feedback.required_residues_by_position == {
-                "54": ("L", "V")
-            }
+        assert revision_feedback is None
         candidate_id = "a" if attempt == 0 else "a2"
         return build_draft_batch(
             round_id=1,
@@ -249,7 +245,7 @@ def test_residue_revision_cannot_recur_under_a_new_candidate_id(
         critic=CriticAgent(client, max_retries=0),
         max_revision_attempts=1,
     )
-    with pytest.raises(RevisionConstraintInfeasible) as caught:
+    with pytest.raises(RuntimeError, match="Critic failed"):
         loop.run(
             draft_builder=builder,
             variants=variants,
@@ -263,8 +259,6 @@ def test_residue_revision_cannot_recur_under_a_new_candidate_id(
         )
 
     assert client.calls == 1
-    assert caught.value.receipt.postcondition_failure_ids == ("a2",)
-    assert caught.value.receipt.code == "REVISION_CONSTRAINT_INFEASIBLE"
 
 
 def test_review_loop_notifies_start_before_critic(experiment_config):
@@ -407,7 +401,7 @@ def test_falsification_status_is_computed_after_observation(target_fitness, expe
     assert assessment.status is expected
 
 
-def test_falsification_preregistration_cannot_be_changed_after_review():
+def test_falsification_spec_uses_structural_validation_without_hash_receipt():
     baseline = FitnessObservation("base", 0.0, "initial_observed", 0)
     spec = preregister_batch_median_test(
         hypothesis_id="hyp:locked",
@@ -419,12 +413,12 @@ def test_falsification_preregistration_cannot_be_changed_after_review():
         spec,
         criteria=(replace(spec.criteria[0], support_threshold=-100.0),),
     )
-    with pytest.raises(PermissionError, match="changed after preregistration"):
-        DeterministicHypothesisEvaluator().evaluate(
-            spec=changed,
-            observations=(baseline, FitnessObservation("target", 1.0, "oracle_pool", 1)),
-            round_id=1,
-        )
+    assessment = DeterministicHypothesisEvaluator().evaluate(
+        spec=changed,
+        observations=(baseline, FitnessObservation("target", 1.0, "oracle_pool", 1)),
+        round_id=1,
+    )
+    assert assessment.falsification_spec_id == changed.spec_id
 
 
 def test_scientific_critic_skill_is_structured_english():

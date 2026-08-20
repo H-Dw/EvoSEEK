@@ -1,11 +1,6 @@
 from __future__ import annotations
 
-import hashlib
-import json
-import uuid
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict
-from enum import Enum
 from typing import Any
 
 from fitness_agents.config import CriticConfig, TaskConfig
@@ -28,23 +23,6 @@ from fitness_agents.contracts.schemas import (
     Variant,
 )
 from fitness_agents.mutation.conflicts import ResidueConflictDetector, SequenceConflictDetector
-
-
-def _jsonable(value: Any) -> Any:
-    if isinstance(value, Enum):
-        return value.value
-    if hasattr(value, "__dataclass_fields__"):
-        return _jsonable(asdict(value))
-    if isinstance(value, dict):
-        return {str(key): _jsonable(item) for key, item in sorted(value.items(), key=lambda x: str(x[0]))}
-    if isinstance(value, (list, tuple, set)):
-        return [_jsonable(item) for item in value]
-    return value
-
-
-def content_hash(payload: Any) -> str:
-    encoded = json.dumps(_jsonable(payload), sort_keys=True, separators=(",", ":")).encode()
-    return hashlib.sha256(encoded).hexdigest()
 
 
 def build_draft_batch(
@@ -76,53 +54,19 @@ def build_draft_batch(
         )
         for item in ordered_ids
     )
-    payload = {
-        "round_id": round_id,
-        "review_attempt": review_attempt,
-        "candidate_ids": ordered_ids,
-        "variants": [variants[item] for item in ordered_ids],
-        "predictions": [predictions[item] for item in ordered_ids],
-        "evidence": {item: tuple(evidence.get(item, ())) for item in ordered_ids},
-        "hypothesis_id": hypothesis_id,
-        "falsification_spec": falsification_spec,
-        "design_rationales": rationales,
-    }
-    batch_hash = content_hash(payload)
     return DraftBatch(
-        draft_batch_id=f"draft:r{round_id}:a{review_attempt}:{batch_hash[:12]}",
+        draft_batch_id=f"B{round_id:02d}-{review_attempt:02d}",
         parent_draft_batch_id=parent_draft_batch_id,
         round_id=round_id,
         review_attempt=review_attempt,
         candidate_ids=ordered_ids,
         hypothesis_ids=(hypothesis_id,) if hypothesis_id else (),
-        prediction_snapshot_id=f"prediction:{content_hash(payload['predictions'])[:16]}",
-        evidence_snapshot_id=f"evidence:{content_hash(payload['evidence'])[:16]}",
-        acquisition_snapshot_id=f"acquisition:{content_hash(ordered_ids)[:16]}",
+        prediction_snapshot_id=f"P{round_id:02d}-{review_attempt:02d}",
+        evidence_snapshot_id=f"E{round_id:02d}-{review_attempt:02d}",
+        acquisition_snapshot_id=f"A{round_id:02d}-{review_attempt:02d}",
         design_rationales=rationales,
         falsification_spec=falsification_spec,
-        batch_hash=batch_hash,
     )
-
-
-def recompute_draft_hash(
-    draft: DraftBatch,
-    *,
-    variants: Mapping[str, Variant],
-    predictions: Mapping[str, Prediction],
-    evidence: Mapping[str, Sequence[Evidence]],
-) -> str:
-    payload = {
-        "round_id": draft.round_id,
-        "review_attempt": draft.review_attempt,
-        "candidate_ids": draft.candidate_ids,
-        "variants": [variants[item] for item in draft.candidate_ids if item in variants],
-        "predictions": [predictions[item] for item in draft.candidate_ids if item in predictions],
-        "evidence": {item: tuple(evidence.get(item, ())) for item in draft.candidate_ids},
-        "hypothesis_id": draft.hypothesis_ids[0] if draft.hypothesis_ids else None,
-        "falsification_spec": draft.falsification_spec,
-        "design_rationales": draft.design_rationales,
-    }
-    return content_hash(payload)
 
 
 class BatchHardValidator:
@@ -187,10 +131,7 @@ class BatchHardValidator:
                 if violations:
                     conflicts.append(
                         MutationConflict(
-                            conflict_id=(
-                                "conflict:hard-residue:"
-                                f"{content_hash((candidate.variant_id, violations))[:16]}"
-                            ),
+                            conflict_id=f"C-HARD-{candidate.variant_id}",
                             code="HARD_RESIDUE_CONSTRAINT_VIOLATION",
                             scope=IssueScope.RESIDUE,
                             severity=IssueSeverity.BLOCKER,
@@ -217,10 +158,7 @@ class BatchHardValidator:
         if missing_rationale_evidence:
             conflicts.append(
                 MutationConflict(
-                    conflict_id=(
-                        "conflict:evidence:"
-                        f"{content_hash(sorted(missing_rationale_evidence))[:16]}"
-                    ),
+                    conflict_id="C-MISSING-EVIDENCE",
                     code="MISSING_RATIONALE_EVIDENCE",
                     scope=IssueScope.EVIDENCE,
                     severity=IssueSeverity.BLOCKER,
@@ -230,28 +168,12 @@ class BatchHardValidator:
                     detector=f"evidence_reference:{self.version}",
                 )
             )
-        current_hash = recompute_draft_hash(
-            draft, variants=variants, predictions=predictions, evidence=evidence
-        )
-        if current_hash != draft.batch_hash:
-            conflicts.append(
-                MutationConflict(
-                    conflict_id=f"conflict:hash:{current_hash[:16]}",
-                    code="DRAFT_HASH_MISMATCH",
-                    scope=IssueScope.SYSTEM,
-                    severity=IssueSeverity.BLOCKER,
-                    message="Draft contents no longer match the reviewed batch hash",
-                    candidate_ids=draft.candidate_ids,
-                    hard=True,
-                    detector=f"batch_hash:{self.version}",
-                )
-            )
         return ConflictReport(
-            report_id=f"validation:{uuid.uuid4().hex}",
+            report_id=f"V{draft.round_id:02d}-{draft.review_attempt:02d}",
             round_id=draft.round_id,
             conflicts=tuple(conflicts),
             validator_version=self.version,
-            input_hash=draft.batch_hash,
+            draft_batch_id=draft.draft_batch_id,
         )
 
 
@@ -265,6 +187,8 @@ class CritiqueDecisionValidator:
         draft: DraftBatch,
         report: ConflictReport,
         visible_evidence_ids: set[str],
+        hypothesis: Hypothesis | None = None,
+        batch_review_context: Any | None = None,
     ) -> None:
         if (decision.draft_batch_id, decision.round_id, decision.review_attempt) != (
             draft.draft_batch_id,
@@ -308,13 +232,123 @@ class CritiqueDecisionValidator:
         if unknown := cited.difference(visible_evidence_ids):
             raise ValueError(f"CritiqueDecision references invisible evidence: {sorted(unknown)}")
         visible_conflict_ids = {item.conflict_id for item in report.conflicts}
+        hard_code = "HARD_RESIDUE_CONSTRAINT_VIOLATION"
         referenced_conflict_ids = {
             conflict_id
             for issue in decision.candidate_issues
+            if getattr(issue.code, "value", str(issue.code)) != hard_code
             for conflict_id in issue.conflict_ids
-        }.union(item.conflict_id for item in decision.evidence_conflicts)
+        }
         if unknown := referenced_conflict_ids.difference(visible_conflict_ids):
             raise ValueError(f"CritiqueDecision references unknown conflicts: {sorted(unknown)}")
+
+        explicit_hard = (
+            dict(hypothesis.hard_residue_constraints)
+            if hypothesis is not None
+            else {}
+        )
+        hard_conflicts = {
+            item.conflict_id: item
+            for item in report.conflicts
+            if item.hard and item.code == hard_code
+        }
+        hard_issues = [
+            item
+            for item in decision.candidate_issues
+            if getattr(item.code, "value", str(item.code)) == hard_code
+        ]
+        hard_risks = [
+            item
+            for item in decision.batch_level_risks
+            if getattr(item.code, "value", str(item.code)) == hard_code
+        ]
+        if not explicit_hard and (hard_issues or hard_risks):
+            raise ValueError(
+                "HARD_RESIDUE_CONSTRAINT_VIOLATION is forbidden when "
+                "hard_residue_constraints is empty"
+            )
+        if hard_risks:
+            raise ValueError(
+                "HARD_RESIDUE_CONSTRAINT_VIOLATION must be candidate-scoped and cite a "
+                "deterministic hard-conflict ID"
+            )
+        for issue in hard_issues:
+            if not issue.conflict_ids:
+                raise ValueError(
+                    "HARD_RESIDUE_CONSTRAINT_VIOLATION must cite a deterministic "
+                    "hard-conflict ID"
+                )
+            for conflict_id in issue.conflict_ids:
+                conflict = hard_conflicts.get(conflict_id)
+                if conflict is None or issue.candidate_id not in conflict.candidate_ids:
+                    raise ValueError(
+                        "HARD_RESIDUE_CONSTRAINT_VIOLATION cites no matching deterministic "
+                        "hard-conflict ID"
+                    )
+
+        for change in decision.required_changes:
+            required = dict(change.parameters.get("required_residues_by_position", {}))
+            if required and not explicit_hard:
+                raise ValueError(
+                    "required_residues_by_position cannot be derived from "
+                    "preferred_residues; explicit hard_residue_constraints are required"
+                )
+            for raw_position, residues in required.items():
+                position = int(raw_position)
+                allowed = set(explicit_hard.get(position, ()))
+                if not allowed or not set(residues).issubset(allowed):
+                    raise ValueError(
+                        "required_residues_by_position must be a subset of explicit "
+                        "hard_residue_constraints"
+                    )
+
+        if batch_review_context is not None:
+            from fitness_agents.contracts.batch_review import BatchReviewContext
+
+            review_context = BatchReviewContext.model_validate(batch_review_context)
+            excluded_targets = {
+                target
+                for change in decision.required_changes
+                if change.action
+                in {
+                    RequiredChangeAction.EXCLUDE_CANDIDATE,
+                    RequiredChangeAction.REPLACE_CANDIDATE,
+                }
+                for target in change.target_ids
+            }
+            soft_mismatches = set(review_context.soft_prior_mismatch_ids)
+            for target in excluded_targets:
+                intent = review_context.candidate_intent_by_id.get(target)
+                has_deterministic_hard_conflict = any(
+                    target in conflict.candidate_ids for conflict in report.hard_conflicts
+                )
+                has_independent_candidate_issue = any(
+                    issue.candidate_id == target
+                    and getattr(issue.code, "value", str(issue.code)) != hard_code
+                    for issue in decision.candidate_issues
+                )
+                has_independent_batch_risk = any(
+                    target in risk.candidate_ids for risk in decision.batch_level_risks
+                )
+                if (
+                    intent is not None
+                    and intent.arm == "matched_control"
+                    and intent.allow_hypothesis_mismatch
+                    and not has_deterministic_hard_conflict
+                ):
+                    raise ValueError(
+                        "matched controls may intentionally violate preferred_residues; "
+                        "soft prior mismatch cannot trigger exclusion"
+                    )
+                if (
+                    target in soft_mismatches
+                    and not has_deterministic_hard_conflict
+                    and not has_independent_candidate_issue
+                    and not has_independent_batch_risk
+                ):
+                    raise ValueError(
+                        "soft prior mismatch alone cannot trigger candidate exclusion or replacement"
+                    )
         if decision.verdict is ReviewVerdict.APPROVE:
             if report.hard_conflicts:
                 raise ValueError("APPROVE cannot override unresolved hard conflicts")
@@ -340,7 +374,20 @@ class ApprovalGateway:
     version = "1.0.0"
 
     def __init__(self) -> None:
-        self._issued_receipts: dict[str, str] = {}
+        self._issued_receipts: dict[str, tuple[object, ...]] = {}
+
+    @staticmethod
+    def _receipt_fields(batch: ApprovedBatch) -> tuple[object, ...]:
+        """Return the ordinary, readable fields bound to an approval ID."""
+
+        return (
+            batch.draft_batch_id,
+            batch.round_id,
+            batch.candidate_ids,
+            batch.hard_validation_report_id,
+            batch.critique_decision_id,
+            batch.approval_policy_version,
+        )
 
     def approve(
         self,
@@ -349,45 +396,28 @@ class ApprovalGateway:
         report: ConflictReport,
         decision: CritiqueDecision,
     ) -> ApprovedBatch:
-        if report.input_hash != draft.batch_hash or report.hard_conflicts:
+        if report.draft_batch_id != draft.draft_batch_id or report.hard_conflicts:
             raise PermissionError("Draft does not have a clean, matching hard-validation receipt")
         if decision.verdict is not ReviewVerdict.APPROVE:
             raise PermissionError("Only an APPROVE decision can create an approval receipt")
-        receipt_payload = {
-            "draft_batch_id": draft.draft_batch_id,
-            "round_id": draft.round_id,
-            "candidate_ids": draft.candidate_ids,
-            "batch_hash": draft.batch_hash,
-            "report_id": report.report_id,
-            "decision_id": decision.decision_id,
-            "policy": self.version,
-        }
+        approval_id = f"AP{draft.round_id:02d}-{draft.review_attempt:02d}"
         approved = ApprovedBatch(
             draft_batch_id=draft.draft_batch_id,
             round_id=draft.round_id,
             candidate_ids=draft.candidate_ids,
-            batch_hash=draft.batch_hash,
             hard_validation_report_id=report.report_id,
             critique_decision_id=decision.decision_id,
             approval_policy_version=self.version,
-            approval_receipt_hash=content_hash(receipt_payload),
+            approval_id=approval_id,
         )
-        self._issued_receipts[approved.approval_receipt_hash] = approved.batch_hash
+        self._issued_receipts[approved.approval_id] = self._receipt_fields(approved)
         return approved
 
     def verify(self, batch: ApprovedBatch) -> None:
-        expected = content_hash(
-            {
-                "draft_batch_id": batch.draft_batch_id,
-                "round_id": batch.round_id,
-                "candidate_ids": batch.candidate_ids,
-                "batch_hash": batch.batch_hash,
-                "report_id": batch.hard_validation_report_id,
-                "decision_id": batch.critique_decision_id,
-                "policy": batch.approval_policy_version,
-            }
-        )
-        if batch.approval_policy_version != self.version or expected != batch.approval_receipt_hash:
-            raise PermissionError("Approval receipt is invalid or has been modified")
-        if self._issued_receipts.get(batch.approval_receipt_hash) != batch.batch_hash:
+        if batch.approval_policy_version != self.version:
+            raise PermissionError("Approval policy version is invalid")
+        issued = self._issued_receipts.get(batch.approval_id)
+        if issued is None:
             raise PermissionError("Approval receipt was not issued by this campaign gateway")
+        if issued != self._receipt_fields(batch):
+            raise PermissionError("Approved batch was modified after approval")

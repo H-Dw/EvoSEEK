@@ -8,16 +8,33 @@ from pydantic import ValidationError
 from fitness_agents.agents.critic import _compact_critic_context
 from fitness_agents.contracts.batch_review import (
     BatchReviewContext,
+    CandidateIntentCard,
     PredictionReviewCard,
     batch_diversity_receipt,
     control_feasibility_receipt,
     prediction_review_card,
 )
-from fitness_agents.contracts.schemas import Hypothesis, Prediction, Variant
+from fitness_agents.contracts.schemas import (
+    CandidateIssue,
+    CritiqueDecision,
+    FalsificationReadiness,
+    Hypothesis,
+    IssueScope,
+    IssueSeverity,
+    Prediction,
+    RequiredChange,
+    RequiredChangeAction,
+    ReviewVerdict,
+    Variant,
+)
 from fitness_agents.loop.review import BoundedReviewLoop, ControlFeasibilityError
 from fitness_agents.mutation import reserve_hypothesis_negative_controls
 from fitness_agents.mutation.conflicts import SequenceConflictDetector
-from fitness_agents.validation.batch import BatchHardValidator, build_draft_batch
+from fitness_agents.validation.batch import (
+    BatchHardValidator,
+    CritiqueDecisionValidator,
+    build_draft_batch,
+)
 
 
 def _variant(variant_id: str, code: str) -> Variant:
@@ -260,6 +277,281 @@ def test_only_explicit_hard_residue_constraints_block_a_candidate(
     assert "HARD_RESIDUE_CONSTRAINT_VIOLATION" in {
         item.code for item in hard_report.hard_conflicts
     }
+
+
+def test_hard_residue_issue_requires_explicit_hard_constraint_and_validator_conflict(
+    experiment_config,
+) -> None:
+    variant = _variant("v1", "ADGV")
+    prediction = _prediction("real-model:v1")
+    prediction = replace(prediction, variant_id="v1")
+    draft = build_draft_batch(
+        round_id=1,
+        review_attempt=0,
+        candidate_ids=("v1",),
+        variants={"v1": variant},
+        predictions={"v1": prediction},
+        evidence={},
+        hypothesis_id="H01",
+        falsification_spec=None,
+    )
+    soft = Hypothesis(
+        hypothesis_id="H01",
+        statement="Prefer A at position 39.",
+        preferred_residues={39: ("A",)},
+        evidence_ids=(),
+        expected_outcome="Test the soft direction.",
+        falsification_criterion="Reject if its matched comparison opposes it.",
+    )
+    hard = replace(soft, hard_residue_constraints={39: ("V",)})
+    hard_validator = BatchHardValidator(experiment_config.task, experiment_config.critic)
+    common = {
+        "variants": {"v1": variant},
+        "predictions": {"v1": prediction},
+        "evidence": {},
+        "revealed_ids": set(),
+        "pending_ids": set(),
+        "allowed_ids": {"v1"},
+        "expected_batch_size": 1,
+    }
+    soft_report = hard_validator.validate(draft, hypothesis=soft, **common)
+    hard_report = hard_validator.validate(draft, hypothesis=hard, **common)
+
+    def decision(conflict_ids: tuple[str, ...]) -> CritiqueDecision:
+        return CritiqueDecision(
+            decision_id="D01-00",
+            draft_batch_id=draft.draft_batch_id,
+            round_id=1,
+            review_attempt=0,
+            verdict=ReviewVerdict.REJECT,
+            falsification_readiness=FalsificationReadiness.UNTESTABLE,
+            candidate_issues=(
+                CandidateIssue(
+                    issue_id="I01",
+                    candidate_id="v1",
+                    scope=IssueScope.RESIDUE,
+                    severity=IssueSeverity.BLOCKER,
+                    code="HARD_RESIDUE_CONSTRAINT_VIOLATION",
+                    claim="The candidate violates an explicit hard residue constraint.",
+                    conflict_ids=conflict_ids,
+                ),
+            ),
+            confidence=1.0,
+            summary="Reject the deterministic hard conflict.",
+        )
+
+    validator = CritiqueDecisionValidator()
+    with pytest.raises(ValueError, match="forbidden when hard_residue_constraints is empty"):
+        validator.validate(
+            decision(()),
+            draft=draft,
+            report=soft_report,
+            visible_evidence_ids=set(),
+            hypothesis=soft,
+        )
+    with pytest.raises(ValueError, match="deterministic hard-conflict ID"):
+        validator.validate(
+            decision(("C-INVENTED",)),
+            draft=draft,
+            report=hard_report,
+            visible_evidence_ids=set(),
+            hypothesis=hard,
+        )
+    validator.validate(
+        decision((hard_report.hard_conflicts[0].conflict_id,)),
+        draft=draft,
+        report=hard_report,
+        visible_evidence_ids=set(),
+        hypothesis=hard,
+    )
+
+
+def test_required_residue_map_cannot_be_derived_from_soft_preference(
+    experiment_config,
+) -> None:
+    variant = _variant("v1", "ADGV")
+    prediction = replace(_prediction("real-model:v1"), variant_id="v1")
+    draft = build_draft_batch(
+        round_id=1,
+        review_attempt=0,
+        candidate_ids=("v1",),
+        variants={"v1": variant},
+        predictions={"v1": prediction},
+        evidence={},
+        hypothesis_id="H01",
+        falsification_spec=None,
+    )
+    hypothesis = Hypothesis(
+        hypothesis_id="H01",
+        statement="Prefer A at position 39.",
+        preferred_residues={39: ("A",)},
+        evidence_ids=(),
+        expected_outcome="Test the soft direction.",
+        falsification_criterion="Reject if its matched comparison opposes it.",
+    )
+    report = BatchHardValidator(
+        experiment_config.task, experiment_config.critic
+    ).validate(
+        draft,
+        variants={"v1": variant},
+        predictions={"v1": prediction},
+        evidence={},
+        revealed_ids=set(),
+        pending_ids=set(),
+        allowed_ids={"v1"},
+        expected_batch_size=1,
+        hypothesis=hypothesis,
+    )
+    decision = CritiqueDecision(
+        decision_id="D01-00",
+        draft_batch_id=draft.draft_batch_id,
+        round_id=1,
+        review_attempt=0,
+        verdict=ReviewVerdict.REVISE,
+        falsification_readiness=FalsificationReadiness.NEEDS_REVISION,
+        required_changes=(
+            RequiredChange(
+                action=RequiredChangeAction.REPLACE_CANDIDATE,
+                target_ids=("v1",),
+                parameters={"required_residues_by_position": {"39": ["A"]}},
+                rationale="Attempt to convert the soft preference into a hard rule.",
+            ),
+        ),
+        confidence=0.8,
+        summary="Revise.",
+    )
+    with pytest.raises(ValueError, match="cannot be derived from preferred_residues"):
+        CritiqueDecisionValidator().validate(
+            decision,
+            draft=draft,
+            report=report,
+            visible_evidence_ids=set(),
+            hypothesis=hypothesis,
+        )
+
+
+def test_matched_control_may_violate_soft_prior_but_cannot_be_excluded_for_it(
+    experiment_config,
+) -> None:
+    variants = {"target": _variant("target", "ADGV"), "control": _variant("control", "VDGV")}
+    predictions = {
+        candidate_id: replace(_prediction("real-model:v1"), variant_id=candidate_id)
+        for candidate_id in variants
+    }
+    draft = build_draft_batch(
+        round_id=1,
+        review_attempt=0,
+        candidate_ids=("target", "control"),
+        variants=variants,
+        predictions=predictions,
+        evidence={},
+        hypothesis_id="H01",
+        falsification_spec=None,
+    )
+    hypothesis = Hypothesis(
+        hypothesis_id="H01",
+        statement="Prefer A at position 39.",
+        preferred_residues={39: ("A",)},
+        evidence_ids=(),
+        expected_outcome="Compare the target with a hypothesis-negative control.",
+        falsification_criterion="Reject if the target does not separate from the control.",
+    )
+    report = BatchHardValidator(
+        experiment_config.task, experiment_config.critic
+    ).validate(
+        draft,
+        variants=variants,
+        predictions=predictions,
+        evidence={},
+        revealed_ids=set(),
+        pending_ids=set(),
+        allowed_ids=set(variants),
+        expected_batch_size=2,
+        hypothesis=hypothesis,
+    )
+    context = BatchReviewContext(
+        prediction_status_by_id={
+            candidate_id: prediction_review_card(
+                prediction,
+                source_kind="real_model",
+                decision_eligible=True,
+                calibration_status="calibrated",
+            )
+            for candidate_id, prediction in predictions.items()
+        },
+        candidate_intent_by_id={
+            "target": CandidateIntentCard(candidate_id="target", arm="hypothesis_target"),
+            "control": CandidateIntentCard(
+                candidate_id="control",
+                arm="matched_control",
+                matched_to="target",
+                allow_hypothesis_mismatch=True,
+            ),
+        },
+        soft_prior_mismatch_ids=("control",),
+    )
+    validator = CritiqueDecisionValidator()
+    validator.validate(
+        CritiqueDecision(
+            decision_id="D01-00",
+            draft_batch_id=draft.draft_batch_id,
+            round_id=1,
+            review_attempt=0,
+            verdict=ReviewVerdict.APPROVE,
+            falsification_readiness=FalsificationReadiness.READY,
+            confidence=0.9,
+            summary="Keep the matched control despite the intentional soft-prior mismatch.",
+        ),
+        draft=draft,
+        report=report,
+        visible_evidence_ids=set(),
+        hypothesis=hypothesis,
+        batch_review_context=context,
+    )
+    exclude = CritiqueDecision(
+        decision_id="D01-00",
+        draft_batch_id=draft.draft_batch_id,
+        round_id=1,
+        review_attempt=0,
+        verdict=ReviewVerdict.REVISE,
+        falsification_readiness=FalsificationReadiness.NEEDS_REVISION,
+        required_changes=(
+            RequiredChange(
+                action=RequiredChangeAction.EXCLUDE_CANDIDATE,
+                target_ids=("control",),
+                parameters={},
+                rationale="The control does not match preferred_residues.",
+            ),
+        ),
+        confidence=0.8,
+        summary="Exclude the soft-prior mismatch.",
+    )
+    with pytest.raises(ValueError, match="soft prior mismatch cannot trigger exclusion"):
+        validator.validate(
+            exclude,
+            draft=draft,
+            report=report,
+            visible_evidence_ids=set(),
+            hypothesis=hypothesis,
+            batch_review_context=context,
+        )
+    fallback_context = context.model_copy(
+        update={
+            "candidate_intent_by_id": {
+                "target": CandidateIntentCard(candidate_id="target", arm="hypothesis_target"),
+                "control": CandidateIntentCard(candidate_id="control", arm="fallback"),
+            }
+        }
+    )
+    with pytest.raises(ValueError, match="soft prior mismatch alone cannot trigger"):
+        validator.validate(
+            exclude,
+            draft=draft,
+            report=report,
+            visible_evidence_ids=set(),
+            hypothesis=hypothesis,
+            batch_review_context=fallback_context,
+        )
 
 
 def test_control_feasibility_fails_before_critic_call(experiment_config) -> None:

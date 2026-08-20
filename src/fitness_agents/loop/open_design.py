@@ -24,6 +24,7 @@ from fitness_agents.contracts.batch_review import (
     CandidateIntentCard,
     RevisionQuotaShortfallReceipt,
     prediction_review_card,
+    soft_prior_mismatch_ids,
 )
 from fitness_agents.contracts.design import (
     RankedSequenceDesign,
@@ -49,7 +50,6 @@ from fitness_agents.mutation import (
 from fitness_agents.protein_features import ProteinTaskContext
 from fitness_agents.utils import JsonArtifactWriter, seed_everything
 from fitness_agents.validation import ApprovalGateway, OpenDesignHardValidator, build_draft_batch
-from fitness_agents.validation.batch import content_hash
 
 from .review import BoundedReviewLoop, RevisionConstraintInfeasible
 
@@ -522,9 +522,7 @@ class OpenDesignRunner:
                             + before_residue_filter
                             - len(eligible_ids)
                         ),
-                        constraints_sha256=content_hash(
-                            (constraints or RevisionConstraints()).prompt_payload()
-                        ),
+                        constraints_id="RC01",
                     )
                 )
             review_context_holder["value"] = BatchReviewContext(
@@ -539,6 +537,12 @@ class OpenDesignRunner:
                     )
                     for candidate_id in candidate_ids
                 },
+                soft_prior_mismatch_ids=soft_prior_mismatch_ids(
+                    candidate_ids=candidate_ids,
+                    variants_by_id=candidate_by_id,
+                    hypothesis=hypothesis,
+                    position_to_index=self.design_space.position_to_sequence_index,
+                ),
                 review_controls=self.config.critic.review_controls,
                 review_diversity=self.config.critic.review_diversity,
                 revision_feedback=revision_feedback,
@@ -682,7 +686,7 @@ class OpenDesignRunner:
             "hard_validation_conflicts": len(review.report.conflicts),
             "hard_validation_blockers": len(review.report.hard_conflicts),
             "critic_verdict": review.decision.verdict.value,
-            "approval_receipt_hash": review.approved_batch.approval_receipt_hash,
+            "approval_id": review.approved_batch.approval_id,
             "run_dir": str(self.writer.run_dir),
         }
         self.state.phase = CampaignPhase.FINALIZED

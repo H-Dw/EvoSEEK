@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import uuid
 from collections.abc import Mapping, Sequence
 
 from fitness_agents.config import CriticConfig
@@ -22,13 +20,6 @@ from fitness_agents.contracts.schemas import (
 from fitness_agents.mutation.conflicts import AMINO_ACIDS, SequenceConflictDetector
 from fitness_agents.mutation.notation import InvalidMutationNotation, parse_mutation_notation
 
-from .batch import recompute_draft_hash
-
-
-def _variant_id(sequence: str) -> str:
-    return f"sha256:{hashlib.sha256(sequence.encode('ascii')).hexdigest()}"
-
-
 def _conflict(
     code: str,
     message: str,
@@ -37,9 +28,8 @@ def _conflict(
     scope: IssueScope = IssueScope.SEQUENCE,
     detector: str,
 ) -> MutationConflict:
-    material = f"{code}|{'|'.join(sorted(candidate_ids))}"
     return MutationConflict(
-        conflict_id=f"conflict:{hashlib.sha256(material.encode()).hexdigest()[:16]}",
+        conflict_id=f"C-{code}-{'-'.join(candidate_ids) or 'GLOBAL'}",
         code=code,
         scope=scope,
         severity=IssueSeverity.BLOCKER,
@@ -103,9 +93,6 @@ class OpenDesignHardValidator:
             return output
         if set(sequence).difference(AMINO_ACIDS):
             add("INVALID_AMINO_ACID", "Generated sequence contains a non-canonical amino acid")
-        if variant.variant_id != _variant_id(sequence):
-            add("GENERATED_VARIANT_ID_MISMATCH", "Generated variant ID does not match its full sequence")
-
         derived = []
         for position in self.design_space.computation_positions:
             index = self.design_space.position_to_sequence_index[position]
@@ -256,23 +243,10 @@ class OpenDesignHardValidator:
                     detector=f"evidence_reference:{self.version}",
                 )
             )
-        current_hash = recompute_draft_hash(
-            draft, variants=variants, predictions=predictions, evidence=evidence
-        )
-        if current_hash != draft.batch_hash:
-            conflicts.append(
-                _conflict(
-                    "DRAFT_HASH_MISMATCH",
-                    "Draft contents no longer match the reviewed batch hash",
-                    candidate_ids=draft.candidate_ids,
-                    scope=IssueScope.SYSTEM,
-                    detector=f"batch_hash:{self.version}",
-                )
-            )
         return ConflictReport(
-            report_id=f"validation:{uuid.uuid4().hex}",
+            report_id=f"V{draft.round_id:02d}-{draft.review_attempt:02d}",
             round_id=draft.round_id,
             conflicts=tuple(conflicts),
             validator_version=self.version,
-            input_hash=draft.batch_hash,
+            draft_batch_id=draft.draft_batch_id,
         )

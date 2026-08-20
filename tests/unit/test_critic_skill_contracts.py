@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import hashlib
-import json
 import re
 from pathlib import Path
 from typing import Any
@@ -20,36 +18,12 @@ from fitness_agents.contracts.hypothesis_pipeline import (
     ConservationReviewBody,
     MainReviewBody,
     PhyschemReviewBody,
+    PhyschemInterpretationOutput,
     StructureReviewBody,
 )
 from fitness_agents.contracts.schemas import DraftBatch
 
 ROOT = Path(__file__).parents[2]
-HASH_PATTERN = re.compile(r"(?m)^- skill_sha256: [0-9a-f]{64}$")
-
-
-def _schema_sha256(model: type) -> str:
-    payload = json.dumps(
-        model.model_json_schema(), sort_keys=True, separators=(",", ":")
-    ).encode()
-    return hashlib.sha256(payload).hexdigest()
-
-
-def _normalized_skill_sha256(text: str) -> str:
-    normalized = re.sub(
-        r"(?m)^- skill_sha256: (?:PENDING|[0-9a-f]{64})$",
-        "- skill_sha256: <normalized>",
-        text,
-    )
-    return hashlib.sha256(normalized.encode()).hexdigest()
-
-
-def _declared_hash(text: str, name: str) -> str:
-    match = re.search(rf"(?m)^- {name}: ([0-9a-f]{{64}})$", text)
-    assert match, f"missing {name}"
-    return match.group(1)
-
-
 def _backticks_between(text: str, start: str, end: str) -> set[str]:
     fragment = text.split(start, 1)[1].split(end, 1)[0]
     return set(re.findall(r"`([A-Z][A-Z0-9_]+)`", fragment))
@@ -145,7 +119,7 @@ CASES = (
 @pytest.mark.parametrize(
     "path,model,code_start,code_end,action_start,action_end", CASES
 )
-def test_skill_schema_enum_parity_and_fingerprints(
+def test_skill_schema_enum_parity(
     path: Path,
     model: type,
     code_start: str,
@@ -161,8 +135,8 @@ def test_skill_schema_enum_parity_and_fingerprints(
     assert _backticks_between(text, action_start, action_end) == _property_enums(
         schema, "action"
     ).union(_property_enums(schema, "required_changes"))
-    assert _declared_hash(text, "schema_sha256") == _schema_sha256(model)
-    assert _declared_hash(text, "skill_sha256") == _normalized_skill_sha256(text)
+    assert "schema_sha256" not in text
+    assert "skill_sha256" not in text
 
 
 def test_batch_model_visible_contract_omits_runtime_identifiers() -> None:
@@ -171,6 +145,16 @@ def test_batch_model_visible_contract_omits_runtime_identifiers() -> None:
     deterministic = {"decision_id", "draft_batch_id", "round_id", "review_attempt"}
     assert deterministic.isdisjoint(visible)
     assert deterministic.issubset(runtime)
+    assert "hypothesis" not in visible
+    assert "explanation" in visible
+    assert "summary" not in visible
+
+
+def test_main_critic_returns_explanation_without_a_hypothesis() -> None:
+    properties = MainReviewBody.model_json_schema()["properties"]
+    assert "explanation" in properties
+    assert "summary" not in properties
+    assert "hypothesis" not in properties
 
 
 def test_critic_vocabularies_do_not_cross_role_boundaries() -> None:
@@ -210,7 +194,6 @@ def test_batch_runtime_injects_deterministic_envelope_fields() -> None:
         acquisition_snapshot_id="acquisition:1",
         design_rationales=(),
         falsification_spec=None,
-        batch_hash="hash",
     )
     payload = {
         "verdict": "APPROVE",
@@ -228,7 +211,7 @@ def test_batch_runtime_injects_deterministic_envelope_fields() -> None:
     assert decision.draft_batch_id == "draft:1"
     assert decision.round_id == 2
     assert decision.review_attempt == 1
-    assert decision.decision_id.startswith("critique:draft:1:r2:a1:")
+    assert decision.decision_id == "D02-01"
 
 
 def test_batch_nested_models_forbid_extra_fields_and_unknown_codes() -> None:
@@ -288,10 +271,14 @@ def test_subscientist_skill_matches_analysis_contract_and_example(
     channel: str, path: Path
 ) -> None:
     text = path.read_text(encoding="utf-8")
-    assert _declared_hash(text, "schema_sha256") == _schema_sha256(
-        ChannelHypothesisOutput
-    )
-    assert _declared_hash(text, "skill_sha256") == _normalized_skill_sha256(text)
+    assert "sha256" not in text.casefold()
+    if channel == "physchem":
+        match = re.search(r"Example: `([^`]+)`", text)
+        assert match
+        PhyschemInterpretationOutput.model_validate_json(match.group(1))
+        assert "fact_ids" not in match.group(1)
+        assert "evidence_ids" not in match.group(1)
+        return
     match = re.search(r"Analysis-only example: `([^`]+)`", text)
     assert match
     output = ChannelHypothesisOutput.model_validate_json(match.group(1))
@@ -305,7 +292,6 @@ def test_main_synthesis_skill_matches_hypothesis_contract() -> None:
         / "src/fitness_agents/agents/profiles/scientist/synthesis_v1/SKILL.md"
     )
     text = path.read_text(encoding="utf-8")
-    assert _declared_hash(text, "schema_sha256") == _schema_sha256(MainSynthesisOutput)
-    assert _declared_hash(text, "skill_sha256") == _normalized_skill_sha256(text)
+    assert "sha256" not in text.casefold()
     assert "approved_channel_analyses" in text
     assert "evidence_universe" in text

@@ -582,10 +582,14 @@ def critic_revision_payload(
             {
                 "action": action,
                 "target_ids": list(getattr(change, "target_ids", ()) or ()),
+                "parameters": dict(getattr(change, "parameters", {}) or {}),
                 "rationale": getattr(change, "rationale", ""),
+                "evidence_ids": list(getattr(change, "evidence_ids", ()) or ()),
+                "priority": int(getattr(change, "priority", 1)),
             }
         )
     return {
+        "revision_scope": "hypothesis",
         "verdict": getattr(getattr(decision, "verdict", None), "value", "REVISE"),
         "summary": getattr(decision, "summary", "") or "",
         "required_changes": changes,

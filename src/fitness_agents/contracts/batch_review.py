@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 import math
 import re
 from collections import Counter
@@ -109,7 +107,7 @@ class RevisionQuotaShortfallReceipt(BaseModel):
     shortfall: int = Field(ge=0)
     quota_shortfalls: dict[str, int] = Field(default_factory=dict)
     excluded_candidate_count: int = Field(ge=0)
-    constraints_sha256: str = Field(min_length=64, max_length=64)
+    constraints_id: str = Field(min_length=1, max_length=160)
     postcondition_failure_ids: tuple[str, ...] = ()
 
 
@@ -205,7 +203,6 @@ class AssayControl(BaseModel):
     control_kind: Literal["wild_type", "known_neutral", "reference_variant"]
     variant_id: str = Field(min_length=1, max_length=160)
     mutation_notation: str = Field(min_length=1, max_length=240)
-    sequence_sha256: str = Field(min_length=64, max_length=64)
     repeat_measurement: Literal[True] = True
     consumes_candidate_quota: Literal[False] = False
 
@@ -224,7 +221,7 @@ class ControlFeasibilityReceipt(BaseModel):
         "CONTROL_UNIVERSE_EMPTY",
         "CONTROL_SHORTFALL",
     ]
-    available_control_ids_sha256: str = Field(min_length=64, max_length=64)
+    available_control_ids: tuple[str, ...] = ()
     selected_control_ids: tuple[str, ...] = ()
     assay_controls: tuple[AssayControl, ...] = ()
 
@@ -278,6 +275,7 @@ class BatchReviewContext(BaseModel):
 
     prediction_status_by_id: dict[str, PredictionReviewCard]
     candidate_intent_by_id: dict[str, CandidateIntentCard] = Field(default_factory=dict)
+    soft_prior_mismatch_ids: tuple[str, ...] = ()
     review_controls: bool = True
     review_diversity: bool = True
     control_feasibility: ControlFeasibilityReceipt | None = None
@@ -286,6 +284,13 @@ class BatchReviewContext(BaseModel):
 
     @model_validator(mode="after")
     def enforce_review_scope(self) -> BatchReviewContext:
+        unknown_soft_mismatches = set(self.soft_prior_mismatch_ids).difference(
+            self.prediction_status_by_id
+        )
+        if unknown_soft_mismatches:
+            raise ValueError(
+                "soft_prior_mismatch_ids must reference reviewed candidates"
+            )
         if self.candidate_intent_by_id:
             expected = set(self.prediction_status_by_id)
             actual = set(self.candidate_intent_by_id)
@@ -315,9 +320,29 @@ class BatchReviewContext(BaseModel):
         return self
 
 
-def _ids_sha256(values: Sequence[str]) -> str:
-    payload = json.dumps(sorted(values), separators=(",", ":"))
-    return hashlib.sha256(payload.encode()).hexdigest()
+def soft_prior_mismatch_ids(
+    *,
+    candidate_ids: Sequence[str],
+    variants_by_id: Mapping[str, Variant],
+    hypothesis: Hypothesis | None,
+    position_to_index: Mapping[int, int],
+) -> tuple[str, ...]:
+    """Return locally computed soft-prior mismatches; never treat them as exclusions."""
+
+    if hypothesis is None or not hypothesis.preferred_residues:
+        return ()
+    mismatches = []
+    for candidate_id in candidate_ids:
+        variant = variants_by_id[candidate_id]
+        if any(
+            position in position_to_index
+            and position_to_index[position] < len(variant.variant)
+            and variant.variant[position_to_index[position]] not in preferred
+            for position, preferred in hypothesis.preferred_residues.items()
+            if preferred
+        ):
+            mismatches.append(candidate_id)
+    return tuple(mismatches)
 
 
 def control_feasibility_receipt(
@@ -344,7 +369,7 @@ def control_feasibility_receipt(
         available_controls=total_available,
         selected_controls=total_selected,
         reason=reason,
-        available_control_ids_sha256=_ids_sha256(available),
+        available_control_ids=available,
         selected_control_ids=selected,
         assay_controls=tuple(assay_controls),
     )
@@ -491,20 +516,12 @@ def batch_diversity_receipt(
                 - previous.selected.hypothesis_mode_coverage
             ),
         )
-    digest = hashlib.sha256(
-        json.dumps(
-            {
-                "selected_ids": list(selected_ids),
-                "candidate_pool_ids": sorted(candidate_pool_ids),
-                "required": required_minimum_batch_distance,
-                "previous": previous.receipt_id if previous else None,
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode()
-    ).hexdigest()[:16]
+    receipt_index = 1
+    if previous is not None:
+        match = re.fullmatch(r"BD(\d+)", previous.receipt_id)
+        receipt_index = int(match.group(1)) + 1 if match else 2
     return BatchDiversityReceipt(
-        receipt_id=f"batch-diversity:{digest}",
+        receipt_id=f"BD{receipt_index:02d}",
         required_minimum_batch_distance=required_minimum_batch_distance,
         selected=selected_metrics,
         candidate_pool=pool_metrics,
@@ -533,4 +550,5 @@ __all__ = [
     "batch_diversity_receipt",
     "control_feasibility_receipt",
     "prediction_review_card",
+    "soft_prior_mismatch_ids",
 ]

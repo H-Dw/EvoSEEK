@@ -8,6 +8,8 @@ import pytest
 from pydantic import BaseModel, ConfigDict, Field
 
 from fitness_agents.agents.output_guards import (
+    OutputFailure,
+    TokenBudgetPolicy,
     UnknownEvidenceIdsError,
     classify_output_failure,
     json_salvage,
@@ -231,7 +233,7 @@ def test_extraction_rejects_prose_wrapped_or_multiple_objects() -> None:
             )
 
 
-def test_retry_observability_records_hash_paths_usage_budget_and_disposition() -> None:
+def test_retry_observability_records_paths_usage_budget_and_disposition() -> None:
     class _Contract(BaseModel):
         model_config = ConfigDict(extra="forbid")
         summary: str = Field(max_length=4)
@@ -271,7 +273,7 @@ def test_retry_observability_records_hash_paths_usage_budget_and_disposition() -
     assert retry["thinking"] == "disabled"
     assert retry["completion_tokens"] == 20
     assert retry["validation_errors"][0]["path"] == "summary"
-    assert len(retry["invalid_payload_sha256"]) == 64
+    assert "invalid_payload_sha256" not in retry
     assert retry["retry_budget"]["limits"]["schema"] == 1
     assert retry["disposition"] == "retry"
 
@@ -495,6 +497,23 @@ def test_classify_truncated_unbalanced_json() -> None:
         content='{"a":',
     )
     assert failure.kind == "truncated"
+
+
+def test_requested_20k_cap_does_not_mean_the_provider_used_20k_tokens() -> None:
+    policy = TokenBudgetPolicy(budget=20000, thinking="disabled")
+    failure = OutputFailure(
+        kind="truncated",
+        message="provider stopped with an incomplete object",
+        finish_reason="stop",
+        content_length=4915,
+        braces_balanced=False,
+        completion_tokens=1532,
+    )
+
+    policy.apply(failure, deepseek=True)
+
+    assert policy.budget == 20000
+    assert failure.completion_tokens == 1532
 
 
 def test_retry_instruction_includes_allowed_ids() -> None:

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict
@@ -8,12 +7,16 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 from fitness_agents.agents.output_guards import SemanticOutputValidationError
 from fitness_agents.agents.remote_llm import complete_json, create_openai_client, resolve_model
 from fitness_agents.contracts.agent_io import RoleActivationState
-from fitness_agents.contracts.batch_review import BatchReviewContext, CandidateIntentArm
+from fitness_agents.contracts.batch_review import (
+    BatchReviewContext,
+    CandidateIntentArm,
+    ResidueSubstitutionCard,
+)
 from fitness_agents.contracts.evidence_universe import RoleVisibleEvidenceUniverse
 from fitness_agents.contracts.mutation_evidence import (
     mutation_evidence_batch_metadata,
@@ -39,6 +42,8 @@ from fitness_agents.contracts.schemas import (
 )
 from fitness_agents.utils.progress import report_event
 from fitness_agents.validation.batch import CritiqueDecisionValidator
+
+from .short_ids import ShortIdMap, rewrite_exact_ids
 
 CRITIC_NESTED_TEXT_MAX = 240
 def _jsonable(value: Any) -> Any:
@@ -74,7 +79,6 @@ def hypothesis_snapshot(hypothesis: Any | None) -> dict[str, Any] | None:
             "evidence_ids": list(hypothesis.get("evidence_ids") or ()),
             "expected_outcome": hypothesis.get("expected_outcome"),
             "falsification_criterion": hypothesis.get("falsification_criterion"),
-            "explanation": hypothesis.get("explanation"),
         }
     hard = getattr(hypothesis, "hard_residue_constraints", None) or {}
     return {
@@ -89,7 +93,6 @@ def hypothesis_snapshot(hypothesis: Any | None) -> dict[str, Any] | None:
         "evidence_ids": list(getattr(hypothesis, "evidence_ids", ()) or ()),
         "expected_outcome": getattr(hypothesis, "expected_outcome", None),
         "falsification_criterion": getattr(hypothesis, "falsification_criterion", None),
-        "explanation": getattr(hypothesis, "explanation", None),
     }
 
 
@@ -167,11 +170,9 @@ def _value(value: Any, field: str, default: Any = None) -> Any:
 
 
 def _compact_variant(value: Any) -> dict[str, Any]:
-    sequence = str(_value(value, "sequence", ""))
     return {
         "mutation_notation": str(_value(value, "mutation_notation", "")),
         "mutation_count": int(_value(value, "mutation_count", 0)),
-        "sequence_sha256": hashlib.sha256(sequence.encode()).hexdigest(),
     }
 
 
@@ -193,11 +194,6 @@ def _compact_prediction(value: Any) -> dict[str, Any]:
         "ood_score": float(_value(value, "ood_score", 0.0)),
         "model_disagreement": float(disagreement),
     }
-
-
-def _id_set_sha256(values: Sequence[Any]) -> str:
-    encoded = json.dumps(sorted(str(item) for item in values), separators=(",", ":"))
-    return hashlib.sha256(encoded.encode()).hexdigest()
 
 
 def _compact_draft(value: Any) -> dict[str, Any]:
@@ -236,9 +232,9 @@ def _compact_draft(value: Any) -> dict[str, Any]:
             else:
                 criterion["target_variant_ids"] = list(target_ids)
             criterion["target_variant_count"] = len(target_ids)
-            criterion["target_variant_ids_sha256"] = _id_set_sha256(target_ids)
             criterion["comparator_variant_count"] = len(comparator_ids)
-            criterion["comparator_variant_ids_sha256"] = _id_set_sha256(comparator_ids)
+            if comparator_ids:
+                criterion["comparator_scope"] = "registered_visible_baseline"
             compact_criteria.append(criterion)
         compact_falsification["criteria"] = compact_criteria
         output["falsification_spec"] = compact_falsification
@@ -309,7 +305,6 @@ class BatchReviewCode(str, Enum):
     MODEL_DISAGREEMENT = "MODEL_DISAGREEMENT"
     EVIDENCE_POLARITY_CONFLICT = "EVIDENCE_POLARITY_CONFLICT"
     BATCH_MODE_COLLAPSE = "BATCH_MODE_COLLAPSE"
-    DRAFT_HASH_MISMATCH = "DRAFT_HASH_MISMATCH"
     MISSING_RATIONALE_EVIDENCE = "MISSING_RATIONALE_EVIDENCE"
     INSUFFICIENT_CONTROL = "INSUFFICIENT_CONTROL"
     INSUFFICIENT_DIVERSITY = "INSUFFICIENT_DIVERSITY"
@@ -320,7 +315,6 @@ class BatchReviewCode(str, Enum):
 
 class CandidateIssueOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    issue_id: str = Field(min_length=1, max_length=160)
     candidate_id: str = Field(min_length=1, max_length=160)
     scope: IssueScope
     severity: IssueSeverity
@@ -333,7 +327,6 @@ class CandidateIssueOutput(BaseModel):
 
 class BatchRiskOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    risk_id: str = Field(min_length=1, max_length=160)
     code: BatchReviewCode
     severity: IssueSeverity
     statement: str = Field(min_length=1, max_length=CRITIC_NESTED_TEXT_MAX)
@@ -343,7 +336,6 @@ class BatchRiskOutput(BaseModel):
 
 class EvidenceConflictOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    conflict_id: str = Field(min_length=1, max_length=160)
     topic: str = Field(min_length=1, max_length=CRITIC_NESTED_TEXT_MAX)
     supporting_ids: list[str] = Field(max_length=16)
     opposing_ids: list[str] = Field(max_length=16)
@@ -354,7 +346,6 @@ class EvidenceConflictOutput(BaseModel):
 
 class UnsupportedClaimOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    claim_id: str = Field(min_length=1, max_length=160)
     claim: str = Field(min_length=1, max_length=CRITIC_NESTED_TEXT_MAX)
     reason: str = Field(min_length=1, max_length=CRITIC_NESTED_TEXT_MAX)
     missing_evidence_type: str = Field(min_length=1, max_length=120)
@@ -368,7 +359,9 @@ class RequiredChangeParametersOutput(BaseModel):
     exploration_quota: int | None = Field(default=None, ge=0)
     max_mutation_depth: int | None = Field(default=None, ge=0)
     evidence_query: str | None = Field(default=None, max_length=160)
-    excluded_residues: list[str] = Field(default_factory=list, max_length=20)
+    excluded_substitutions: list[ResidueSubstitutionCard] = Field(
+        default_factory=list, max_length=20
+    )
     required_residues_by_position: dict[str, list[str]] = Field(default_factory=dict)
     applies_to_arms: list[CandidateIntentArm] = Field(default_factory=list, max_length=5)
 
@@ -398,7 +391,11 @@ class CritiqueDecisionBodyOutput(BaseModel):
     required_changes: list[RequiredChangeOutput] = Field(default_factory=list, max_length=8)
     cited_evidence_ids: list[str] = Field(default_factory=list, max_length=16)
     confidence: float = Field(ge=0.0, le=1.0)
-    summary: str = Field(min_length=1, max_length=400)
+    explanation: str = Field(
+        min_length=1,
+        max_length=400,
+        validation_alias=AliasChoices("explanation", "summary"),
+    )
 
 
 class CritiqueDecisionOutput(CritiqueDecisionBodyOutput):
@@ -440,7 +437,7 @@ class RuleBasedCriticClient:
         evidence: Mapping[str, Sequence[Evidence]] = context["evidence"]
         candidate_issues = tuple(
             CandidateIssue(
-                issue_id=f"issue:{item.conflict_id}",
+                issue_id=f"I{index:02d}",
                 candidate_id=item.candidate_ids[0],
                 scope=item.scope,
                 severity=item.severity,
@@ -454,19 +451,19 @@ class RuleBasedCriticClient:
                     else RequiredChangeAction.ABORT_ROUND
                 ),
             )
-            for item in report.hard_conflicts
+            for index, item in enumerate(report.hard_conflicts, start=1)
             if item.candidate_ids
         )
         risks = tuple(
             BatchRisk(
-                risk_id=f"risk:{item.conflict_id}",
+                risk_id=f"R{index:02d}",
                 code=item.code,
                 severity=item.severity,
                 statement=item.message,
                 candidate_ids=item.candidate_ids,
                 evidence_ids=item.evidence_ids,
             )
-            for item in report.conflicts
+            for index, item in enumerate(report.conflicts, start=1)
             if not item.hard
         )
         evidence_conflicts: list[EvidenceConflict] = []
@@ -547,6 +544,14 @@ class RuleBasedCriticClient:
             for key, value in _jsonable(decision).items()
             if key not in {"decision_id", "draft_batch_id", "round_id", "review_attempt"}
         }
+        for item in body_payload["candidate_issues"]:
+            item.pop("issue_id", None)
+        for item in body_payload["batch_level_risks"]:
+            item.pop("risk_id", None)
+        for item in body_payload["evidence_conflicts"]:
+            item.pop("conflict_id", None)
+        for item in body_payload["unsupported_claims"]:
+            item.pop("claim_id", None)
         normalized = CritiqueDecisionBodyOutput.model_validate(body_payload).model_dump(
             mode="json", exclude_none=True
         )
@@ -593,7 +598,6 @@ class OpenAICriticClient:
         self.max_input_chars = max_input_chars
         self.profile_name = profile
         self.profile = load_critic_profile(profile)
-        self.profile_sha256 = hashlib.sha256(self.profile.encode()).hexdigest()
         self.client = create_openai_client(
             api_key=api_key,
             base_url=base_url,
@@ -610,14 +614,40 @@ class OpenAICriticClient:
     ) -> CritiqueDecision:
         del output_schema
         draft: DraftBatch = context["draft"]
+        candidate_ids = tuple(draft.candidate_ids)
+        conflict_ids = tuple(
+            item.conflict_id for item in context["conflict_report"].conflicts
+        )
+        batch_universe = RoleVisibleEvidenceUniverse.from_role_sources(
+            role="batch_critic",
+            evidence=(
+                *(
+                    item
+                    for items in context.get("evidence", {}).values()
+                    for item in items
+                ),
+                *context.get("context_evidence", ()),
+            ),
+        )
+        visible_evidence_ids = tuple(sorted(batch_universe.ids))
+        candidate_map = ShortIdMap.build(candidate_ids, prefix="S")
+        conflict_map = ShortIdMap.build(conflict_ids, prefix="C")
+        evidence_map = ShortIdMap.build(visible_evidence_ids, prefix="E")
 
         def _validate(payload: dict[str, Any]) -> dict[str, Any]:
             normalized = CritiqueDecisionBodyOutput.model_validate(payload).model_dump(
                 mode="json", exclude_none=True
             )
+            decoded = rewrite_exact_ids(
+                normalized,
+                candidate_map,
+                conflict_map,
+                evidence_map,
+                decode=True,
+            )
             if validator is not None:
                 try:
-                    validator(normalized)
+                    validator(decoded)
                 except (TypeError, ValueError) as error:
                     message = str(error).lower()
                     paths = tuple(
@@ -637,24 +667,50 @@ class OpenAICriticClient:
                     raise SemanticOutputValidationError(
                         str(error), paths=paths
                     ) from error
-            return normalized
+            return decoded
 
         generated_schema = CritiqueDecisionBodyOutput.model_json_schema()
-        candidate_ids = tuple(draft.candidate_ids)
-        batch_universe = RoleVisibleEvidenceUniverse.from_role_sources(
-            role="batch_critic",
-            evidence=(
-                *(
-                    item
-                    for items in context.get("evidence", {}).values()
-                    for item in items
-                ),
-                *context.get("context_evidence", ()),
-            ),
+        critic_prompt_context = rewrite_exact_ids(
+            _compact_critic_context(context),
+            candidate_map,
+            conflict_map,
+            evidence_map,
         )
-        visible_evidence_ids = tuple(sorted(batch_universe.ids))
-        critic_prompt_context = _compact_critic_context(context)
-        critic_prompt_context["evidence_universe"] = batch_universe.prompt_payload()
+        variant_labels = {
+            candidate_id: str(
+                _value(context["variants"][candidate_id], "mutation_notation", "")
+            )
+            for candidate_id in candidate_ids
+        }
+        evidence_labels = {
+            item.evidence_id: str(
+                item.provenance.get("doi")
+                or item.provenance.get("publication_id")
+                or (
+                    item.source_id
+                    if str(item.source_id).casefold().startswith("doi:")
+                    else f"{item.channel}:{item.claim_id or item.source_group}"
+                )
+            )
+            for items in context.get("evidence", {}).values()
+            for item in items
+        }
+        critic_prompt_context["id_maps"] = {
+            "samples": candidate_map.prompt_map(variant_labels),
+            "evidence": evidence_map.prompt_map(evidence_labels),
+            "hard_conflicts": conflict_map.prompt_map(
+                {
+                    item.conflict_id: item.code
+                    for item in context["conflict_report"].conflicts
+                }
+            ),
+        }
+        critic_prompt_context["evidence_universe"] = {
+            "role": "batch_critic",
+            "allowed_evidence_ids": [
+                evidence_map.encode(item) for item in visible_evidence_ids
+            ],
+        }
         review_context = BatchReviewContext.model_validate(
             context.get("batch_review_context")
             or {"prediction_status_by_id": {}}
@@ -688,7 +744,17 @@ class OpenAICriticClient:
                         "treated as missing evidence."
                         + "\n\nKeep summary <= 400 characters and at most 8 candidate_issues "
                         "and 8 required_changes. Keep nested claim/statement/rationale <= 240 "
-                        "characters."
+                        "characters. The explanation is paired with the exact "
+                        "Scientist hypothesis: explain its reasonableness in the reviewed batch; "
+                        "never restate, replace, or propose a hypothesis."
+                        + "\n\nAll sample, evidence, and deterministic conflict identifiers are "
+                        "request-local short labels defined in id_maps. Copy only those labels; "
+                        "local code expands them after generation. preferred_residues is a soft "
+                        "prior. Never turn it into hard_residue_constraints, required residues, "
+                        "or a candidate exclusion. A matched_control may intentionally violate a "
+                        "soft prior. HARD_RESIDUE_CONSTRAINT_VIOLATION is legal only when the "
+                        "hypothesis contains explicit hard_residue_constraints and the issue cites "
+                        "a listed deterministic hard-conflict C label."
                         + (
                             "\n\nRuntime-scoped exclusions:\n"
                             + "\n".join(excluded_review_instructions)
@@ -730,17 +796,17 @@ class OpenAICriticClient:
             max_input_chars=self.max_input_chars,
             validator=_validate,
             repair_hints={
-                "candidate_issues[].candidate_id": candidate_ids,
-                "candidate_issues[].evidence_ids[]": visible_evidence_ids,
-                "batch_level_risks[].candidate_ids[]": candidate_ids,
-                "batch_level_risks[].evidence_ids[]": visible_evidence_ids,
-                "cited_evidence_ids[]": visible_evidence_ids,
+                "candidate_issues[].candidate_id": tuple(candidate_map.alias_to_value),
+                "candidate_issues[].conflict_ids[]": tuple(conflict_map.alias_to_value),
+                "candidate_issues[].evidence_ids[]": tuple(evidence_map.alias_to_value),
+                "batch_level_risks[].candidate_ids[]": tuple(candidate_map.alias_to_value),
+                "batch_level_risks[].evidence_ids[]": tuple(evidence_map.alias_to_value),
+                "cited_evidence_ids[]": tuple(evidence_map.alias_to_value),
             },
             trace_context={
                 "round_id": draft.round_id,
                 "role": "batch_critic",
                 "profile": self.profile_name,
-                "profile_sha256": self.profile_sha256,
                 "schema_name": "CritiqueDecisionBodyOutput",
             },
         )
@@ -750,14 +816,8 @@ class OpenAICriticClient:
 def _decision_from_payload(payload: dict[str, Any], *, draft: DraftBatch) -> CritiqueDecision:
     body = CritiqueDecisionBodyOutput.model_validate(payload)
     payload = body.model_dump(mode="json", exclude_none=True)
-    body_sha256 = hashlib.sha256(
-        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
     return CritiqueDecision(
-        decision_id=(
-            f"critique:{draft.draft_batch_id}:r{draft.round_id}:"
-            f"a{draft.review_attempt}:{body_sha256[:12]}"
-        ),
+        decision_id=f"D{draft.round_id:02d}-{draft.review_attempt:02d}",
         draft_batch_id=draft.draft_batch_id,
         round_id=draft.round_id,
         review_attempt=draft.review_attempt,
@@ -765,7 +825,7 @@ def _decision_from_payload(payload: dict[str, Any], *, draft: DraftBatch) -> Cri
         falsification_readiness=FalsificationReadiness(payload["falsification_readiness"]),
         candidate_issues=tuple(
             CandidateIssue(
-                issue_id=item["issue_id"],
+                issue_id=f"I{index:02d}",
                 candidate_id=item["candidate_id"],
                 scope=IssueScope(item["scope"]),
                 severity=IssueSeverity(item["severity"]),
@@ -779,34 +839,39 @@ def _decision_from_payload(payload: dict[str, Any], *, draft: DraftBatch) -> Cri
                     else None
                 ),
             )
-            for item in payload["candidate_issues"]
+            for index, item in enumerate(payload["candidate_issues"], start=1)
         ),
         batch_level_risks=tuple(
             BatchRisk(
-                risk_id=item["risk_id"],
+                risk_id=f"R{index:02d}",
                 code=item["code"],
                 severity=IssueSeverity(item["severity"]),
                 statement=item["statement"],
                 candidate_ids=tuple(item["candidate_ids"]),
                 evidence_ids=tuple(item["evidence_ids"]),
             )
-            for item in payload["batch_level_risks"]
+            for index, item in enumerate(payload["batch_level_risks"], start=1)
         ),
         evidence_conflicts=tuple(
             EvidenceConflict(
                 **{
                     **item,
+                    "conflict_id": f"EC{index:02d}",
                     "supporting_ids": tuple(item["supporting_ids"]),
                     "opposing_ids": tuple(item["opposing_ids"]),
                 }
             )
-            for item in payload["evidence_conflicts"]
+            for index, item in enumerate(payload["evidence_conflicts"], start=1)
         ),
         unsupported_claims=tuple(
             UnsupportedClaim(
-                **{**item, "required_action": RequiredChangeAction(item["required_action"])}
+                **{
+                    **item,
+                    "claim_id": f"U{index:02d}",
+                    "required_action": RequiredChangeAction(item["required_action"]),
+                }
             )
-            for item in payload["unsupported_claims"]
+            for index, item in enumerate(payload["unsupported_claims"], start=1)
         ),
         required_changes=tuple(
             RequiredChange(
@@ -825,7 +890,7 @@ def _decision_from_payload(payload: dict[str, Any], *, draft: DraftBatch) -> Cri
         ),
         cited_evidence_ids=tuple(payload["cited_evidence_ids"]),
         confidence=float(payload["confidence"]),
-        summary=str(payload["summary"]),
+        summary=str(payload["explanation"]),
     )
 
 
@@ -917,6 +982,8 @@ class CriticAgent:
                 draft=draft,
                 report=conflict_report,
                 visible_evidence_ids=visible_ids,
+                hypothesis=hypothesis,
+                batch_review_context=context.get("batch_review_context"),
             )
 
         for attempt in range(self.max_retries + 1):
@@ -937,6 +1004,8 @@ class CriticAgent:
                     draft=draft,
                     report=conflict_report,
                     visible_evidence_ids=visible_ids,
+                    hypothesis=hypothesis,
+                    batch_review_context=context.get("batch_review_context"),
                 )
                 return decision
             except Exception as error:  # noqa: BLE001 - remote/schema failures must fail closed
@@ -964,6 +1033,8 @@ class CriticAgent:
                 draft=draft,
                 report=conflict_report,
                 visible_evidence_ids=visible_ids,
+                hypothesis=hypothesis,
+                batch_review_context=context.get("batch_review_context"),
             )
             return decision
         raise RuntimeError("Critic failed without a configured safe fallback") from last_error
