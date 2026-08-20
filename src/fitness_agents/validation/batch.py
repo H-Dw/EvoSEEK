@@ -190,6 +190,22 @@ class CritiqueDecisionValidator:
         hypothesis: Hypothesis | None = None,
         batch_review_context: Any | None = None,
     ) -> None:
+        if decision.rating_score is not None:
+            expected_verdict = (
+                ReviewVerdict.REJECT
+                if decision.rating_score < 2
+                else ReviewVerdict.REVISE
+                if decision.rating_score < 4
+                else ReviewVerdict.APPROVE
+            )
+            if decision.verdict is not expected_verdict:
+                raise ValueError(
+                    "CritiqueDecision verdict does not match its fixed Rating region"
+                )
+            if 2 <= decision.rating_score <= 3 and not decision.rating_suggestions:
+                raise ValueError("Rating 2-3 requires actionable Critic suggestions")
+            if decision.rating_score >= 4 and decision.rating_text_errors:
+                raise ValueError("Rating 4-5 cannot retain declared text errors")
         if (decision.draft_batch_id, decision.round_id, decision.review_attempt) != (
             draft.draft_batch_id,
             draft.round_id,
