@@ -78,7 +78,7 @@ def _context(count: int) -> ReThinkContextInput:
         visible_baseline=0.0,
         candidates=[
             {
-                "variant_id": f"sha256:v{index:02d}",
+                "variant_id": f"V{index:02d}",
                 "mutation_notation": f"V39{chr(65 + index)}",
                 "wet_value": float(index),
                 "dry_validations": [],
@@ -118,15 +118,13 @@ def test_rethink_splits_only_failed_batches_and_keeps_reasoning_enabled(monkeypa
     output = client.reflect_round(context=_context(10))
 
     assert [item.variant_id for item in output] == [
-        f"sha256:v{index:02d}" for index in range(10)
+        f"V{index:02d}" for index in range(10)
     ]
     reasoning_calls = [item for item in transport_client.calls if item["stage"] == "reasoning"]
     render_calls = [item for item in transport_client.calls if item["stage"] == "render"]
     assert sorted(item["batch_size"] for item in reasoning_calls) == [2, 4, 4, 8]
-    assert sorted(item["batch_size"] for item in render_calls) == [2, 4, 4]
+    assert render_calls == []
     assert all(item["thinking"] == "enabled" for item in reasoning_calls)
     assert all(item["reasoning_effort"] == "high" for item in reasoning_calls)
-    assert all(item["thinking"] == "disabled" for item in render_calls)
-    assert all(item["reasoning_effort"] is None for item in render_calls)
     assert all(item["max_tokens"] == 20000 for item in transport_client.calls)
     assert transport_client.max_active >= 2

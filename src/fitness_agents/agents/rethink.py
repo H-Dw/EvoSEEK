@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import hashlib
 import json
+from dataclasses import replace
 from typing import Any
 
 from fitness_agents.agents.adaptive_batch import AdaptiveBatchWork, adaptive_batch_submit
@@ -17,6 +17,7 @@ from fitness_agents.utils.progress import report_event
 
 from .output_contracts import ReThinkOutput, validate_rethink_payload
 from .profile_loader import load_role_profile
+from .short_ids import ShortIdMap, rewrite_exact_ids
 from .structured_completion import complete_structured
 from .transports import OpenAICompatibleChatTransport
 
@@ -144,7 +145,6 @@ class NativeReThinkClient:
         role_profile = load_role_profile("rethink", profile)
         self.profile_name = profile
         self.profile = role_profile.instructions
-        self.profile_sha256 = role_profile.sha256
         self.client = create_openai_client(
             api_key=api_key,
             base_url=base_url,
@@ -166,14 +166,21 @@ class NativeReThinkClient:
         batch_id: str,
         split_depth: int,
     ) -> tuple[ReThinkReflection, ...]:
-        expected_ids = context.expected_variant_ids
-        batch_hash = hashlib.sha256("|".join(sorted(expected_ids)).encode()).hexdigest()[:12]
+        id_map = ShortIdMap.build(
+            tuple(str(item["variant_id"]) for item in context.candidates), prefix="S"
+        )
+        alias_context = context.model_copy(
+            update={
+                "candidates": rewrite_exact_ids(context.candidates, id_map),
+            }
+        )
+        expected_aliases = alias_context.expected_variant_ids
         trace_context = AgentTraceContext(
             run_id=context.run_id,
             round_id=context.round_id,
             role="rethink",
             request_id=(
-                f"rethink:{context.run_id}:r{context.round_id}:{batch_id}:{batch_hash}"
+                f"rethink:{context.run_id}:r{context.round_id}:{batch_id}"
             ),
         )
         output = complete_structured(
@@ -185,10 +192,12 @@ class NativeReThinkClient:
                     "role": "system",
                     "content": (
                         self.profile + "\nReturn JSON matching "
+                        "Use only the request-local S labels in candidates; local code maps them "
+                        "back to canonical sample records. "
                         + json.dumps(ReThinkOutput.model_json_schema(), ensure_ascii=False)
                     ),
                 },
-                {"role": "user", "content": context.model_dump_json()},
+                {"role": "user", "content": alias_context.model_dump_json()},
             ],
             output_type=ReThinkOutput,
             temperature=self.temperature,
@@ -211,32 +220,32 @@ class NativeReThinkClient:
             max_input_chars=getattr(self, "max_input_chars", None),
             separate_json_render=True,
             repair_hints={
-                "reflections[].variant_id": tuple(expected_ids)
+                "reflections[].variant_id": tuple(expected_aliases)
             },
             contextual_validator=lambda value: validate_rethink_payload(
-                value, expected_variant_ids=expected_ids
+                value, expected_variant_ids=expected_aliases
             ),
             reasoning_truncation_retries=0,
             preserve_reasoning_on_retry=True,
             trace_context={
                 **trace_context.model_dump(mode="json"),
                 "profile": self.profile_name,
-                "profile_sha256": self.profile_sha256,
                 "schema_name": "ReThinkOutput",
                 "retry_scope": f"rethink:{batch_id}",
                 "rethink_batch_id": batch_id,
                 "rethink_batch_size": len(context.candidates),
                 "rethink_split_depth": split_depth,
-                "context_sha256": hashlib.sha256(
-                    context.model_dump_json().encode()
-                ).hexdigest(),
             },
         )
-        return _parse_reflections(
+        reflections = _parse_reflections(
             output.model_dump(mode="json"),
             run_id=context.run_id,
             round_id=context.round_id,
             provider=self.provider_name,
+        )
+        return tuple(
+            replace(item, variant_id=id_map.decode(item.variant_id))
+            for item in reflections
         )
 
     def reflect_round(self, *, context: ReThinkContextInput) -> tuple[ReThinkReflection, ...]:
@@ -275,7 +284,10 @@ class NativeReThinkClient:
                 "Adaptive ReThink batch coverage mismatch; "
                 f"missing={missing}, unexpected={unexpected}"
             )
-        return tuple(by_variant_id[item] for item in expected_ids)
+        return tuple(
+            replace(by_variant_id[item], reflection_id=f"R{validated_context.round_id:02d}-{index:02d}")
+            for index, item in enumerate(expected_ids, start=1)
+        )
 
     def _reflect_batch_work(
         self,

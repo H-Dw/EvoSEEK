@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 from collections import defaultdict
 from collections.abc import Sequence
@@ -17,17 +16,18 @@ from fitness_agents.contracts.hypothesis_pipeline import SynthesisAbstention
 from fitness_agents.contracts.schemas import Evidence, Hypothesis
 
 from .output_contracts import (
-    HypothesisOutput,
+    HypothesisBodyOutput,
     MainSynthesisOutput,
     NoSupportedHypothesisOutput,
     validate_hypothesis_payload,
     validate_main_synthesis_payload,
 )
 from .profile_loader import load_role_profile
+from .short_ids import ShortIdMap, rewrite_exact_ids
 from .structured_completion import complete_structured
 from .transports import OpenAICompatibleChatTransport
 
-HYPOTHESIS_SCHEMA: dict[str, Any] = HypothesisOutput.model_json_schema()
+HYPOTHESIS_SCHEMA: dict[str, Any] = HypothesisBodyOutput.model_json_schema()
 
 
 def load_scientist_profile(profile: str) -> str:
@@ -831,17 +831,119 @@ def build_scientist_hypothesis_messages(
     sanitized_context: ScientistContextInput,
     evidence: Sequence[Evidence],
     output_schema: dict[str, Any],
+    evidence_id_map: ShortIdMap | None = None,
 ) -> list[dict[str, str]]:
     """Build the exact system/user messages used by the remote Scientist client."""
 
     raw_context = ScientistContextInput.model_validate(sanitized_context).model_dump(mode="json")
-    interaction = raw_context.get("kg_interaction")
+    original_interaction = raw_context.get("kg_interaction")
     evidence_universe = RoleVisibleEvidenceUniverse.from_role_sources(
         role="scientist",
         evidence=evidence,
-        interaction=interaction,
+        interaction=original_interaction,
         approved_channel_analyses=raw_context.get("approved_subhypotheses", ()),
     )
+    evidence_ids = evidence_id_map or ShortIdMap.build(
+        tuple(sorted(evidence_universe.ids)), prefix="E"
+    )
+    evidence_labels: dict[str, str] = {}
+
+    def collect_evidence_labels(value: Any) -> None:
+        if isinstance(value, dict):
+            evidence_id = value.get("evidence_id")
+            if evidence_id:
+                provenance = value.get("provenance") or {}
+                if not isinstance(provenance, dict):
+                    provenance = {}
+                source_id = value.get("source_id") or provenance.get("source_id")
+                metadata = provenance.get("metadata") or {}
+                if not isinstance(metadata, dict):
+                    metadata = {}
+                citation_support = (
+                    provenance.get("citation_support")
+                    or metadata.get("citation_support")
+                    or ()
+                )
+                support_publication = next(
+                    (
+                        item.get("publication_id")
+                        for item in citation_support
+                        if isinstance(item, dict) and item.get("publication_id")
+                    ),
+                    None,
+                )
+                doi = (
+                    value.get("doi")
+                    or value.get("publication_id")
+                    or provenance.get("doi")
+                    or provenance.get("publication_id")
+                    or support_publication
+                )
+                label = (
+                    str(doi)
+                    if doi
+                    else (
+                        str(source_id)
+                        if source_id and str(source_id).casefold().startswith("doi:")
+                        else f"{value.get('channel') or 'evidence'}:{value.get('claim_id') or value.get('source_group') or 'visible'}"
+                    )
+                )
+                evidence_labels[str(evidence_id)] = label
+            for item in value.values():
+                collect_evidence_labels(item)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                collect_evidence_labels(item)
+
+    collect_evidence_labels(original_interaction)
+    collect_evidence_labels(raw_context.get("approved_subhypotheses", ()))
+    for entry in evidence:
+        provenance = entry.provenance or {}
+        metadata = provenance.get("metadata") or {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+        citation_support = (
+            provenance.get("citation_support")
+            or metadata.get("citation_support")
+            or ()
+        )
+        support_publication = next(
+            (
+                item.get("publication_id")
+                for item in citation_support
+                if isinstance(item, dict) and item.get("publication_id")
+            ),
+            None,
+        )
+        doi = (
+            provenance.get("doi")
+            or provenance.get("publication_id")
+            or support_publication
+        )
+        if doi:
+            label = str(doi)
+        elif str(entry.source_id).casefold().startswith("doi:"):
+            label = str(entry.source_id)
+        else:
+            label = f"{entry.channel}:{entry.claim_id or entry.source_group}"
+        evidence_labels[entry.evidence_id] = label
+    visible_rows = [
+        item for item in raw_context.get("visible_observations", ()) if isinstance(item, dict)
+    ]
+    sample_ids = ShortIdMap.build(
+        tuple(str(item.get("variant_id") or "") for item in visible_rows),
+        prefix="S",
+    )
+    sample_labels = {
+        str(item.get("variant_id") or ""): str(item.get("mutation_notation") or "WT")
+        for item in visible_rows
+    }
+    raw_context = rewrite_exact_ids(raw_context, sample_ids, evidence_ids)
+    raw_context.pop("run_id", None)
+    raw_context.pop("expected_hypothesis_id", None)
+    raw_context["sample_map"] = sample_ids.prompt_map(sample_labels)
+    raw_context["evidence_map"] = evidence_ids.prompt_map(evidence_labels)
+    interaction = raw_context.get("kg_interaction")
     approved_channel_analyses = raw_context.pop("approved_subhypotheses", ())
     if approved_channel_analyses:
         raw_context["approved_channel_analyses"] = approved_channel_analyses
@@ -860,7 +962,9 @@ def build_scientist_hypothesis_messages(
             for observation in raw_context.get("visible_observations", ())
             if isinstance(observation, dict)
         ]
-    rag_claims = _build_rag_claim_cards(evidence, interaction)
+    rag_claims = rewrite_exact_ids(
+        _build_rag_claim_cards(evidence, original_interaction), sample_ids, evidence_ids
+    )
     seen_identities: set[tuple[str, str]] = set()
     for card in rag_claims:
         if card.get("claim_id"):
@@ -873,7 +977,9 @@ def build_scientist_hypothesis_messages(
     for entry in evidence:
         if _is_rag_evidence(entry):
             continue
-        compact = _compact_prompt_evidence(entry)
+        compact = rewrite_exact_ids(
+            _compact_prompt_evidence(entry), sample_ids, evidence_ids
+        )
         identities = _prompt_row_identities(compact)
         if any(item in seen_identities for item in identities):
             continue
@@ -898,12 +1004,17 @@ def build_scientist_hypothesis_messages(
                 "KG rows may be incomplete, and status=not_found means unknown rather than negative evidence."
                 + "\n\nCite only evidence_id values from the supplied evidence, rag_claims, or KG "
                 "relationship references. "
-                "Never put variant identifiers (sha256:...) in evidence_ids; use [] if none are visible."
+                "Sample and evidence IDs are request-local S/E labels defined in the supplied "
+                "maps. Copy only those labels. Use [] when no "
+                "visible evidence supports a claim."
                 " Never invent ev: identifiers. Keep statement, expected_outcome, and "
                 "falsification_criterion at or under 400 characters; cite at most 12 evidence_ids."
-                + "\n\nIf context.critic_revision is present, copy parent_hypothesis_id from "
-                "rejected_hypothesis_id, change statement or preferred_residues so the new "
+                + "\n\nIf context.critic_revision is present, change statement or "
+                "preferred_residues so the new "
                 "hypothesis is not a restatement of the rejected one, and address the required_changes."
+                + " Hypothesis IDs and parent links are assigned by local runtime code. Do not "
+                "return them. Do not return an explanation; the Critic owns the corresponding "
+                "scientific explanation."
                 + "\n\nWhen context.approved_channel_analyses is present, its items are reviewed "
                 "analysis cards, "
                 "not mandatory mutation proposals. Preserve finding kinds and uncertainty, compare "
@@ -923,7 +1034,9 @@ def build_scientist_hypothesis_messages(
                     "context": context,
                     "evidence": evidence_payload,
                     "rag_claims": rag_claims,
-                    "evidence_universe": evidence_universe.model_dump(mode="json"),
+                    "evidence_universe": rewrite_exact_ids(
+                        evidence_universe.model_dump(mode="json"), evidence_ids
+                    ),
                 },
                 ensure_ascii=False,
             ),
@@ -1063,7 +1176,7 @@ class MockScientistLLMClient:
                 }
         return Hypothesis(
             hypothesis_id=str(
-                context.get("expected_hypothesis_id") or f"hyp:{context['run_id']}:r{round_id}"
+                context.get("expected_hypothesis_id") or f"H{round_id:02d}-00"
             ),
             statement=statement[:400],
             preferred_residues=preferred,
@@ -1122,7 +1235,6 @@ class NativeScientistClient:
         self.profile_name = profile
         role_profile = load_role_profile("scientist", profile)
         self.profile = role_profile.instructions
-        self.profile_sha256 = role_profile.sha256
         self.client = create_openai_client(
             api_key=api_key,
             base_url=base_url,
@@ -1153,6 +1265,12 @@ class NativeScientistClient:
             approved_channel_analyses=context.get("approved_subhypotheses", ()),
         )
         allowed_evidence_ids = evidence_universe.ids
+        evidence_id_map = ShortIdMap.build(
+            tuple(sorted(allowed_evidence_ids)), prefix="E"
+        )
+        model_allowed_evidence_ids = frozenset(
+            evidence_id_map.encode(item) for item in allowed_evidence_ids
+        )
         expected_positions = tuple(int(item) for item in context["mutable_positions"])
         sparse_preferences = context.get("preference_policy") == "sparse_subset"
         exact_positions = None if sparse_preferences else expected_positions
@@ -1161,14 +1279,14 @@ class NativeScientistClient:
             int(context.get("max_preferred_positions", 12)) if sparse_preferences else None
         )
         synthesis_contract = getattr(self, "profile_name", "scientific_v1") == "synthesis_v1"
-        output_type = MainSynthesisOutput if synthesis_contract else HypothesisOutput
+        output_type = MainSynthesisOutput if synthesis_contract else HypothesisBodyOutput
         generated_schema = output_type.model_json_schema()
         if synthesis_contract:
             contextual_validator = lambda value: validate_main_synthesis_payload(
                 value,
                 expected_hypothesis_id=expected_id,
                 expected_parent_hypothesis_id=expected_parent_id,
-                allowed_evidence_ids=allowed_evidence_ids,
+                allowed_evidence_ids=model_allowed_evidence_ids,
                 expected_positions=exact_positions,
                 allowed_positions=allowed_positions,
                 max_positions=max_positions,
@@ -1178,7 +1296,7 @@ class NativeScientistClient:
                 value,
                 expected_hypothesis_id=expected_id,
                 expected_parent_hypothesis_id=expected_parent_id,
-                allowed_evidence_ids=allowed_evidence_ids,
+                allowed_evidence_ids=model_allowed_evidence_ids,
                 expected_positions=exact_positions,
                 allowed_positions=allowed_positions,
                 max_positions=max_positions,
@@ -1192,6 +1310,7 @@ class NativeScientistClient:
                 sanitized_context=context_model,
                 evidence=evidence,
                 output_schema=generated_schema,
+                evidence_id_map=evidence_id_map,
             ),
             output_type=output_type,
             temperature=self.temperature,
@@ -1220,29 +1339,36 @@ class NativeScientistClient:
                 )
                 if synthesis_contract
                 else (),
-                "hypothesis_id": (expected_id,),
-                "parent_hypothesis_id": (
-                    (str(expected_parent_id),) if expected_parent_id is not None else ()
-                ),
-                "evidence_ids[]": tuple(sorted(allowed_evidence_ids)),
+                "evidence_ids[]": tuple(sorted(model_allowed_evidence_ids)),
                 "preferred_residues": tuple(str(item) for item in expected_positions),
             },
             contextual_validator=contextual_validator,
             trace_context={
                 **(trace_context or {}),
                 "profile": getattr(self, "profile_name", "scientific_v1"),
-                "profile_sha256": getattr(self, "profile_sha256", None),
                 "schema_name": output_type.__name__,
-                "context_sha256": hashlib.sha256(
-                    context_model.model_dump_json().encode()
-                ).hexdigest(),
             },
         )
         if synthesis_contract and isinstance(output.root, NoSupportedHypothesisOutput):
-            return output.root.to_abstention(
+            abstention = output.root.model_copy(
+                update={
+                    "evidence_ids": [
+                        evidence_id_map.decode(item) for item in output.root.evidence_ids
+                    ]
+                }
+            )
+            return abstention.to_abstention(
                 allowed_evidence_ids=allowed_evidence_ids
             )
         hypothesis_output = output.root if synthesis_contract else output
+        hypothesis_output = hypothesis_output.model_copy(
+            update={
+                "evidence_ids": [
+                    evidence_id_map.decode(item)
+                    for item in hypothesis_output.evidence_ids
+                ]
+            }
+        )
         return hypothesis_output.to_hypothesis(
             expected_hypothesis_id=expected_id,
             expected_parent_hypothesis_id=expected_parent_id,

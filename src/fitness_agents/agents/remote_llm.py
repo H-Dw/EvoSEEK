@@ -6,7 +6,6 @@ Keys are read from the process environment or a gitignored project ``.env`` file
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
@@ -475,7 +474,6 @@ def _private_raw_capture(
     *,
     trace_fields: dict[str, Any],
     attempt: int,
-    payload_sha256: str,
 ) -> str | None:
     """Optionally persist raw visible output outside normal artifacts and traces."""
 
@@ -485,7 +483,7 @@ def _private_raw_capture(
     role = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(trace_fields.get("role") or "unknown"))
     target_dir = Path(private_dir).expanduser().resolve()
     target_dir.mkdir(parents=True, exist_ok=True)
-    target = target_dir / f"{role}.attempt-{attempt}.{payload_sha256[:16]}.txt"
+    target = target_dir / f"{role}.attempt-{attempt}.txt"
     target.write_text(content, encoding="utf-8")
     try:
         target.chmod(0o600)
@@ -748,17 +746,13 @@ def complete_json(
                     else output_retries_used.get(failure.kind, 0) < failure_budget
                 )
             )
-            invalid_payload_sha256 = (
-                hashlib.sha256(content.encode("utf-8")).hexdigest() if content else None
-            )
             private_raw_path = (
                 _private_raw_capture(
                     content,
                     trace_fields=trace_fields,
                     attempt=request_attempt,
-                    payload_sha256=invalid_payload_sha256 or "empty",
                 )
-                if invalid_payload_sha256
+                if content
                 else None
             )
             report_event(
@@ -782,7 +776,6 @@ def complete_json(
                 braces_balanced=failure.braces_balanced,
                 decode_position=failure.decode_position,
                 validation_errors=validation_error_entries(error),
-                invalid_payload_sha256=invalid_payload_sha256,
                 private_raw_path=private_raw_path,
                 disposition="retry" if will_retry else "rejected",
                 retry_budget={

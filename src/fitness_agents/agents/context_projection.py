@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 from collections.abc import Iterable
@@ -21,6 +20,7 @@ from fitness_agents.contracts.schemas import Evidence
 from fitness_agents.kg_interaction.contracts import EvidencePack, InteractionResult
 
 from .llm import _compact_prompt_pack, _prompt_row_identities
+from .short_ids import ShortIdMap, rewrite_exact_ids
 
 FEATURE_CHANNELS: tuple[ChannelName, ...] = ("physchem", "conservation", "structure")
 FEATURE_OPERATOR_CHANNEL: dict[str, ChannelName] = {
@@ -32,9 +32,10 @@ FEATURE_OPERATORS = frozenset({*FEATURE_OPERATOR_CHANNEL, "query_feature_bundle"
 _MUTATION_TOKEN_RE = re.compile(r"^([ACDEFGHIKLMNPQRSTVWY])(\d+)([ACDEFGHIKLMNPQRSTVWY])$")
 
 
-def canonical_sha256(value: Any) -> str:
-    raw = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(raw.encode()).hexdigest()
+def canonical_key(value: Any) -> str:
+    """Stable local comparison key; it is never exposed as an identifier."""
+
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
 def _descriptor_observation_facts(
@@ -44,12 +45,13 @@ def _descriptor_observation_facts(
     evidence_payloads: list[dict[str, Any]],
     mutable_positions: tuple[int, ...],
     wild_type_sites: str,
+    first_fact_index: int = 1,
 ) -> tuple[DescriptorObservationFact, ...]:
     wild_type_by_position = {
         position: wild_type_sites[index]
         for index, position in enumerate(mutable_positions)
     }
-    facts: dict[str, DescriptorObservationFact] = {}
+    raw_facts: dict[tuple[int, str, str, str], DescriptorObservationFact] = {}
     for payload in evidence_payloads:
         evidence_id = str(payload.get("evidence_id") or "")
         features = dict(payload.get("features") or {})
@@ -79,14 +81,8 @@ def _descriptor_observation_facts(
                     continue
                 if not descriptor:
                     continue
-                digest = hashlib.sha256(
-                    (
-                        f"{evidence_id}|{sample_id}|{position}|{from_residue}|"
-                        f"{to_residue}|{descriptor}"
-                    ).encode()
-                ).hexdigest()[:24]
                 fact = DescriptorObservationFact(
-                    fact_id=f"fact:descriptor:{digest}",
+                    fact_id="pending",
                     evidence_id=evidence_id,
                     sample_id=sample_id,
                     position=position,
@@ -95,15 +91,21 @@ def _descriptor_observation_facts(
                     descriptor=descriptor,
                     delta=value,
                 )
-                facts[fact.fact_id] = fact
-    return tuple(facts[key] for key in sorted(facts))
+                raw_facts[(position, from_residue, to_residue, descriptor)] = fact
+    return tuple(
+        fact.model_copy(update={"fact_id": f"D{index:03d}"})
+        for index, fact in enumerate(
+            (raw_facts[key] for key in sorted(raw_facts)),
+            start=first_fact_index,
+        )
+    )
 
 
 def _dedupe_dicts(items: tuple[dict[str, Any], ...], *, keys: tuple[str, ...]) -> tuple[dict[str, Any], ...]:
     seen: set[str] = set()
     output: list[dict[str, Any]] = []
     for item in items:
-        identity = next((str(item[key]) for key in keys if item.get(key)), canonical_sha256(item))
+        identity = next((str(item[key]) for key in keys if item.get(key)), canonical_key(item))
         if identity in seen:
             continue
         seen.add(identity)
@@ -212,9 +214,9 @@ class KGContextPartitioner:
                 facts = tuple(
                     item
                     for item in pack.facts
-                    if canonical_sha256(item) not in seen_facts
+                    if canonical_key(item) not in seen_facts
                 )
-                seen_facts.update(canonical_sha256(item) for item in facts)
+                seen_facts.update(canonical_key(item) for item in facts)
                 projected.append(replace(pack, evidence=evidence, facts=facts))
             deduplicated[channel] = tuple(projected)
         base = replace(interaction, packs=tuple(base_packs))
@@ -248,6 +250,11 @@ class KGContextPartitioner:
         retry_control: dict[str, Any] | None = None,
     ) -> ChannelEvidenceInput:
         context = ScientistContextInput.model_validate(base_context)
+        observation_rows = [dict(item) for item in context.visible_observations]
+        canonical_variant_ids = tuple(
+            str(item.get("variant_id") or "") for item in observation_rows
+        )
+        sample_ids = ShortIdMap.build(canonical_variant_ids, prefix="S")
         seen_identities: set[tuple[str, str]] = set()
         evidence_payloads = []
         for item in evidence:
@@ -255,12 +262,15 @@ class KGContextPartitioner:
             identities = _prompt_row_identities(payload)
             if any(identity in seen_identities for identity in identities):
                 continue
-            evidence_payloads.append(payload)
+            evidence_payloads.append(rewrite_exact_ids(payload, sample_ids))
             seen_identities.update(identities)
         pack_payloads = []
         for pack in packs:
             pack_payloads.append(
-                _compact_prompt_pack(asdict(pack), seen_identities=seen_identities)
+                rewrite_exact_ids(
+                    _compact_prompt_pack(asdict(pack), seen_identities=seen_identities),
+                    sample_ids,
+                )
             )
         evidence_by_variant: dict[str, list[dict[str, Any]]] = {}
         for payload in evidence_payloads:
@@ -268,30 +278,34 @@ class KGContextPartitioner:
                 payload
             )
         sample_cards = []
-        for raw_observation in context.visible_observations:
+        next_fact_index = 1
+        sample_map: dict[str, str] = {}
+        for raw_observation in observation_rows:
             observation = dict(raw_observation)
-            variant_id = str(observation.get("variant_id") or "")
-            matching = evidence_by_variant.get(variant_id, [])
-            sample_id = str(observation.get("sample_id") or variant_id)
+            canonical_variant_id = str(observation.get("variant_id") or "")
+            sample_id = sample_ids.encode(canonical_variant_id)
+            matching = evidence_by_variant.get(sample_id, [])
             residues_by_position = {
                 str(key): str(value)
                 for key, value in dict(
                     observation.get("residues_by_position") or {}
                 ).items()
             }
-            sequence_sha256 = str(observation.get("sequence_sha256") or "")
-            if len(sequence_sha256) != 64:
-                sequence_sha256 = hashlib.sha256(
-                    str(observation.get("variant") or variant_id).encode()
-                ).hexdigest()
+            mutation_notation = str(observation.get("mutation_notation") or "WT")
+            sample_map[sample_id] = mutation_notation
+            descriptor_facts = _descriptor_observation_facts(
+                sample_id=sample_id,
+                residues_by_position=residues_by_position,
+                evidence_payloads=matching,
+                mutable_positions=context.mutable_positions,
+                wild_type_sites=context.wild_type_sites,
+                first_fact_index=next_fact_index,
+            )
+            next_fact_index += len(descriptor_facts)
             sample_cards.append(
                 {
                     "sample_id": sample_id,
-                    "variant_id": variant_id,
-                    "mutation_notation": str(
-                        observation.get("mutation_notation") or "WT"
-                    ),
-                    "sequence_sha256": sequence_sha256,
+                    "mutation_notation": mutation_notation,
                     "residues_by_position": residues_by_position,
                     "evidence_ids": tuple(
                         sorted(
@@ -305,13 +319,7 @@ class KGContextPartitioner:
                         for item in matching
                         if item.get("evidence_id")
                     },
-                    "descriptor_facts": _descriptor_observation_facts(
-                        sample_id=sample_id,
-                        residues_by_position=residues_by_position,
-                        evidence_payloads=matching,
-                        mutable_positions=context.mutable_positions,
-                        wild_type_sites=context.wild_type_sites,
-                    ),
+                    "descriptor_facts": descriptor_facts,
                 }
             )
         return ChannelEvidenceInput(
@@ -321,6 +329,7 @@ class KGContextPartitioner:
             task=context.task,
             mutable_positions=context.mutable_positions,
             wild_type_sites=context.wild_type_sites,
+            sample_map=sample_map,
             visible_observations=tuple(sample_cards),
             evidence=tuple(evidence_payloads),
             kg_packs=tuple(pack_payloads),
