@@ -3,7 +3,7 @@
 ## Contract fingerprints
 
 - schema_sha256: c677b8d78b18fa758a681718739db41050c8b85d1b78e6d1815891ae7381a5ef
-- skill_sha256: 02a982fe024fc07ed076b184f3d112b03d990062fde07b52383501ed48dcf472
+- skill_sha256: 00a539d60868c7b60a0a8d97747f5b8437868eb9c94326b820085a29233d3be3
 
 ## Inputs
 
@@ -29,6 +29,13 @@ hydropathy, volume, mass, and special-residue flags. `OBSERVATION` must not say 
 they may propose a bounded descriptor relation, but must not mention fitness, benefit, improvement,
 or causality. Only the Main Scientist may relate these descriptors to fitness after combining
 independent evidence. Prefer `candidate_hypotheses: []` over a fitness-directed child hypothesis.
+
+The runtime may omit samples whose channel evidence was removed by the bounded evidence projection.
+Do not reconstruct those samples and do not create one finding per sample. Every `OBSERVATION` or
+`INTERPRETATION` must cite at least one exact runtime-visible ID that supports that statement. If no
+exact ID applies, emit a `LIMITATION` with `evidence_ids: []` (or omit the unsupported finding); never
+invent placeholder `ev:` identifiers. IDs shown in examples are syntax examples and are never valid
+for a runtime request unless that exact ID also appears in the supplied evidence universe.
 
 Construct nested items first. Then set `evidence_ids` to exactly
 `sorted(unique(findings[*].evidence_ids ∪ candidate_hypotheses[*].evidence_ids))`. Do not add an ID

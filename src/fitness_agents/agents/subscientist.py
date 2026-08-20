@@ -42,33 +42,64 @@ _PACK_SAMPLE_FIELDS = (
 
 
 def _row_sample_id(value: Any) -> str | None:
+    aliases = _row_sample_aliases(value)
+    return aliases[0] if aliases else None
+
+
+def _row_sample_aliases(value: Any) -> tuple[str, ...]:
     if hasattr(value, "model_dump"):
         value = value.model_dump(mode="json")
     if not isinstance(value, dict):
-        return None
+        return ()
+    aliases: dict[str, None] = {}
+
+    def register(raw_id: Any) -> None:
+        if raw_id and not str(raw_id).startswith("context:"):
+            aliases.setdefault(str(raw_id), None)
+
     for key in ("sample_id", "variant_id", "candidate_id"):
-        sample_id = value.get(key)
-        if sample_id and not str(sample_id).startswith("context:"):
-            return str(sample_id)
-    return None
+        register(value.get(key))
+    metadata = value.get("metadata")
+    if isinstance(metadata, dict):
+        for key in ("sample_id", "variant_id", "candidate_id"):
+            register(metadata.get(key))
+    return tuple(aliases)
 
 
 def _context_sample_ids(context: ChannelEvidenceInput) -> tuple[str, ...]:
-    ordered: dict[str, None] = {}
-    for item in context.visible_observations:
-        sample_id = _row_sample_id(item)
-        if sample_id is not None:
-            ordered.setdefault(sample_id, None)
+    """Return only samples backed by role-visible channel evidence.
+
+    ``visible_observations`` can contain the full campaign pool while the LLM
+    evidence projection is deliberately bounded.  Batching the full pool would
+    create evidence-free requests that cannot satisfy citation closure.  Use
+    direct evidence and feature-pack identities as the supported universe and
+    retain observation order for the subset that intersects it.
+    """
+
+    supported: dict[str, None] = {}
     for item in context.evidence:
-        sample_id = _row_sample_id(item)
-        if sample_id is not None:
-            ordered.setdefault(sample_id, None)
+        for sample_id in _row_sample_aliases(item):
+            supported.setdefault(sample_id, None)
     for pack in context.kg_packs:
+        for sample_id in _row_sample_aliases(pack):
+            supported.setdefault(sample_id, None)
         for field in _PACK_SAMPLE_FIELDS:
             for item in pack.get(field, ()):
-                sample_id = _row_sample_id(item)
-                if sample_id is not None:
-                    ordered.setdefault(sample_id, None)
+                for sample_id in _row_sample_aliases(item):
+                    supported.setdefault(sample_id, None)
+
+    if not supported:
+        return ()
+
+    ordered: dict[str, None] = {}
+    for item in context.visible_observations:
+        aliases = _row_sample_aliases(item)
+        if any(sample_id in supported for sample_id in aliases):
+            ordered.setdefault(aliases[0], None)
+            for sample_id in aliases:
+                supported.pop(sample_id, None)
+    for sample_id in supported:
+        ordered.setdefault(sample_id, None)
     return tuple(ordered)
 
 
@@ -76,14 +107,26 @@ def _batch_context(
     context: ChannelEvidenceInput, *, sample_ids: tuple[str, ...]
 ) -> ChannelEvidenceInput:
     selected = set(sample_ids)
+    # Batch work uses the canonical sample_id, while tool evidence commonly
+    # carries variant_id. Expand through each card so either stable alias
+    # selects the same evidence rows.
+    for item in context.visible_observations:
+        aliases = _row_sample_aliases(item)
+        if selected.intersection(aliases):
+            selected.update(aliases)
     evidence = tuple(
         item
         for item in context.evidence
-        if (sample_id := _row_sample_id(item)) is None or sample_id in selected
+        if not (aliases := _row_sample_aliases(item))
+        or bool(selected.intersection(aliases))
     )
     packs: list[dict[str, Any]] = []
     for raw_pack in context.kg_packs:
         pack = dict(raw_pack)
+        pack_aliases = _row_sample_aliases(pack)
+        pack_sample_id = pack_aliases[0] if pack_aliases else None
+        if pack_aliases and not selected.intersection(pack_aliases):
+            continue
         has_visible_rows = False
         for field in _PACK_SAMPLE_FIELDS:
             if field not in pack:
@@ -91,7 +134,11 @@ def _batch_context(
             rows = [
                 item
                 for item in pack.get(field, ())
-                if (sample_id := _row_sample_id(item)) is None or sample_id in selected
+                if (
+                    not (row_aliases := _row_sample_aliases(item))
+                    and pack_sample_id is None
+                    or bool(selected.intersection(row_aliases or pack_aliases))
+                )
             ]
             pack[field] = rows
             has_visible_rows = has_visible_rows or bool(rows)
@@ -103,7 +150,7 @@ def _batch_context(
             "visible_observations": tuple(
                 item
                 for item in context.visible_observations
-                if _row_sample_id(item) in selected
+                if selected.intersection(_row_sample_aliases(item))
             ),
             "evidence": evidence,
             "kg_packs": tuple(packs),
@@ -291,13 +338,15 @@ def validate_channel_hypothesis(
     if output.channel != context.channel:
         raise ValueError("child Scientist output channel does not match its isolated input")
     uncited_paths = tuple(
-        f"findings.{index}.evidence_ids"
+        path
         for index, finding in enumerate(output.findings)
         if finding.kind != "LIMITATION" and not finding.evidence_ids
+        for path in (f"findings.{index}.kind", f"findings.{index}.evidence_ids")
     )
     if uncited_paths:
         raise SemanticOutputValidationError(
-            "OBSERVATION and INTERPRETATION findings require at least one visible evidence ID",
+            "OBSERVATION and INTERPRETATION require visible evidence; when no exact ID supports "
+            "the finding, change kind to LIMITATION and keep evidence_ids empty",
             paths=uncited_paths,
         )
     if output.channel == "physchem":
@@ -502,8 +551,13 @@ class RemoteSubScientist:
                     "content": (
                         self.profile
                         + "\nProduce an analysis card, not a required mutation proposal. "
-                        "This request contains one runtime-selected sample batch. Analyze every "
-                        "supplied sample but do not discuss samples outside this batch. The "
+                        "This request contains one runtime-selected evidence-backed sample batch. "
+                        "Do not create one finding per sample: emit only representative findings "
+                        "supported by exact IDs visible in this batch, and do not discuss samples "
+                        "outside it. A sample with empty evidence_ids and feature_values cannot "
+                        "support an OBSERVATION or INTERPRETATION. If no exact visible ID supports "
+                        "a finding, use kind=LIMITATION with evidence_ids=[] or omit that finding; "
+                        "never fabricate placeholder ev: identifiers. The "
                         "runtime will merge this card with sibling batch cards. "
                         "Separate tool observations from interpretations and optional candidate "
                         "hypotheses. candidate_hypotheses may be empty when this channel cannot "
@@ -535,6 +589,7 @@ class RemoteSubScientist:
             max_input_chars=self.max_input_chars,
             repair_hints={
                 "channel": (context.channel,),
+                "findings[].kind": ("OBSERVATION", "INTERPRETATION", "LIMITATION"),
                 "evidence_ids[]": tuple(sorted(context.visible_evidence_ids)),
                 "findings[].evidence_ids[]": tuple(sorted(context.visible_evidence_ids)),
                 "candidate_hypotheses[].evidence_ids[]": tuple(
@@ -600,7 +655,7 @@ class RemoteSubScientist:
         sample_ids = _context_sample_ids(context)
         if not sample_ids:
             return self._propose_batch(
-                context=context,
+                context=_batch_context(context, sample_ids=()),
                 batch_id="b000",
                 split_depth=0,
                 sample_ids=(f"context:{context.channel}",),

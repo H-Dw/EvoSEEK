@@ -3,7 +3,7 @@ provider: aliyun-model-studio
 connection:
   workspace_id: llm-ftroma9pu4h3mv9k
   region: cn-beijing
-  origin: "https://llm-ftroma9pu4h3mv9k.cn-beijing.maas.aliyuncs.com"
+  origin: "https://dashscope.aliyuncs.com"
   api_key: "env:DASHSCOPE_API_KEY"
 items:
   scientist_llm:

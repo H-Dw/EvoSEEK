@@ -3,7 +3,7 @@
 ## Contract fingerprints
 
 - schema_sha256: c677b8d78b18fa758a681718739db41050c8b85d1b78e6d1815891ae7381a5ef
-- skill_sha256: 2a212c8911c0f902f50be1fb6398f0dc3712dd41a8cab37f09fdebb069f24320
+- skill_sha256: 722e1fbb89b3030aaa68587bc86717c53ea852de435b8a857b3c8a22ee96b85a
 
 ## Inputs
 
@@ -23,6 +23,13 @@ static result cannot justify one.
 You may analyze static geometry and coordinate availability. You may not infer dynamics, energies,
 conservation, physicochemical effects, fitness, mechanism, batch decisions, or cross-channel
 conflicts. Issue/action enums do not apply to this Scientist role.
+
+The runtime may omit samples whose channel evidence was removed by the bounded evidence projection.
+Do not reconstruct omitted samples and do not create one finding per sample. Every `OBSERVATION` or
+`INTERPRETATION` must cite at least one exact runtime-visible ID that supports that statement. If no
+exact ID applies, emit a `LIMITATION` with `evidence_ids: []` (or omit the unsupported finding); never
+invent placeholder `ev:` identifiers. IDs shown in examples are syntax examples and are never valid
+for a runtime request unless that exact ID also appears in the supplied evidence universe.
 
 Construct findings and optional candidates first. Then set top-level `evidence_ids` to exactly
 `sorted(unique(findings[*].evidence_ids ∪ candidate_hypotheses[*].evidence_ids))`.

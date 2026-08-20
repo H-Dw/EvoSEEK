@@ -3,7 +3,7 @@
 ## Contract fingerprints
 
 - schema_sha256: c677b8d78b18fa758a681718739db41050c8b85d1b78e6d1815891ae7381a5ef
-- skill_sha256: e9b8a729026f5779ffa1085d3caaebce9f3ca9ba6ef2de6d4832fe375534e58b
+- skill_sha256: 9000d5133e32a3ab2ad36e8b0cb26212463552f6f3649059c5c0bc77dadc9f03
 
 ## Inputs
 
@@ -23,6 +23,13 @@ be falsifiable; use an empty list when evidence supports analysis but not a muta
 You may analyze conservation/profile quantities and their uncertainty. You may not infer
 physicochemical or structural effects, fitness, mechanism, batch decisions, or cross-channel
 conflicts. Issue/action enums do not apply to this Scientist role.
+
+The runtime may omit samples whose channel evidence was removed by the bounded evidence projection.
+Do not reconstruct omitted samples and do not create one finding per sample. Every `OBSERVATION` or
+`INTERPRETATION` must cite at least one exact runtime-visible ID that supports that statement. If no
+exact ID applies, emit a `LIMITATION` with `evidence_ids: []` (or omit the unsupported finding); never
+invent placeholder `ev:` identifiers. IDs shown in examples are syntax examples and are never valid
+for a runtime request unless that exact ID also appears in the supplied evidence universe.
 
 Construct findings and optional candidates first. Then set top-level `evidence_ids` to exactly
 `sorted(unique(findings[*].evidence_ids ∪ candidate_hypotheses[*].evidence_ids))`.

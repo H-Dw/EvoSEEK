@@ -13,6 +13,7 @@ from typing import Any, ClassVar, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+import httpx
 import numpy as np
 
 from fitness_agents.config import (
@@ -86,6 +87,37 @@ class UrllibJSONTransport:
                 headers=dict(error.headers.items()) if error.headers else {},
                 payload=parsed,
             )
+
+
+class HttpxJSONTransport:
+    """Proxy-aware JSON transport for remote RAG inference endpoints."""
+
+    def post_json(
+        self,
+        endpoint: str,
+        *,
+        headers: Mapping[str, str],
+        payload: Mapping[str, Any],
+        timeout_seconds: float,
+    ) -> HTTPJSONResponse:
+        try:
+            response = httpx.post(
+                endpoint,
+                headers=dict(headers),
+                json=dict(payload),
+                timeout=timeout_seconds,
+            )
+        except httpx.RequestError as error:
+            raise URLError(str(error)) from error
+        try:
+            parsed = response.json() if response.content else {}
+        except json.JSONDecodeError:
+            parsed = {}
+        return HTTPJSONResponse(
+            status_code=response.status_code,
+            headers=dict(response.headers),
+            payload=parsed,
+        )
 
 
 def _resolve_api_key(reference: str) -> tuple[str | None, str]:
@@ -246,7 +278,7 @@ class _RemoteAPIBackend(ABC):
         self._api_key, self.api_key_source = _resolve_api_key(api_key_reference)
         self.timeout_seconds = timeout_seconds
         self.max_retries = max_retries
-        self.transport = transport or UrllibJSONTransport()
+        self.transport = transport or HttpxJSONTransport()
         self._sleep = sleep
 
     def _headers(self) -> dict[str, str]:

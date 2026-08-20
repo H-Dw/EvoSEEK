@@ -20,6 +20,10 @@ from fitness_agents.contracts.schemas import SelectionRecord
 
 LOGGER = logging.getLogger("fitness_agents.progress")
 
+_ATOMIC_REPLACE_ATTEMPTS = 8
+_ATOMIC_REPLACE_INITIAL_DELAY_S = 0.025
+_ATOMIC_REPLACE_MAX_DELAY_S = 0.5
+
 
 def _jsonable(value: Any) -> Any:
     if isinstance(value, BaseModel):
@@ -41,6 +45,28 @@ def _jsonable(value: Any) -> Any:
 
 def _is_status_scalar(value: Any) -> bool:
     return value is None or isinstance(value, (str, bool, int, float, np.generic))
+
+
+def _atomic_replace_with_retry(source: Path, target: Path) -> None:
+    """Replace ``target`` atomically, tolerating brief Windows/WSL reader locks.
+
+    Files below ``/mnt/*`` can be opened concurrently by Windows indexers or
+    monitoring processes.  In that case an otherwise valid ``Path.replace`` may
+    fail transiently with ``PermissionError``.  Keep the atomic temp-file
+    protocol and retry only that narrow error; persistent permission failures
+    are still raised to the caller.
+    """
+
+    delay_s = _ATOMIC_REPLACE_INITIAL_DELAY_S
+    for attempt in range(1, _ATOMIC_REPLACE_ATTEMPTS + 1):
+        try:
+            source.replace(target)
+            return
+        except PermissionError:
+            if attempt == _ATOMIC_REPLACE_ATTEMPTS:
+                raise
+            time.sleep(delay_s)
+            delay_s = min(delay_s * 2, _ATOMIC_REPLACE_MAX_DELAY_S)
 
 
 def _format_progress_line(message: str, payload: Mapping[str, Any]) -> str:
@@ -118,7 +144,7 @@ class JsonArtifactWriter:
             encoded = json.dumps(_jsonable(record), ensure_ascii=False, indent=2, sort_keys=True)
             temporary = self.status_path.with_suffix(".json.tmp")
             temporary.write_text(encoded + "\n", encoding="utf-8")
-            temporary.replace(self.status_path)
+            _atomic_replace_with_retry(temporary, self.status_path)
         return self.status_path
 
     def heartbeat(self, message: str, *, log: bool = True, **payload: Any) -> None:
@@ -195,7 +221,7 @@ class JsonArtifactWriter:
                 json.dumps(records, ensure_ascii=False, indent=2, sort_keys=True),
                 encoding="utf-8",
             )
-            temporary.replace(target)
+            _atomic_replace_with_retry(temporary, target)
 
     def write_json(self, relative_path: str, payload: Any) -> Path:
         target = self.run_dir / relative_path

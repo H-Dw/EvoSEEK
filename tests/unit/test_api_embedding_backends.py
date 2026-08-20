@@ -21,11 +21,38 @@ from fitness_agents.local_knowledge.api_backends import (
     DashScopeEmbeddingBackend,
     DashScopeRerankerBackend,
     HTTPJSONResponse,
+    HttpxJSONTransport,
     JinaEmbeddingBackend,
     JinaRerankerBackend,
     OpenAICompatibleEmbeddingBackend,
     build_embedding_backend,
 )
+
+
+def test_httpx_transport_preserves_json_status_and_headers(monkeypatch) -> None:
+    class Response:
+        def __init__(self) -> None:
+            self.status_code = 429
+            self.content = b'{"code":"Throttled"}'
+            self.headers = {"Retry-After": "2"}
+
+        @staticmethod
+        def json():
+            return {"code": "Throttled"}
+
+    monkeypatch.setattr(
+        "fitness_agents.local_knowledge.api_backends.httpx.post",
+        lambda *args, **kwargs: Response(),
+    )
+    response = HttpxJSONTransport().post_json(
+        "https://example.test/inference",
+        headers={"Authorization": "Bearer redacted"},
+        payload={"input": ["test"]},
+        timeout_seconds=10,
+    )
+    assert response.status_code == 429
+    assert response.headers["Retry-After"] == "2"
+    assert response.payload == {"code": "Throttled"}
 
 
 class _FakeTransport:

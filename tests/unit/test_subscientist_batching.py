@@ -156,6 +156,105 @@ def test_subscientist_sample_projection_bounds_a_64_sample_prompt() -> None:
     assert max(batch_chars) < full_chars * 0.25
 
 
+def test_subscientist_batches_only_samples_with_role_visible_evidence() -> None:
+    visible_observations = tuple(
+        {
+            "sample_id": f"sample:{index}",
+            "variant_id": f"sample:{index}",
+            "mutation_notation": f"V39{chr(65 + index)}",
+            "sequence_sha256": str(index) * 64,
+            "residues_by_position": {"39": chr(65 + index)},
+            "evidence_ids": (f"ev:pc:{index}",) if index < 2 else (),
+            "feature_values": (
+                {f"ev:pc:{index}": {"charge_delta": index}} if index < 2 else {}
+            ),
+        }
+        for index in range(10)
+    )
+    context = ChannelEvidenceInput.model_validate(
+        {
+            **_context(2).model_dump(mode="json"),
+            "visible_observations": visible_observations,
+        }
+    )
+
+    sample_ids = subscientist_module._context_sample_ids(context)
+    projected = subscientist_module._batch_context(context, sample_ids=sample_ids)
+
+    assert sample_ids == ("sample:0", "sample:1")
+    assert [item.sample_id for item in projected.visible_observations] == [
+        "sample:0",
+        "sample:1",
+    ]
+    assert len(projected.evidence) == 2
+
+
+def test_subscientist_projection_expands_sample_and_variant_aliases() -> None:
+    context = ChannelEvidenceInput.model_validate(
+        {
+            **_context(1).model_dump(mode="json"),
+            "visible_observations": [
+                {
+                    "sample_id": "row:0",
+                    "variant_id": "sample:0",
+                    "mutation_notation": "V39A",
+                    "sequence_sha256": "a" * 64,
+                    "residues_by_position": {"39": "A"},
+                    "evidence_ids": ("ev:pc:0",),
+                    "feature_values": {"ev:pc:0": {"charge_delta": 0}},
+                }
+            ],
+        }
+    )
+
+    sample_ids = subscientist_module._context_sample_ids(context)
+    projected = subscientist_module._batch_context(context, sample_ids=sample_ids)
+
+    assert sample_ids == ("row:0",)
+    assert projected.visible_observations[0].variant_id == "sample:0"
+    assert projected.evidence[0]["evidence_id"] == "ev:pc:0"
+
+
+def test_subscientist_batch_projection_honors_pack_metadata_variant_id() -> None:
+    context = _context(2).model_copy(
+        update={
+            "kg_packs": (
+                {
+                    "operator": "query_physchem_delta",
+                    "metadata": {"variant_id": "sample:0"},
+                    "evidence": [
+                        {
+                            "evidence_id": "ev:pack:0",
+                            "channel": "physchem",
+                            "statement": "Sample 0 descriptor delta.",
+                        }
+                    ],
+                },
+                {
+                    "operator": "query_physchem_delta",
+                    "metadata": {"variant_id": "sample:1"},
+                    "evidence": [
+                        {
+                            "evidence_id": "ev:pack:1",
+                            "channel": "physchem",
+                            "statement": "Sample 1 descriptor delta.",
+                        }
+                    ],
+                },
+            )
+        }
+    )
+
+    projected = subscientist_module._batch_context(
+        context,
+        sample_ids=("sample:0",),
+    )
+
+    assert len(projected.kg_packs) == 1
+    assert projected.kg_packs[0]["metadata"]["variant_id"] == "sample:0"
+    assert projected.visible_evidence_ids == frozenset({"ev:pc:0", "ev:pack:0"})
+
+
 def test_non_limitation_finding_requires_a_visible_evidence_link() -> None:
     payload = ChannelAnalysisOutput(
         analysis_id="analysis:uncited",
@@ -179,4 +278,7 @@ def test_non_limitation_finding_requires_a_visible_evidence_link() -> None:
     with pytest.raises(SemanticOutputValidationError) as captured:
         validate_channel_hypothesis(payload.model_dump(mode="json"), context=_context(1))
 
-    assert captured.value.paths == ("findings.0.evidence_ids",)
+    assert captured.value.paths == (
+        "findings.0.kind",
+        "findings.0.evidence_ids",
+    )

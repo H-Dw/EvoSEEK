@@ -55,6 +55,33 @@ def test_status_json_tracks_heartbeat_without_trace_noise(tmp_path: Path) -> Non
     assert "audit-only" in trace
 
 
+def test_status_json_retries_transient_atomic_replace_permission_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    writer = JsonArtifactWriter(tmp_path, "transient-replace-run")
+    original_replace = Path.replace
+    attempts = 0
+
+    def flaky_replace(source: Path, target: Path) -> Path:
+        nonlocal attempts
+        if source.name == "status.json.tmp" and attempts == 0:
+            attempts += 1
+            raise PermissionError("simulated Windows reader lock")
+        attempts += 1
+        return original_replace(source, target)
+
+    monkeypatch.setattr(Path, "replace", flaky_replace)
+    monkeypatch.setattr("fitness_agents.utils.artifacts.time.sleep", lambda _: None)
+
+    writer.write_status(message="retry completed", phase="finalized", round_id=1)
+
+    status = json.loads(writer.status_path.read_text(encoding="utf-8"))
+    assert attempts == 2
+    assert status["message"] == "retry completed"
+    assert status["phase"] == "finalized"
+
+
 def test_campaign_emits_started_completed_progress_events(config_factory) -> None:
     config = config_factory(
         mode="knowledge_agent",
