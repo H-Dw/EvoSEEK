@@ -131,8 +131,15 @@ def discover_local_files(
 
 
 def _stable_document_id(file_hash: str, path: Path) -> str:
-    payload = f"{path.resolve()}|{file_hash}"
-    return f"localdoc:{hashlib.sha256(payload.encode()).hexdigest()[:24]}"
+    del file_hash  # content integrity remains a separate field, not an identifier contract
+    resolved = path.resolve()
+
+    def slug(value: str) -> str:
+        cleaned = re.sub(r"[^A-Za-z0-9]+", "-", value).strip("-").upper()
+        return (cleaned or "ITEM")[:12]
+
+    parents = [slug(item) for item in resolved.parts[-3:-1]]
+    return "localdoc:DOC-" + "-".join((*parents, slug(resolved.stem)))
 
 
 class AutoLocalParser:

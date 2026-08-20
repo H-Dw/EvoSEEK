@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import hashlib
-import json
+import re
+import threading
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -33,10 +33,38 @@ class Modality(str, Enum):
     ONTOLOGY = "ontology"
 
 
+_SEMANTIC_ID_LOCK = threading.RLock()
+_SEMANTIC_ID_COLLISIONS: dict[str, dict[str, str]] = {}
+
+
 def stable_record_id(prefix: str, *parts: Any) -> str:
-    payload = json.dumps(parts, sort_keys=True, default=str, separators=(",", ":"))
-    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:20]
-    return f"{prefix}:{digest}"
+    """Return a deterministic readable ID without a content-hash contract."""
+
+    def token(value: Any) -> str:
+        if isinstance(value, (list, tuple, set)):
+            raw = "-".join(token(item) for item in value)
+        elif isinstance(value, dict):
+            raw = "-".join(
+                f"{token(key)}-{token(item)}" for key, item in sorted(value.items())
+            )
+        else:
+            raw = str(value)
+        cleaned = re.sub(r"[^A-Za-z0-9]+", "-", raw).strip("-").upper() or "ITEM"
+        if len(cleaned) <= 18:
+            return cleaned
+        return f"{cleaned[:7]}-{cleaned[-7:]}-L{len(cleaned):03d}"
+
+    label = token(prefix)[:12]
+    semantic_parts = "-".join(token(item) for item in parts)
+    base = f"{label}:{semantic_parts or 'ITEM'}"
+    canonical = repr(parts)
+    with _SEMANTIC_ID_LOCK:
+        bucket = _SEMANTIC_ID_COLLISIONS.setdefault(base, {})
+        if canonical in bucket:
+            return bucket[canonical]
+        identifier = base if not bucket else f"{base}-N{len(bucket) + 1:02d}"
+        bucket[canonical] = identifier
+        return identifier
 
 
 @dataclass(frozen=True)

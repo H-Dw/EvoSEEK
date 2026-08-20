@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import re
 from collections.abc import Callable
 
@@ -83,11 +82,11 @@ def _overlap_start(
 
 
 def _chunk_id(document: ParsedDocument, start: int, end: int, text: str) -> str:
-    payload = (
-        f"{document.file_hash}|{start}|{end}|{CHUNKER_VERSION}|"
-        f"{hashlib.sha256(text.encode('utf-8')).hexdigest()}"
-    )
-    return f"chunk:{hashlib.sha256(payload.encode()).hexdigest()[:24]}"
+    del text
+    document_label = re.sub(
+        r"[^A-Za-z0-9]+", "-", document.document_id.rsplit(":", 1)[-1]
+    ).strip("-")[:18]
+    return f"chunk:CHK-{document_label}-{start:06X}-{end - start:05X}"
 
 
 def chunk_document(
