@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import heapq
 from collections.abc import Callable, Sequence
 
 from fitness_agents.contracts.schemas import CampaignState, Evidence, Hypothesis, Variant
@@ -19,11 +21,32 @@ def _hypothesis_matches(
     )
 
 
-class EnumeratingCandidateGenerator:
-    name = "enumerating"
+def _proposal_key(
+    variant: Variant,
+    *,
+    state: CampaignState,
+    namespace: str,
+) -> bytes:
+    """Return a label-blind, seed/fold/round-specific ordering key."""
 
-    def __init__(self, position_to_index: dict[int, int] | None = None) -> None:
+    material = (
+        f"candidate-proposal:v1|{namespace}|seed={state.seed}|"
+        f"round={state.round_id}|{variant.variant_id}"
+    )
+    return hashlib.sha256(material.encode("utf-8")).digest()
+
+
+class EnumeratingCandidateGenerator:
+    name = "stable_uniform"
+
+    def __init__(
+        self,
+        position_to_index: dict[int, int] | None = None,
+        *,
+        sampling_namespace: str = "closed_pool",
+    ) -> None:
         self.position_to_index = dict(position_to_index or {})
+        self.sampling_namespace = sampling_namespace
 
     def generate(
         self,
@@ -33,17 +56,31 @@ class EnumeratingCandidateGenerator:
         evidence: dict[str, list[Evidence]],
         limit: int,
     ) -> list[Variant]:
-        ranked = list(candidates)
         if limit <= 0:
-            return ranked
-        return ranked[: max(limit, 1)]
+            raise ValueError("closed-pool candidate generation requires a positive limit")
+        target = min(limit, len(candidates))
+        return heapq.nsmallest(
+            target,
+            candidates,
+            key=lambda item: _proposal_key(
+                item,
+                state=state,
+                namespace=self.sampling_namespace,
+            ),
+        )
 
 
 class HypothesisCandidateGenerator:
     name = "hypothesis_filtered"
 
-    def __init__(self, position_to_index: dict[int, int] | None = None) -> None:
+    def __init__(
+        self,
+        position_to_index: dict[int, int] | None = None,
+        *,
+        sampling_namespace: str = "closed_pool",
+    ) -> None:
         self.position_to_index = dict(position_to_index or {})
+        self.sampling_namespace = sampling_namespace
 
     def generate(
         self,
@@ -57,20 +94,30 @@ class HypothesisCandidateGenerator:
             candidates,
             key=lambda item: (
                 _hypothesis_matches(item, hypothesis, self.position_to_index),
-                item.variant_id,
+                _proposal_key(
+                    item,
+                    state=state,
+                    namespace=self.sampling_namespace,
+                ),
             ),
             reverse=True,
         )
         if limit <= 0:
-            return ranked
+            raise ValueError("closed-pool candidate generation requires a positive limit")
         return ranked[: max(limit, 1)]
 
 
 class KnowledgeCandidateGenerator:
     name = "knowledge_filtered"
 
-    def __init__(self, position_to_index: dict[int, int] | None = None) -> None:
+    def __init__(
+        self,
+        position_to_index: dict[int, int] | None = None,
+        *,
+        sampling_namespace: str = "closed_pool",
+    ) -> None:
         self.position_to_index = dict(position_to_index or {})
+        self.sampling_namespace = sampling_namespace
 
     def generate(
         self,
@@ -101,12 +148,16 @@ class KnowledgeCandidateGenerator:
             key=lambda item: (
                 _hypothesis_matches(item, hypothesis, self.position_to_index),
                 evidence_score(item),
-                item.variant_id,
+                _proposal_key(
+                    item,
+                    state=state,
+                    namespace=self.sampling_namespace,
+                ),
             ),
             reverse=True,
         )
         if limit <= 0:
-            return ranked
+            raise ValueError("closed-pool candidate generation requires a positive limit")
         return ranked[: max(limit, 1)]
 
 
@@ -125,10 +176,16 @@ def register_candidate_generator(mode: str, factory: Callable[[], object]) -> No
 
 
 def create_candidate_generator(
-    mode: str, *, position_to_index: dict[int, int] | None = None
+    mode: str,
+    *,
+    position_to_index: dict[int, int] | None = None,
+    sampling_namespace: str = "closed_pool",
 ):
     try:
-        return CANDIDATE_GENERATORS[mode](position_to_index)
+        return CANDIDATE_GENERATORS[mode](
+            position_to_index,
+            sampling_namespace=sampling_namespace,
+        )
     except KeyError as error:
         raise ValueError(
             f"Unknown experiment mode {mode!r}; available={sorted(CANDIDATE_GENERATORS)}"

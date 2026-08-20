@@ -2,10 +2,10 @@ mode: random
 seed: 11
 rounds: 3
 budget_per_round: 16
-candidate_limit: 0
+candidate_limit: 32
 acquisition: random
 ucb_beta: 1.5
-diversity_lambda: 0.10
+diversity_lambda: 0.0
 task_config: configs/task/gb1_binding.yaml
 model_config: configs/model/kermut.yaml
 knowledge_config: configs/knowledge/gb1.yaml
@@ -14,4 +14,6 @@ llm_provider: mock
 knowledge_enabled: false
 score_shuffle: false
 evidence_deletion: false
+kg_interaction:
+  enabled: false
 

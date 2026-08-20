@@ -2,7 +2,7 @@ mode: knowledge_agent
 seed: 11
 rounds: 3
 budget_per_round: 16
-candidate_limit: 256
+candidate_limit: 32
 # Legacy policy fields remain available to baseline drivers. The active-learning driver below
 # delegates batch selection to active_learning.acquisition.
 acquisition: greedy

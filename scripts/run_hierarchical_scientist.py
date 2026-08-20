@@ -168,6 +168,7 @@ class HierarchicalJob:
     seed: int
     expected_rounds: int
     expected_budget: int
+    expected_candidate_limit: int
     command: tuple[str, ...]
 
 
@@ -458,6 +459,7 @@ def audit_hierarchical_run(
     expected_fold: int,
     expected_rounds: int,
     expected_budget: int,
+    expected_candidate_limit: int,
 ) -> dict[str, Any]:
     run_dir = Path(summary["run_dir"])
     config_path = run_dir / "config.json"
@@ -545,8 +547,11 @@ def audit_hierarchical_run(
         _check("rounds_match_protocol", int(config.get("rounds") or 0) == expected_rounds, config.get("rounds")),
         _check(
             "candidate_pool_matches_protocol",
-            int(config.get("candidate_limit") or 0) == 64,
-            config.get("candidate_limit"),
+            int(config.get("candidate_limit") or 0) == expected_candidate_limit,
+            {
+                "actual": config.get("candidate_limit"),
+                "expected": expected_candidate_limit,
+            },
         ),
         _check(
             "budget_matches_protocol",
@@ -667,6 +672,20 @@ def audit_hierarchical_run(
                     scope.get("approved_batch_size"),
                 ),
                 _check(
+                    f"{round_dir.name}_candidate_scoring_bound",
+                    int(scope.get("planned_candidate_count") or 0)
+                    == expected_candidate_limit
+                    and int(scope.get("round_candidate_count") or 0)
+                    <= expected_candidate_limit
+                    and int(scope.get("acquisition_prediction_count") or 0)
+                    <= expected_candidate_limit
+                    and scope.get(
+                        "acquisition_predictions_within_round_candidate_set"
+                    )
+                    is True,
+                    scope,
+                ),
+                _check(
                     f"{round_dir.name}_dry_validation_selected_only",
                     scope.get("dry_validation_scope")
                     == "draft_selected_candidates_only"
@@ -776,6 +795,7 @@ def _build_jobs(
     seed: int,
     expected_rounds: int,
     expected_budget: int,
+    expected_candidate_limit: int,
     output_root: Path,
     python_executable: str,
     placeholder_predictor: bool = False,
@@ -805,6 +825,8 @@ def _build_jobs(
                 str(expected_rounds),
                 "--worker-max-tokens",
                 str(max_tokens),
+                "--worker-candidate-limit",
+                str(expected_candidate_limit),
             )
             if placeholder_predictor:
                 command = (*command, "--worker-placeholder-predictor")
@@ -820,6 +842,7 @@ def _build_jobs(
                     seed=seed,
                     expected_rounds=expected_rounds,
                     expected_budget=expected_budget,
+                    expected_candidate_limit=expected_candidate_limit,
                     command=command,
                 )
             )
@@ -873,6 +896,7 @@ def _run_one_job(
                 expected_fold=job.fold_index,
                 expected_rounds=job.expected_rounds,
                 expected_budget=job.expected_budget,
+                expected_candidate_limit=job.expected_candidate_limit,
             )
         except (KeyError, TypeError, ValueError, json.JSONDecodeError, OSError) as error:
             return HierarchicalJobResult(
@@ -1017,6 +1041,12 @@ def _worker(args: argparse.Namespace) -> None:
         if args.worker_rounds < 1:
             raise SystemExit("Worker rounds must be positive")
         config = replace(config, rounds=args.worker_rounds)
+    if args.worker_candidate_limit is not None:
+        if args.worker_candidate_limit < config.budget_per_round:
+            raise SystemExit(
+                "Worker candidate limit must be at least budget_per_round"
+            )
+        config = replace(config, candidate_limit=args.worker_candidate_limit)
     if args.worker_max_tokens is not None:
         try:
             config = apply_token_budget(config, args.worker_max_tokens)
@@ -1076,6 +1106,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int)
     parser.add_argument("--rounds", type=int, help="Override campaign rounds")
     parser.add_argument(
+        "--candidate-limit",
+        type=int,
+        help="Override the config-driven per-round candidate scoring budget",
+    )
+    parser.add_argument(
         "--max-tokens",
         type=int,
         default=FORMAL_MAX_TOKENS,
@@ -1112,6 +1147,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--worker-condition", help=argparse.SUPPRESS)
     parser.add_argument("--worker-output-root", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--worker-rounds", type=int, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--worker-candidate-limit", type=int, help=argparse.SUPPRESS
+    )
     parser.add_argument("--worker-max-tokens", type=int, help=argparse.SUPPRESS)
     parser.add_argument(
         "--worker-placeholder-predictor", action="store_true", help=argparse.SUPPRESS
@@ -1143,9 +1181,12 @@ def main() -> None:
             require_prebuilt_rag_corpus(conditions)
         except ValueError as error:
             raise SystemExit(str(error)) from error
-    config = validate_formal_fitness_configuration(
-        apply_token_budget(load_experiment_config(config_path), max_tokens)
-    )
+    config = apply_token_budget(load_experiment_config(config_path), max_tokens)
+    if args.candidate_limit is not None:
+        if args.candidate_limit < config.budget_per_round:
+            raise SystemExit("--candidate-limit must be at least budget_per_round")
+        config = replace(config, candidate_limit=args.candidate_limit)
+    config = validate_formal_fitness_configuration(config)
     expected_rounds = config.rounds if args.rounds is None else args.rounds
     if expected_rounds < 1:
         raise SystemExit("--rounds must be positive")
@@ -1172,6 +1213,7 @@ def main() -> None:
         seed=seed,
         expected_rounds=expected_rounds,
         expected_budget=config.budget_per_round,
+        expected_candidate_limit=config.candidate_limit,
         output_root=(output_dir / "runs").resolve(),
         python_executable=sys.executable,
         placeholder_predictor=False,

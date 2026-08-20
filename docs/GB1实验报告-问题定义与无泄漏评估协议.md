@@ -123,6 +123,62 @@ KG 负责知识表示、查询和跨轮持久化；LangGraph 负责节点调度�
 
 Agentic RAG 与 Deep Research 涵盖的文献发现、反证搜索和引用核验能力由上述离线流程承担。[12] 同步实验循环采用本地 RAG，可固定语料版本、查询预算和延迟，保证不同折与消融条件读取同一知识快照，并降低联网内容变化、提示注入和来源状态漂移。新增外部知识经过审核后发布为下一版本地语料，再进入后续实验。
 
+## 4. 主要结果、对照实验与消融矩阵
+
+### 4.1 结果口径与版面结构
+
+本节先录入 seed 42、fold 0 至 2 的先导结果，Qwen RAG 条件在每折均按 GB1-AL96 协议完成 96 次查询。`knowledge_agent_qwen_rag` 表示 DeepSeek Agent 使用 Qwen embedding/reranker 的本地 RAG 路线；本次结果包导入 `knowledge_agent` 与 `knowledge_agent_rag`，其余基线按相同协议、fold、seed、查询预算和 assignment hash 从 SDK baseline 对齐。[I17]
+
+正式结果以 `best-seen@96` 衡量固定预算内发现的最高 fitness，以末轮 batch mean 衡量推荐批次的整体质量，并同步报告 top-k hit/recall、regret、AULC 与运行完成率。Surrogate Spearman 只反映预测排序，不作为定向进化发现能力的主指标。
+
+> **图 2（结果位）**：五种方法的逐轮 best-seen 与 batch mean 曲线。每个 fold 保留独立轨迹，完整五折和多 seed 后再绘制配对均值与置信区间。
+
+### 4.2 先导主结果
+
+| 方法 | Fold 0 | Fold 1 | Fold 2 | 三折均值 | 完成率 |
+|---|---:|---:|---:|---:|---:|
+| `knowledge_agent_qwen_rag` | 5.23 | 6.04 | 5.23 | **5.50** | 3/3 |
+| `knowledge_agent`（无 RAG） | **7.23** | 5.77 | 5.23 | **6.08** | 3/3 |
+| `fitness_direct` | 5.44 | 5.77 | 5.44 | **5.55** | 3/3 |
+| `random` | 4.07 | 4.07 | 4.07 | **4.07** | 3/3 |
+| `llm_agent` | 5.77 | 运行失败 | 运行失败 | NA | 1/3 |
+
+表中数值为查询预算用尽时的 best-seen。Qwen RAG 在三折中均超过随机选择，平均提高 1.43；相对 `fitness_direct` 为 1 胜 2 负，均值低 0.05；相对无 RAG 的 `knowledge_agent` 为 1 胜、1 平、1 负，均值低 0.58。`llm_agent` 仅 fold 0 可比，该折比 Qwen RAG 高 0.54。fold 1 和 2 在首轮 `llm_hypothesis` 阶段失败，计入完成率，不进入 fitness 均值。[I17]
+
+### 4.3 折间差异与指标解释
+
+Qwen RAG 的末轮 batch mean 依次为 1.55、1.81 和 2.17，三折均值为 1.84。随机选择接近 0，`fitness_direct` 为 2.76 至 2.98。`fitness_direct` 采用模型 greedy 排序，较高的 batch mean 反映了更集中的 exploitation。fold 1 是 Qwen RAG 表现最好的一折，best-seen 为 6.04，top-k hit 为 1、recall 为 0.5、regret 为 0；fold 0 未命中 top-k；fold 2 与无 RAG 条件取得相同 best-seen，末轮 batch mean 从 1.12 提升至 2.17。
+
+当前结果支持 Qwen RAG 优于随机选择，尚未显示其相对无 RAG 知识智能体或 Kermut 直接推荐的总体优势。fold 0 中随机方法的 surrogate Spearman 为 0.31，Qwen RAG 为 0.21，说明更均匀的采样可提高全局相关性，却未同步提高已发现的最高 fitness。最终报告需同时呈现发现指标、批次分布与预测指标。
+
+> **图 3（结果位）**：按 fold 绘制 RAG 相对无 RAG、`fitness_direct` 和 `random` 的配对差值，分别展示 best-seen、末轮 batch mean、top-k 指标与运行完成率。
+
+### 4.4 对照与消融矩阵
+
+| 实验目的 | 对照条件 | 实验条件 | 主要变量 | 当前状态 |
+|---|---|---|---|---|
+| 随机下界 | `random` | `knowledge_agent_qwen_rag` | 完整知识智能体选择策略 | 3 折完成 |
+| 预测模型基线 | `fitness_direct` | `knowledge_agent_qwen_rag` | Kermut greedy 与 Agent-UQ | 3 折完成 |
+| LLM 基线 | `llm_agent` | `knowledge_agent_qwen_rag` | KG、RAG 与反馈闭环 | 仅 fold 0 可比 |
+| RAG 增量 | `knowledge_agent` | `knowledge_agent_qwen_rag` | 本地 RAG 检索 | 3 折完成 |
+| 分层 Agent | 单 Scientist | Scientist、Critic、Sub-Agent | 分层提案与审查 | 待补同折实验 |
+| 反馈闭环 | 关闭 ReThink | 开启 ReThink | 干湿验证反馈写回 KG | 待补同折实验 |
+| 不确定性 | 关闭不确定性项 | Agent-UQ | coverage uncertainty | 待补同折实验 |
+| 主动学习 | Agent-UQ | calibrated posterior 与 hybrid batch | 选择驱动器 | 待补同折实验 |
+| 特征知识 | 无特征工具 | 理化、MSA、结构及联合路线 | KG 特征证据通道 | 待补单通道与联合消融 |
+
+正式对照将扩展到完整五折和至少三个配对 seed。每组固定 assignment hash、初始观测、查询预算与候选池，报告 paired delta、置信区间、完成率和失败类型。该矩阵把基线性能、知识增益与各模块贡献分开呈现，避免用单次最优值替代组件归因。[I7][I12][I17]
+
+## 5. 局限、未来工作及来源声明
+
+当前实验采用受限候选池筛选：系统只在 GB1 四个预设位点组合突变，并从给定候选中选取序列。该设置未覆盖开放序列设计与实际实验约束。评估仅包含 GB1 binding assay，缺少其他结合靶标和蛋白质性质数据，现有结果尚不能支持框架泛化性结论。[I1][I5][I16]
+
+本地知识库的主题和规模有限，后续需比较不同语料范围与知识类型对假设质量和实验收益的影响。Scientist、Critic 和 ReThink 目前统一使用 DeepSeek V4 Flash，实验结果包含单一模型效应。固定的本地 RAG 快照让不同 LLM 在同一知识和预算下接受比较，同时降低运行期外部搜索的来源漂移和安全风险。当前引用检查只验证标识与证据闭包，后续需加入文献真实性与主张支持关系核验。[I10][I11][I16]
+
+ReThink 已接收 dry prediction 与 wet observation 并将反思写回 KG，现有干湿权重和衰减系数仍需系统校准。Dry validation 目前只使用 Kermut，后续将评估校准后的模型集成。保守性通道复用 Protenix 预计算 A3M，仅生成单点 MSA profile；结构通道提取静态接触、溶剂可及性、粗粒度主链构象及氢键和盐桥候选。后续可接入 Rosetta 能量评估与突变后结构松弛，检验其对 KG 推理和候选选择的增益。[I7][I14][I16]
+
+本项目的知识调研和代码编写使用 GPT-5.6、Grok-4.6 与 Kimi K3。报告以仓库代码、配置和可复现运行记录为依据，文献性陈述保留来源。
+
 ## 参考文献
 
 [1] Wu, N. C., Dai, L., Olson, C. A., Lloyd-Smith, J. O., & Sun, R. (2016). *Adaptation in protein fitness landscapes is facilitated by indirect paths*. **eLife, 5**, e16965. [https://doi.org/10.7554/eLife.16965](https://doi.org/10.7554/eLife.16965)
@@ -182,3 +238,7 @@ Agentic RAG 与 Deep Research 涵盖的文献发现、反证搜索和引用核�
 [I14] [KG 特征工具说明](kg_feature_tools.md)、[GB1 特征参数审计](gb1_feature_tool_parameter_literature_audit.md)、[三通道推理配置](../configs/knowledge/gb1_reasoning_routes.yaml)、[1PGB 资源与位点映射](../configs/task/gb1_binding_reasoning_routes.yaml)、[MSA Provider](../src/fitness_agents/protein_features/msa.py)与[结构 Provider](../src/fitness_agents/protein_features/structure.py)。
 
 [I15] [Agent-UQ 覆盖不确定性](../src/fitness_agents/mutation/uncertainty.py)、[Kermut 后验](../src/fitness_agents/models/backends/kermut.py)、[主动学习 posterior 校准](../src/fitness_agents/active_learning/posterior.py)、[知识证据校准](../src/fitness_agents/protein_features/calibration.py)与[HybridBatch 采集](../src/fitness_agents/active_learning/acquisition.py)。
+
+[I16] [开放序列设计规划](open-sequence-directed-evolution-and-interactive-platform-plan.md)、[分层实验配置](../configs/experiments/hierarchical_scientist.deepseek.yaml)、[当前 DeepSeek 配置](../configs/llm/deepseek.yaml)、[闭环编排器](../src/fitness_agents/loop/orchestrator.py)、[结构 Provider](../src/fitness_agents/protein_features/structure.py)与[MSA Provider](../src/fitness_agents/protein_features/msa.py)。
+
+[I17] 本节先导数值来自本轮提供的 seed 42 三折运行汇总；程序侧的同折配对逻辑见[报告聚合器](../src/fitness_agents/reporting/aggregate.py)与[基线运行脚本](../scripts/run_agent_baselines.py)，当前 Qwen RAG 路线定义见[实验配置](../configs/experiments/knowledge_agent_qwen_al96.yaml)与[主循环评估审计](kg-llm-validation-main-loop-implementation-audit.md)。

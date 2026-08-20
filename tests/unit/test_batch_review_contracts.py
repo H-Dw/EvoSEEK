@@ -341,8 +341,8 @@ def test_truncated_strong_pool_reserves_hypothesis_negative_matched_controls() -
         position_to_index={39: 0, 40: 1, 41: 2, 54: 3},
         strong_threshold=0.75,
         required_controls=2,
+        candidate_limit=len(strong),
+        reserve_multiplier=1,
     )
-    assert [item.variant_id for item in reserved[: len(strong)]] == [
-        item.variant_id for item in strong
-    ]
+    assert len(reserved) == len(strong)
     assert len([item for item in reserved if item.variant_id.startswith("control:")]) >= 2

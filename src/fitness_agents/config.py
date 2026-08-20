@@ -9,7 +9,6 @@ import yaml
 
 from fitness_agents.contracts.capabilities import PredictorCapabilities
 
-DEFAULT_CANDIDATE_LIMIT = 64
 REMOVED_SDK_LLM_KEYS = frozenset(
     {"agents_sdk", "sdk_tracing_enabled", "sdk_max_turns", "sdk_model_retries"}
 )
@@ -687,6 +686,7 @@ class AgentQuotaAllocationConfig:
     coverage_exploration: int = 3
     matched_control: int = 2
     strong_hypothesis_threshold: float = 0.75
+    matched_control_reserve_multiplier: int = 2
 
     def __post_init__(self) -> None:
         if any(value < 0 for value in self.quotas().values()):
@@ -694,6 +694,11 @@ class AgentQuotaAllocationConfig:
         if not 0.0 < self.strong_hypothesis_threshold <= 1.0:
             raise ValueError(
                 "generation.quota_allocation.strong_hypothesis_threshold must be in (0, 1]"
+            )
+        if self.matched_control_reserve_multiplier < 1:
+            raise ValueError(
+                "generation.quota_allocation.matched_control_reserve_multiplier "
+                "must be positive"
             )
 
     def quotas(self) -> dict[str, int]:
@@ -1381,6 +1386,37 @@ class ExperimentConfig:
     structured_kg_snapshot_mode: str = "live_only"
 
     def __post_init__(self) -> None:
+        if self.designer.space != "open_design":
+            if self.candidate_limit < 1:
+                raise ValueError(
+                    "closed-pool campaigns require an explicit positive candidate_limit; "
+                    "full-pool candidate scoring is not allowed"
+                )
+            if self.candidate_limit < self.budget_per_round:
+                raise ValueError(
+                    "candidate_limit must be at least budget_per_round for closed-pool campaigns"
+                )
+        if self.mode in {"random", "fitness_direct"}:
+            if self.knowledge_enabled:
+                raise ValueError(
+                    f"{self.mode} baseline must keep knowledge_enabled=false"
+                )
+            if self.llm.provider != "mock" or self.critic.mode == "remote":
+                raise ValueError(
+                    f"{self.mode} baseline cannot call remote Scientist or Critic APIs"
+                )
+            expected_acquisition = (
+                "random" if self.mode == "random" else "greedy"
+            )
+            if self.acquisition != expected_acquisition:
+                raise ValueError(
+                    f"{self.mode} baseline requires acquisition={expected_acquisition}"
+                )
+            if self.diversity_lambda != 0.0:
+                raise ValueError(
+                    f"{self.mode} baseline requires diversity_lambda=0 so selection is "
+                    "an unmodified random draw or prediction Top-K"
+                )
         selected = self.generation.selection_driver == "active_learning"
         if selected != self.active_learning.enabled:
             raise ValueError(
@@ -1782,7 +1818,7 @@ def load_experiment_config(
         seed=int(raw["seed"]),
         rounds=int(raw["rounds"]),
         budget_per_round=int(raw["budget_per_round"]),
-        candidate_limit=int(raw.get("candidate_limit", DEFAULT_CANDIDATE_LIMIT)),
+        candidate_limit=int(raw["candidate_limit"]),
         acquisition=raw["acquisition"],
         ucb_beta=float(raw.get("ucb_beta", 1.5)),
         diversity_lambda=float(raw.get("diversity_lambda", 0.0)),

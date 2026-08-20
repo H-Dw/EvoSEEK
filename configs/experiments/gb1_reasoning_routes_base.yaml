@@ -3,7 +3,7 @@ seed: 11
 rounds: 3
 budget_per_round: 16
 # Score only this many remaining variants per round. 0 = full remaining oracle pool.
-candidate_limit: 64
+candidate_limit: 32
 acquisition: greedy
 ucb_beta: 1.5
 diversity_lambda: 0.10

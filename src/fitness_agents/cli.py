@@ -133,6 +133,7 @@ def main() -> None:
     parser.add_argument("--fold-index", type=int)
     parser.add_argument("--rounds", type=int)
     parser.add_argument("--budget-per-round", type=int)
+    parser.add_argument("--candidate-limit", type=int)
     parser.add_argument("--run-label")
     parser.add_argument("--condition")
     parser.add_argument("--output-root", type=Path)
@@ -161,6 +162,8 @@ def main() -> None:
         overrides["rounds"] = args.rounds
     if args.budget_per_round is not None:
         overrides["budget_per_round"] = args.budget_per_round
+    if args.candidate_limit is not None:
+        overrides["candidate_limit"] = args.candidate_limit
     if args.run_label is not None:
         overrides["run_label"] = args.run_label
     if args.condition is not None:

@@ -701,6 +701,10 @@ class CampaignRunner:
         self.generator = create_candidate_generator(
             config.mode,
             position_to_index=self.task_context.position_to_variant_index,
+            sampling_namespace=(
+                f"task={config.task.task_id}|assay={config.task.assay_id}|"
+                f"fold={config.task.fold_index}"
+            ),
         )
         self.agent_selector = AgentUncertaintySelector(
             config.generation,
@@ -753,6 +757,8 @@ class CampaignRunner:
             position_to_index=self.task_context.position_to_variant_index,
             strong_threshold=quota.strong_hypothesis_threshold,
             required_controls=quota.matched_control,
+            candidate_limit=self.config.candidate_limit,
+            reserve_multiplier=quota.matched_control_reserve_multiplier,
         )
 
     def _role_activation_state(
@@ -1533,7 +1539,8 @@ class CampaignRunner:
         observed_variants = list(self.bundle.initial_variants)
         self.state.observed = list(self.bundle.initial_observations)
         self.state.revealed_variant_ids = {item.variant_id for item in self.state.observed}
-        self.knowledge.update(observed_variants, self.state.observed)
+        if self.config.knowledge_enabled:
+            self.knowledge.update(observed_variants, self.state.observed)
         remaining = list(self.bundle.oracle_pool)
         selection_driver = self._selection_driver()
         wild_type = next(
@@ -1637,24 +1644,6 @@ class CampaignRunner:
                 )
                 evidence.update(observed_evidence)
                 self._persist_evidence_map(observed_variants, observed_evidence)
-                remaining_kg: dict[str, list[Any]] = {}
-                if "kg" in self.knowledge.providers and remaining:
-                    self._progress(
-                        "evidence_started",
-                        (
-                            f"round {round_id}/{self.config.rounds} scoring remaining "
-                            f"{len(remaining)} variants on kg"
-                        ),
-                        n_candidates=len(remaining),
-                    )
-                    remaining_kg = self.knowledge.evidence_for(
-                        remaining,
-                        round_id=round_id,
-                        delete_evidence=self.config.evidence_deletion,
-                        channels=("kg",),
-                    )
-                    for variant_id, bundle in remaining_kg.items():
-                        evidence[variant_id] = bundle
                 if evidence:
                     all_evidence = [item for bundle in evidence.values() for item in bundle]
                     persisted_evidence = [
@@ -1667,7 +1656,8 @@ class CampaignRunner:
                             "parameter_set_id": self.config.knowledge.parameter_set_id,
                             "variant_count": len(evidence),
                             "persisted_variant_count": len(observed_evidence),
-                            "remaining_kg_variant_count": len(remaining_kg),
+                            "candidate_kg_variant_count": 0,
+                            "candidate_kg_scope": "deferred_until_round_candidate_set",
                             "evidence_count": len(all_evidence),
                             "persisted_evidence_count": len(persisted_evidence),
                             "channel_counts": {
@@ -1740,47 +1730,49 @@ class CampaignRunner:
                     },
                 )
 
-            structured_variants = _decision_ingest_variants(
-                observed_variants,
-                observations=self.state.observed,
-            )
-            structured_result = self.knowledge.sync_structured_kg(
-                run_id=self.run_id,
-                round_id=round_id,
-                variants=structured_variants,
-                observations=self.state.observed,
-                evidence=[
-                    *local_evidence,
-                    *self._flatten_round_evidence(evidence),
-                ],
-                hypotheses=self.state.hypotheses,
-            )
-            self.writer.write_json(
-                f"round_{round_id:02d}/structured_kg_pre_design.json",
-                {
-                    "report": structured_result.report,
-                    "entity_count": len(structured_result.snapshot.entities),
-                    "relation_count": len(structured_result.snapshot.relations),
-                    "snapshot_id": self.knowledge.structured_sink.last_snapshot_id,
-                },
-            )
-            self.writer.event(
-                "structured_kg_built",
-                {
-                    "round_id": round_id,
-                    "stage": "pre_design",
-                    "entity_count": len(structured_result.snapshot.entities),
-                    "relation_count": len(structured_result.snapshot.relations),
-                },
-            )
-            interaction_result = self._run_kg_interaction(
-                round_id=round_id,
-                observed_variants=observed_variants,
-            )
-            if interaction_result is not None:
-                self._record_kg_interaction(
-                    round_id=round_id, interaction_result=interaction_result
+            interaction_result = None
+            if self.config.knowledge_enabled:
+                structured_variants = _decision_ingest_variants(
+                    observed_variants,
+                    observations=self.state.observed,
                 )
+                structured_result = self.knowledge.sync_structured_kg(
+                    run_id=self.run_id,
+                    round_id=round_id,
+                    variants=structured_variants,
+                    observations=self.state.observed,
+                    evidence=[
+                        *local_evidence,
+                        *self._flatten_round_evidence(evidence),
+                    ],
+                    hypotheses=self.state.hypotheses,
+                )
+                self.writer.write_json(
+                    f"round_{round_id:02d}/structured_kg_pre_design.json",
+                    {
+                        "report": structured_result.report,
+                        "entity_count": len(structured_result.snapshot.entities),
+                        "relation_count": len(structured_result.snapshot.relations),
+                        "snapshot_id": self.knowledge.structured_sink.last_snapshot_id,
+                    },
+                )
+                self.writer.event(
+                    "structured_kg_built",
+                    {
+                        "round_id": round_id,
+                        "stage": "pre_design",
+                        "entity_count": len(structured_result.snapshot.entities),
+                        "relation_count": len(structured_result.snapshot.relations),
+                    },
+                )
+                interaction_result = self._run_kg_interaction(
+                    round_id=round_id,
+                    observed_variants=observed_variants,
+                )
+                if interaction_result is not None:
+                    self._record_kg_interaction(
+                        round_id=round_id, interaction_result=interaction_result
+                    )
 
             hypothesis = None
             if self.config.mode in {"llm_agent", "knowledge_agent"}:
@@ -1921,32 +1913,153 @@ class CampaignRunner:
                         {"round_id": round_id, "query_id": query_id},
                     )
 
-            eligible = self.generator.generate(
+            constraint_valid_remaining = _filter_hard_residue_constraints(
                 remaining,
+                hypothesis=hypothesis,
+                position_to_index=self.task_context.position_to_variant_index,
+            )
+            eligible = self.generator.generate(
+                constraint_valid_remaining,
                 self.state,
                 hypothesis,
                 evidence,
                 self.config.candidate_limit,
             )
-            eligible = self._reserve_agent_uq_controls(eligible, remaining, hypothesis)
-            eligible = _filter_hard_residue_constraints(
+            eligible = self._reserve_agent_uq_controls(
                 eligible,
-                hypothesis=hypothesis,
-                position_to_index=self.task_context.position_to_variant_index,
+                constraint_valid_remaining,
+                hypothesis,
             )
-            if not eligible:
-                raise RuntimeError("Candidate generator returned an empty pool")
+            if len(eligible) > self.config.candidate_limit:
+                raise AssertionError("Round candidate set exceeded candidate_limit")
+            round_candidate_ids = tuple(item.variant_id for item in eligible)
+            round_candidate_id_set = set(round_candidate_ids)
+            round_candidate_ids_sha256 = hashlib.sha256(
+                "\n".join(sorted(round_candidate_ids)).encode("utf-8")
+            ).hexdigest()
+            self.writer.write_json(
+                f"round_{round_id:02d}/candidate_pool_receipt.json",
+                {
+                    "schema_version": "round-candidate-pool:v1",
+                    "round_id": round_id,
+                    "sampling_strategy": self.generator.name,
+                    "sampling_namespace": (
+                        f"task={self.config.task.task_id}|assay={self.config.task.assay_id}|"
+                        f"fold={self.config.task.fold_index}"
+                    ),
+                    "seed": self.config.seed,
+                    "catalog_candidate_count": len(remaining),
+                    "hard_constraint_valid_count": len(constraint_valid_remaining),
+                    "planned_candidate_count": self.config.candidate_limit,
+                    "actual_candidate_count": len(eligible),
+                    "candidate_ids_sha256": round_candidate_ids_sha256,
+                    "candidate_ids": round_candidate_ids,
+                    "candidate_scoring_hard_limit": self.config.candidate_limit,
+                    "selection_budget": self.config.budget_per_round,
+                    "oracle_measurement_budget": self.config.budget_per_round,
+                },
+            )
+            if len(eligible) < self.config.budget_per_round:
+                shortfall_receipt = RevisionQuotaShortfallReceipt(
+                    required_batch_size=self.config.budget_per_round,
+                    eligible_before_filter=len(remaining),
+                    eligible_after_filter=len(eligible),
+                    selected_count=0,
+                    shortfall=self.config.budget_per_round - len(eligible),
+                    quota_shortfalls={
+                        "batch_total": self.config.budget_per_round - len(eligible)
+                    },
+                    excluded_candidate_count=len(remaining) - len(eligible),
+                    constraints_sha256=content_hash(
+                        {
+                            "hard_residue_constraints": (
+                                hypothesis.hard_residue_constraints
+                                if hypothesis is not None
+                                else {}
+                            ),
+                            "candidate_limit": self.config.candidate_limit,
+                            "budget_per_round": self.config.budget_per_round,
+                        }
+                    ),
+                )
+                self.writer.write_json(
+                    f"round_{round_id:02d}/revision_constraint_infeasible.json",
+                    shortfall_receipt.model_dump(mode="json"),
+                )
+                self.writer.write_json(
+                    f"round_{round_id:02d}/candidate_evidence_scope.json",
+                    {
+                        "schema_version": "candidate-evidence-scope:v1",
+                        "scope": "round_candidate_set_only",
+                        "candidate_limit": self.config.candidate_limit,
+                        "round_candidate_count": len(eligible),
+                        "kg_candidate_count": 0,
+                        "kg_candidate_ids_are_round_candidates": True,
+                        "full_remaining_pool_scored": False,
+                        "skipped_reason": "revision_constraint_infeasible",
+                    },
+                )
+                planned_batch_sizes.append(self.config.budget_per_round)
+                actual_batch_sizes.append(0)
+                rounds_aborted += 1
+                self.writer.event(
+                    "revision_constraint_infeasible",
+                    {
+                        "round_id": round_id,
+                        "terminal_policy": "abort_campaign",
+                        "receipt": shortfall_receipt.model_dump(mode="json"),
+                        "decision_ids": [],
+                    },
+                )
+                self._progress(
+                    None,
+                    f"round {round_id} aborted because the bounded candidate pool is infeasible",
+                    phase=CampaignPhase.ROUND_ABORTED,
+                    persist=False,
+                )
+                break
+            candidate_kg_evidence: dict[str, list[Any]] = {}
+            if self.config.knowledge_enabled and "kg" in self.knowledge.providers:
+                self._progress(
+                    "candidate_evidence_started",
+                    (
+                        f"round {round_id}/{self.config.rounds} scoring only the fixed "
+                        f"candidate set ({len(eligible)} variants) on kg"
+                    ),
+                    n_candidates=len(eligible),
+                    candidate_limit=self.config.candidate_limit,
+                )
+                candidate_kg_evidence = self.knowledge.evidence_for(
+                    eligible,
+                    round_id=round_id,
+                    delete_evidence=self.config.evidence_deletion,
+                    channels=("kg",),
+                )
+                for variant_id, bundle in candidate_kg_evidence.items():
+                    evidence[variant_id] = bundle
+                self._persist_evidence_map(eligible, candidate_kg_evidence)
+            self.writer.write_json(
+                f"round_{round_id:02d}/candidate_evidence_scope.json",
+                {
+                    "schema_version": "candidate-evidence-scope:v1",
+                    "scope": "round_candidate_set_only",
+                    "candidate_limit": self.config.candidate_limit,
+                    "round_candidate_count": len(eligible),
+                    "kg_candidate_count": len(candidate_kg_evidence),
+                    "kg_candidate_ids_are_round_candidates": set(
+                        candidate_kg_evidence
+                    ).issubset(round_candidate_id_set),
+                    "full_remaining_pool_scored": False,
+                },
+            )
             self._progress(
                 "batch_proposed",
                 f"round {round_id}/{self.config.rounds} proposed {len(eligible)} eligible candidates",
                 phase=CampaignPhase.PROPOSED,
                 n_candidates=len(eligible),
             )
-            score_full_remaining = (
-                selection_driver == "predictor" and self.config.candidate_limit <= 0
-            )
-            predict_targets = remaining if score_full_remaining else eligible
-            expected_batch_size = min(self.config.budget_per_round, len(eligible))
+            predict_targets = eligible
+            expected_batch_size = self.config.budget_per_round
             planned_batch_sizes.append(expected_batch_size)
             knowledge_scores = (
                 self.knowledge.scores(evidence) if self.config.knowledge_enabled else {}
@@ -2854,7 +2967,7 @@ class CampaignRunner:
                     evidence=evidence,
                     revealed_ids=set(self.state.revealed_variant_ids),
                     pending_ids=set(),
-                    allowed_ids={item.variant_id for item in remaining},
+                    allowed_ids=round_candidate_id_set,
                     expected_batch_size=expected_batch_size,
                     context_evidence=(local_evidence if self._critic_local_context_allowed else ()),
                     hypothesis=hypothesis,
@@ -2886,24 +2999,43 @@ class CampaignRunner:
                         local_evidence=local_evidence,
                         interaction_result=interaction_result,
                     )
-                    eligible = self.generator.generate(
-                        remaining,
-                        self.state,
-                        hypothesis,
-                        evidence,
-                        self.config.candidate_limit,
-                    )
-                    eligible = self._reserve_agent_uq_controls(
-                        eligible, remaining, hypothesis
-                    )
-                    eligible = _filter_hard_residue_constraints(
-                        eligible,
+                    revised_round_candidates = _filter_hard_residue_constraints(
+                        [public_by_id[item] for item in round_candidate_ids],
                         hypothesis=hypothesis,
                         position_to_index=self.task_context.position_to_variant_index,
                     )
-                    if not eligible:
-                        raise RuntimeError("Candidate generator returned an empty pool")
-                    expected_batch_size = min(self.config.budget_per_round, len(eligible))
+                    eligible = self.generator.generate(
+                        revised_round_candidates,
+                        self.state,
+                        hypothesis,
+                        evidence,
+                        len(revised_round_candidates),
+                    )
+                    if len(eligible) < self.config.budget_per_round:
+                        raise RevisionConstraintInfeasible(
+                            RevisionQuotaShortfallReceipt(
+                                required_batch_size=self.config.budget_per_round,
+                                eligible_before_filter=len(round_candidate_ids),
+                                eligible_after_filter=len(eligible),
+                                selected_count=0,
+                                shortfall=(
+                                    self.config.budget_per_round - len(eligible)
+                                ),
+                                quota_shortfalls={
+                                    "batch_total": (
+                                        self.config.budget_per_round - len(eligible)
+                                    )
+                                },
+                                excluded_candidate_count=(
+                                    len(round_candidate_ids) - len(eligible)
+                                ),
+                                constraints_sha256=content_hash(
+                                    hypothesis.hard_residue_constraints
+                                ),
+                            ),
+                            decisions=requested.decisions,
+                        )
+                    expected_batch_size = self.config.budget_per_round
                     if selection_driver == "agent_uq":
                         prior_scores = self.knowledge.validation_prior_scores(
                             eligible, round_id=round_id
@@ -3115,7 +3247,7 @@ class CampaignRunner:
                         evidence=evidence,
                         revealed_ids=set(self.state.revealed_variant_ids),
                         pending_ids=set(),
-                        allowed_ids={item.variant_id for item in remaining},
+                        allowed_ids=round_candidate_id_set,
                         expected_batch_size=expected_batch_size,
                         context_evidence=(
                             local_evidence if self._critic_local_context_allowed else ()
@@ -3149,7 +3281,7 @@ class CampaignRunner:
                     raise error from nested
             except ReviewRejected as error:
                 if isinstance(error, RevisionConstraintInfeasible):
-                    terminal_policy = "abort_round"
+                    terminal_policy = "abort_campaign"
                     self.writer.write_json(
                         f"round_{round_id:02d}/revision_constraint_infeasible.json",
                         error.receipt.model_dump(mode="json"),
@@ -3244,7 +3376,7 @@ class CampaignRunner:
                             evidence=evidence,
                             revealed_ids=set(self.state.revealed_variant_ids),
                             pending_ids=set(),
-                            allowed_ids={item.variant_id for item in remaining},
+                            allowed_ids=round_candidate_id_set,
                             expected_batch_size=expected_batch_size,
                             hypothesis=hypothesis,
                             position_to_index=(
@@ -3265,7 +3397,7 @@ class CampaignRunner:
                     except ReviewRejected as fallback_error:
                         error = fallback_error
                         terminal_policy = "abort_round"
-                if terminal_policy == "abort_round":
+                if terminal_policy in {"abort_round", "abort_campaign"}:
                     rounds_aborted += 1
                     actual_batch_sizes.append(0)
                     self._progress(
@@ -3279,6 +3411,7 @@ class CampaignRunner:
                         {
                             "round_id": round_id,
                             "reason": str(error),
+                            "terminal_policy": terminal_policy,
                             "decision_ids": [item.decision_id for item in error.decisions],
                         },
                     )
@@ -3330,12 +3463,32 @@ class CampaignRunner:
                     "schema_version": "prediction-scope-receipt:v1",
                     "round_id": round_id,
                     "selection_driver": selection_driver,
+                    "selection_contract": (
+                        "round_candidate_uniform_random_top_k"
+                        if selection_driver == "random"
+                        else (
+                            "round_candidate_prediction_top_k"
+                            if selection_driver == "predictor"
+                            else (
+                                "round_candidate_kermut_al_posterior"
+                                if selection_driver == "active_learning"
+                                else "round_candidate_agent_uq"
+                            )
+                        )
+                    ),
+                    "planned_candidate_count": self.config.candidate_limit,
+                    "round_candidate_count": len(round_candidate_ids),
+                    "round_candidate_ids_sha256": round_candidate_ids_sha256,
+                    "candidate_scoring_hard_limit": self.config.candidate_limit,
                     "acquisition_prediction_scope": (
                         "candidate_pool" if pool_prediction_used else "none"
                     ),
                     "acquisition_prediction_count": (
                         len(working_by_id) if pool_prediction_used else 0
                     ),
+                    "acquisition_predictions_within_round_candidate_set": set(
+                        working_by_id
+                    ).issubset(round_candidate_id_set),
                     "dry_validation_scope": (
                         "draft_selected_candidates_only"
                         if validation_predictors
@@ -3440,7 +3593,7 @@ class CampaignRunner:
                 evidence=evidence,
                 revealed_ids=set(self.state.revealed_variant_ids),
                 pending_ids=set(),
-                allowed_ids={item.variant_id for item in remaining},
+                allowed_ids=round_candidate_id_set,
                 expected_batch_size=expected_batch_size,
             )
             if final_report.hard_conflicts or final_report.input_hash != approved_batch.batch_hash:
@@ -3460,7 +3613,8 @@ class CampaignRunner:
             self.state.observed.extend(revealed)
             observed_variants.extend(selected_variants)
             self.state.revealed_variant_ids.update(selected_ids)
-            self.knowledge.update(selected_variants, revealed)
+            if self.config.knowledge_enabled:
+                self.knowledge.update(selected_variants, revealed)
             revealed_by_id = {item.variant_id: item for item in revealed}
             selection_by_id = {item.variant_id: item for item in records}
             dry_by_variant: dict[str, list[Prediction]] = {
@@ -3606,10 +3760,11 @@ class CampaignRunner:
                         )
                     )
             self.validation_records.extend(current_validation_records)
-            self.knowledge.record_validation(
-                current_validation_records,
-                reflections,
-            )
+            if self.config.knowledge_enabled:
+                self.knowledge.record_validation(
+                    current_validation_records,
+                    reflections,
+                )
             self.writer.write_json(
                 f"round_{round_id:02d}/validation_matrix.json",
                 current_validation_records,
@@ -3624,7 +3779,14 @@ class CampaignRunner:
             )
             self._progress(
                 "rethink_completed",
-                f"round {round_id}/{self.config.rounds} ReThink and validation KG update complete",
+                (
+                    f"round {round_id}/{self.config.rounds} ReThink complete"
+                    + (
+                        " and validation KG updated"
+                        if self.config.knowledge_enabled
+                        else ""
+                    )
+                ),
                 phase=CampaignPhase.RETHOUGHT,
                 reflection_count=len(reflections),
                 validation_record_count=len(current_validation_records),
@@ -3675,44 +3837,45 @@ class CampaignRunner:
                 )
                 self.writer.event("hypothesis_assessed", assessment.__dict__)
 
-            post_structured_result = self.knowledge.sync_structured_kg(
-                run_id=self.run_id,
-                round_id=round_id,
-                variants=_decision_ingest_variants(
-                    observed_variants,
-                    selected_variants=selected_variants,
+            if self.config.knowledge_enabled:
+                post_structured_result = self.knowledge.sync_structured_kg(
+                    run_id=self.run_id,
+                    round_id=round_id,
+                    variants=_decision_ingest_variants(
+                        observed_variants,
+                        selected_variants=selected_variants,
+                        observations=self.state.observed,
+                    ),
                     observations=self.state.observed,
-                ),
-                observations=self.state.observed,
-                predictions=[
-                    prediction
-                    for predictions in validation_prediction_sets
-                    for prediction in predictions
-                    if prediction.variant_id in selected_set
-                ],
-                evidence=self._flatten_round_evidence(evidence)
-                + list(self.knowledge.local_evidence(round_id=round_id)),
-                hypotheses=self.state.hypotheses,
-            )
-            self.writer.write_json(
-                f"round_{round_id:02d}/structured_kg_post_validation.json",
-                {
-                    "report": post_structured_result.report,
-                    "entity_count": len(post_structured_result.snapshot.entities),
-                    "relation_count": len(post_structured_result.snapshot.relations),
-                    "snapshot_id": self.knowledge.structured_sink.last_snapshot_id,
-                    "validation_record_count": len(self.validation_records),
-                },
-            )
-            self.writer.event(
-                "structured_kg_built",
-                {
-                    "round_id": round_id,
-                    "stage": "post_validation",
-                    "entity_count": len(post_structured_result.snapshot.entities),
-                    "relation_count": len(post_structured_result.snapshot.relations),
-                },
-            )
+                    predictions=[
+                        prediction
+                        for predictions in validation_prediction_sets
+                        for prediction in predictions
+                        if prediction.variant_id in selected_set
+                    ],
+                    evidence=self._flatten_round_evidence(evidence)
+                    + list(self.knowledge.local_evidence(round_id=round_id)),
+                    hypotheses=self.state.hypotheses,
+                )
+                self.writer.write_json(
+                    f"round_{round_id:02d}/structured_kg_post_validation.json",
+                    {
+                        "report": post_structured_result.report,
+                        "entity_count": len(post_structured_result.snapshot.entities),
+                        "relation_count": len(post_structured_result.snapshot.relations),
+                        "snapshot_id": self.knowledge.structured_sink.last_snapshot_id,
+                        "validation_record_count": len(self.validation_records),
+                    },
+                )
+                self.writer.event(
+                    "structured_kg_built",
+                    {
+                        "round_id": round_id,
+                        "stage": "post_validation",
+                        "entity_count": len(post_structured_result.snapshot.entities),
+                        "relation_count": len(post_structured_result.snapshot.relations),
+                    },
+                )
 
         final_metrics = None
         if rounds_aborted == 0:

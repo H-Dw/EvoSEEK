@@ -4,10 +4,10 @@ rounds: 3
 budget_per_round: 16
 # Kermut acquisition inference ranks this bounded proposal pool; only the selected
 # batch enters dry validation and oracle measurement.
-candidate_limit: 64
+candidate_limit: 32
 acquisition: greedy
 ucb_beta: 1.5
-diversity_lambda: 0.10
+diversity_lambda: 0.0
 task_config: configs/task/gb1_binding_al96.yaml
 model_config: configs/model/kermut.yaml
 knowledge_config: configs/knowledge/gb1.yaml
@@ -21,6 +21,8 @@ generation:
   selection_driver: predictor
   use_fitness_predictors: true
   predictor_models: []
+kg_interaction:
+  enabled: false
 validation:
   enabled: true
   predictor_models: []

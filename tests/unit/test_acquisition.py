@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from fitness_agents.acquisition import GreedyPolicy, UCBPolicy
 from fitness_agents.contracts.schemas import CampaignState, Prediction, Variant
@@ -34,6 +35,11 @@ def test_enumerating_generator_respects_positive_candidate_limit():
     variants = [_variant("a", "AAAA"), _variant("b", "AAAV"), _variant("c", "VVVV")]
     generator = EnumeratingCandidateGenerator()
     state = CampaignState(run_id="t", mode="fitness_direct", seed=1)
-    assert generator.generate(variants, state, None, {}, 0) == variants
-    assert generator.generate(variants, state, None, {}, 2) == variants[:2]
+    with pytest.raises(ValueError, match="positive limit"):
+        generator.generate(variants, state, None, {}, 0)
+    first = generator.generate(variants, state, None, {}, 2)
+    assert len(first) == 2
+    assert first == generator.generate(variants, state, None, {}, 2)
+    state.round_id = 2
+    assert generator.generate(variants, state, None, {}, 2) != first
 

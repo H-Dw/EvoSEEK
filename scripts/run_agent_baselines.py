@@ -80,7 +80,7 @@ def _parse_csv_paths(value: str | None) -> list[Path]:
 
 def _load_job(
     *, preset: str, mode: str, seed: int | None, fold: int | None,
-    rounds: int | None, budget: int | None,
+    rounds: int | None, budget: int | None, candidate_limit: int | None,
 ) -> Any:
     overrides: dict[str, Any] = {
         "run_label": f"{preset}-{mode}",
@@ -92,6 +92,8 @@ def _load_job(
         overrides["rounds"] = rounds
     if budget is not None:
         overrides["budget_per_round"] = budget
+    if candidate_limit is not None:
+        overrides["candidate_limit"] = candidate_limit
     config = load_experiment_config(project_root() / PRESETS[preset][mode], overrides=overrides)
     if fold is not None:
         config = replace(config, task=replace(config.task, fold_index=fold))
@@ -107,6 +109,7 @@ def _job_id(public: dict[str, Any]) -> str:
 def _job_public(mode: str, config: Any) -> dict[str, Any]:
     local = config.knowledge.local_knowledge
     local_enabled = bool(local.enabled and config.knowledge_enabled)
+    kg_tools_enabled = bool(config.knowledge_enabled and config.kg_interaction.enabled)
     return {
         "mode": mode,
         "condition": config.condition or mode,
@@ -126,7 +129,8 @@ def _job_public(mode: str, config: Any) -> dict[str, Any]:
         "local_knowledge_enabled": local_enabled,
         "allow_remote_context": bool(local.allow_remote_context),
         "rag_in_remote_context": bool(local_enabled and local.allow_remote_context),
-        "max_tool_calls": config.kg_interaction.max_tool_calls,
+        "kg_tool_calls_enabled": kg_tools_enabled,
+        "max_tool_calls": config.kg_interaction.max_tool_calls if kg_tools_enabled else 0,
     }
 
 
@@ -138,6 +142,7 @@ def _job_command(
     config: Any,
     rounds: int | None,
     budget: int | None,
+    candidate_limit: int | None,
 ) -> tuple[str, ...]:
     root = project_root()
     command = [
@@ -158,6 +163,8 @@ def _job_command(
         command.extend(["--rounds", str(rounds)])
     if budget is not None:
         command.extend(["--budget-per-round", str(budget)])
+    if candidate_limit is not None:
+        command.extend(["--candidate-limit", str(candidate_limit)])
     local = config.knowledge.local_knowledge
     if local.enabled and config.knowledge_enabled:
         job_stem = f"{config.condition or mode}-s{config.seed}-f{config.task.fold_index:02d}"
@@ -367,6 +374,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--folds", default="config")
     parser.add_argument("--rounds", type=int)
     parser.add_argument("--budget", type=int)
+    parser.add_argument(
+        "--candidate-limit",
+        type=int,
+        help="Override the config-driven per-round candidate scoring budget",
+    )
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument(
         "--max-parallel",
@@ -412,6 +424,8 @@ def main() -> None:
     configure_from_args(args)
     if args.max_parallel < 1:
         raise SystemExit("--max-parallel must be at least 1")
+    if args.candidate_limit is not None and args.candidate_limit < 1:
+        raise SystemExit("--candidate-limit must be positive")
     modes = _resolve_modes(args)
     unknown = set(modes).difference(PRESETS[args.preset])
     if unknown:
@@ -447,7 +461,27 @@ def main() -> None:
                 config = _load_job(
                     preset=args.preset, mode=mode, seed=seed, fold=fold,
                     rounds=args.rounds, budget=args.budget,
+                    candidate_limit=args.candidate_limit,
                 )
+                if config.candidate_limit < config.budget_per_round:
+                    raise SystemExit(
+                        "candidate_limit must be at least budget_per_round"
+                    )
+                if mode in {"random", "fitness_direct"}:
+                    if (
+                        config.knowledge_enabled
+                        or config.knowledge.local_knowledge.enabled
+                        or config.kg_interaction.enabled
+                        or config.llm.provider != "mock"
+                        or config.critic.mode == "remote"
+                    ):
+                        raise SystemExit(
+                            f"{mode} must not enable LLM API, RAG, or KG tools"
+                        )
+                    if args.preset == "al96" and config.model.name != "kermut":
+                        raise SystemExit(
+                            "Formal AL96 baselines require Kermut; one-hot is test-only"
+                        )
                 public = _job_public(mode, config)
                 key = (public["condition"], public["seed"], public["fold_index"])
                 if args.skip_imported_conditions and key in imported_keys:
@@ -459,6 +493,7 @@ def main() -> None:
                     config=config,
                     rounds=args.rounds,
                     budget=args.budget,
+                    candidate_limit=args.candidate_limit,
                 )
                 public = {**public, "command": list(command)}
                 jobs.append(BaselineJob(index=len(jobs), public=public, command=command))

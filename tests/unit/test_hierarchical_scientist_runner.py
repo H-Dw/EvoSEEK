@@ -70,6 +70,7 @@ def _write_campaign(
     condition: str = "hierarchical",
     rounds: int = 3,
     budget: int = 16,
+    candidate_limit: int = 32,
     write_pipeline: bool = True,
     hierarchy_enabled: bool | None = None,
 ) -> dict:
@@ -96,7 +97,7 @@ def _write_campaign(
                 "llm_provider": "deepseek",
                 "rounds": rounds,
                 "budget_per_round": budget,
-                "candidate_limit": 64,
+                "candidate_limit": candidate_limit,
                 "hierarchical_hypothesis": {
                     "enabled": enabled,
                     "required_channels": ["physchem", "conservation", "structure"],
@@ -152,6 +153,12 @@ def _write_campaign(
             (round_dir / "prediction_scope_receipt.json").write_text(
                 json.dumps(
                     {
+                        "planned_candidate_count": candidate_limit,
+                        "round_candidate_count": candidate_limit,
+                        "acquisition_prediction_count": (
+                            candidate_limit if spec["al"] else 0
+                        ),
+                        "acquisition_predictions_within_round_candidate_set": True,
                         "approved_batch_size": budget,
                         "dry_validation_scope": "draft_selected_candidates_only",
                         "dry_validation_calls": [
@@ -197,6 +204,7 @@ def test_hierarchical_scientist_config_matches_formal_al96_protocol() -> None:
     hierarchy = config.hierarchical_hypothesis
     assert config.rounds == 3
     assert config.budget_per_round == 16
+    assert config.candidate_limit == 32
     assert config.task.split_root is not None
     assert config.llm.model == "deepseek-v4-flash"
     assert config.llm.api_key == "env:DEEPSEEK_API_KEY"
@@ -320,12 +328,18 @@ def test_dry_run_schedule_has_three_same_task_fold_jobs(tmp_path, monkeypatch, c
     assert schedule["conditions"] == ["hierarchical"]
     assert schedule["folds"] == [0, 1, 2]
     assert schedule["max_parallel"] == 3
+    assert schedule["expected_candidate_pool"] == 32
     assert "routes" not in schedule
     jobs = schedule["jobs"]
     assert len(jobs) == 3
     assert [job["condition"] for job in jobs] == ["hierarchical", "hierarchical", "hierarchical"]
     assert [job["fold_index"] for job in jobs] == [0, 1, 2]
     assert len({tuple(job["command"]) for job in jobs}) == 3
+    assert all(
+        job["command"][job["command"].index("--worker-candidate-limit") + 1]
+        == "32"
+        for job in jobs
+    )
 
 
 def test_same_task_folds_respect_parallel_limit(tmp_path, monkeypatch) -> None:
@@ -356,6 +370,7 @@ def test_same_task_folds_respect_parallel_limit(tmp_path, monkeypatch) -> None:
         seed=11,
         expected_rounds=3,
         expected_budget=16,
+        expected_candidate_limit=32,
         output_root=tmp_path / "runs",
         python_executable=sys.executable,
     )
@@ -392,6 +407,7 @@ def test_fold_failure_is_recorded_without_losing_other_folds(tmp_path, monkeypat
         seed=11,
         expected_rounds=3,
         expected_budget=16,
+        expected_candidate_limit=32,
         output_root=tmp_path / "runs",
         python_executable=sys.executable,
     )
@@ -423,6 +439,7 @@ def test_audit_rejects_campaign_missing_succeeded_hypothesis_pipeline(tmp_path) 
         expected_fold=0,
         expected_rounds=3,
         expected_budget=16,
+        expected_candidate_limit=32,
     )
     assert audit["passed"] is False
     assert "pipeline_present_for_every_completed_round" in audit["failed_checks"]
@@ -437,6 +454,7 @@ def test_audit_accepts_three_succeeded_channel_branches(tmp_path) -> None:
         expected_fold=2,
         expected_rounds=3,
         expected_budget=16,
+        expected_candidate_limit=32,
     )
     assert audit["passed"] is True
     assert audit["failed_checks"] == []
@@ -699,6 +717,7 @@ def test_six_way_parallelism_runs_a_full_wave(tmp_path, monkeypatch) -> None:
         seed=11,
         expected_rounds=3,
         expected_budget=16,
+        expected_candidate_limit=32,
         output_root=tmp_path / "runs",
         python_executable=sys.executable,
     )
@@ -728,6 +747,7 @@ def test_audit_accepts_base_kg_without_feature_pipeline(tmp_path) -> None:
         expected_fold=0,
         expected_rounds=3,
         expected_budget=16,
+        expected_candidate_limit=32,
     )
     assert audit["passed"] is True
     assert audit["failed_checks"] == []
@@ -784,6 +804,7 @@ def test_audit_rejects_placeholder_predictor(tmp_path) -> None:
         expected_fold=0,
         expected_rounds=3,
         expected_budget=16,
+        expected_candidate_limit=32,
     )
     assert audit["passed"] is False
     assert "placeholder_predictor_disabled" in audit["failed_checks"]

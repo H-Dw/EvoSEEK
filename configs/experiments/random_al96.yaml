@@ -2,12 +2,12 @@ mode: random
 seed: 11
 rounds: 3
 budget_per_round: 16
-# Match the formal KG matrix proposal budget. Random still samples uniformly;
-# Kermut dry validation is restricted to the selected batch.
-candidate_limit: 64
+# Label-blind, seed/fold/round-specific proposal budget. Random samples the
+# downstream batch only inside this fixed candidate set.
+candidate_limit: 32
 acquisition: random
 ucb_beta: 1.5
-diversity_lambda: 0.10
+diversity_lambda: 0.0
 task_config: configs/task/gb1_binding_al96.yaml
 model_config: configs/model/kermut.yaml
 knowledge_config: configs/knowledge/gb1.yaml
@@ -20,6 +20,8 @@ run_label: GB1-AL96-5CV
 generation:
   selection_driver: random
   use_fitness_predictors: false
+kg_interaction:
+  enabled: false
 evaluation:
   metrics: [spearman, pearson, mse, rmse, ndcg, top_k_hit, top_k_recall,
     regret_at_k, interval_90_coverage, gaussian_nll]

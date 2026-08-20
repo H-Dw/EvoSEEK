@@ -121,6 +121,10 @@ def test_configured_active_learning_module_enters_main_loop(config_factory):
     assert sum(acquisition["selection"]["quotas"].values()) == 4
     assert len(acquisition["selection"]["selected_ids"]) == 4
     assert scope["acquisition_prediction_scope"] == "candidate_pool"
+    assert scope["selection_contract"] == "round_candidate_kermut_al_posterior"
+    assert scope["round_candidate_count"] == 40
+    assert scope["acquisition_prediction_count"] == 40
+    assert scope["acquisition_predictions_within_round_candidate_set"] is True
     assert scope["dry_validation_candidate_count"] == 4
     assert {
         item["selection_driver"] for item in state["selections"]
@@ -131,8 +135,8 @@ def test_configured_active_learning_module_enters_main_loop(config_factory):
 @pytest.mark.parametrize(
     ("mode", "acquisition", "knowledge_enabled", "candidate_limit"),
     [
-        ("random", "random", False, 0),
-        ("fitness_direct", "greedy", False, 0),
+        ("random", "random", False, 12),
+        ("fitness_direct", "greedy", False, 12),
         ("llm_agent", "greedy", False, 40),
         ("knowledge_agent", "greedy", True, 40),
     ],
@@ -147,6 +151,7 @@ def test_each_baseline_completes_with_audited_prediction_scopes(
         candidate_limit=candidate_limit,
         rounds=1,
         budget_per_round=3,
+        diversity_lambda=(0.0 if mode in {"random", "fitness_direct"} else 0.1),
         run_label=mode,
     )
     summary = run_campaign(config)
@@ -166,12 +171,75 @@ def test_each_baseline_completes_with_audited_prediction_scopes(
     )
     assert scope["dry_validation_candidate_count"] == 3
     assert scope["approved_batch_size"] == 3
+    assert scope["round_candidate_count"] == candidate_limit
+    assert scope["planned_candidate_count"] == candidate_limit
+    assert scope["acquisition_prediction_count"] <= candidate_limit
     assert scope["acquisition_prediction_scope"] == (
         "candidate_pool" if mode == "fitness_direct" else "none"
     )
+    if mode in {"random", "fitness_direct"}:
+        assert not (config.output_root / summary["run_id"] / "round_01/kg_interaction.json").exists()
+        assert not (
+            config.output_root
+            / summary["run_id"]
+            / "round_01/structured_kg_pre_design.json"
+        ).exists()
+    if mode == "random":
+        assert scope["selection_contract"] == "round_candidate_uniform_random_top_k"
+        assert scope["acquisition_prediction_count"] == 0
+    if mode == "fitness_direct":
+        assert scope["selection_contract"] == "round_candidate_prediction_top_k"
+        design_scores = json.loads(
+            (
+                config.output_root
+                / summary["run_id"]
+                / "round_01/design_scores.json"
+            ).read_text()
+        )
+        expected_ids = {
+            item["variant_id"]
+            for item in sorted(
+                design_scores,
+                key=lambda item: (item["utility"], item["variant_id"]),
+                reverse=True,
+            )[:3]
+        }
+        assert {item["variant_id"] for item in records} == expected_ids
     if mode == "knowledge_agent":
         assert state["hypotheses"]
         assert state["hypotheses"][0]["evidence_ids"]
+
+
+@pytest.mark.integration
+def test_bounded_candidate_shortfall_aborts_with_dynamic_receipt(config_factory):
+    config = config_factory(
+        mode="random",
+        acquisition="random",
+        knowledge_enabled=False,
+        rounds=1,
+        budget_per_round=90,
+        candidate_limit=100,
+        diversity_lambda=0.0,
+        run_label="candidate-shortfall",
+    )
+    summary = run_campaign(config)
+    run_dir = config.output_root / summary["run_id"]
+    receipt = json.loads(
+        (run_dir / "round_01/revision_constraint_infeasible.json").read_text()
+    )
+    scope = json.loads(
+        (run_dir / "round_01/candidate_evidence_scope.json").read_text()
+    )
+
+    assert summary["rounds_aborted"] == 1
+    assert summary["planned_batch_sizes"] == [90]
+    assert summary["actual_batch_sizes"] == [0]
+    assert receipt["code"] == "REVISION_CONSTRAINT_INFEASIBLE"
+    assert receipt["required_batch_size"] == 90
+    assert receipt["eligible_after_filter"] == 88
+    assert receipt["shortfall"] == 2
+    assert scope["full_remaining_pool_scored"] is False
+    assert scope["skipped_reason"] == "revision_constraint_infeasible"
 
 
 @pytest.mark.integration
@@ -212,6 +280,14 @@ def test_agent_selection_precedes_dry_validation_and_writes_full_kg_outputs(conf
     assert scope["dry_validation_candidate_count"] == 2
     assert scope["approved_batch_size"] == 2
     assert scope["oracle_measurement_scope"] == "approved_batch_only"
+    evidence_scope = json.loads(
+        (run_dir / "round_01/candidate_evidence_scope.json").read_text()
+    )
+    assert evidence_scope["scope"] == "round_candidate_set_only"
+    assert evidence_scope["round_candidate_count"] == 24
+    assert evidence_scope["kg_candidate_count"] <= 24
+    assert evidence_scope["kg_candidate_ids_are_round_candidates"] is True
+    assert evidence_scope["full_remaining_pool_scored"] is False
     assert min(item["base_weight"] for item in matrix if item["validation_type"] == "wet") > max(
         item["base_weight"] for item in matrix if item["validation_type"] == "dry"
     )
@@ -315,7 +391,8 @@ def test_standard_campaign_runs_directly_from_manifest_fold(
         knowledge_enabled=False,
         rounds=1,
         budget_per_round=2,
-        candidate_limit=0,
+        candidate_limit=8,
+        diversity_lambda=0.0,
         task=task,
         output_root=tmp_path / "runs",
         run_label="manifest-fold",
@@ -389,7 +466,7 @@ def test_fold_scheduler_launches_isolated_campaign_processes(
                 "seed": 5,
                 "rounds": 1,
                 "budget_per_round": 1,
-                "candidate_limit": 0,
+                    "candidate_limit": 4,
                 "acquisition": "random",
                 "ucb_beta": 1.5,
                 "diversity_lambda": 0.0,

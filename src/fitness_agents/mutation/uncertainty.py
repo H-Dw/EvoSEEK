@@ -39,16 +39,22 @@ def reserve_hypothesis_negative_controls(
     position_to_index: Mapping[int, int],
     strong_threshold: float,
     required_controls: int,
-    reserve_multiplier: int = 4,
+    candidate_limit: int,
+    reserve_multiplier: int,
 ) -> list[Variant]:
-    """Keep matched hypothesis-negative controls outside a truncated strong pool.
+    """Reserve deterministic hypothesis-negative controls inside a fixed candidate pool.
 
     Candidate generators may legitimately rank every hypothesis-positive sequence ahead of
-    all controls.  This deterministic reserve runs before scoring/LLM review so quota
-    feasibility is a property of the design space, not a request the Critic must invent.
+    all controls. This deterministic reserve replaces the lowest-priority positive proposals
+    instead of appending beyond ``candidate_limit``. It runs before candidate-level scoring
+    and LLM review, so the configured scoring budget remains a hard upper bound.
     """
 
-    selected = list(selected_pool)
+    if candidate_limit < 1:
+        raise ValueError("candidate_limit must be positive")
+    if reserve_multiplier < 1:
+        raise ValueError("reserve_multiplier must be positive")
+    selected = list(selected_pool[:candidate_limit])
     if required_controls <= 0 or hypothesis is None:
         return selected
     selected_ids = {item.variant_id for item in selected}
@@ -58,8 +64,19 @@ def reserve_hypothesis_negative_controls(
         for item in selected
         if _hypothesis_score(item, hypothesis, position_to_index) < strong_threshold
     ]
-    reserve_target = max(0, required_controls * reserve_multiplier - len(existing_controls))
-    if reserve_target == 0:
+    desired_controls = min(
+        len(selected),
+        required_controls * reserve_multiplier,
+    )
+    reserve_target = max(0, desired_controls - len(existing_controls))
+    available_slots = max(0, candidate_limit - len(selected))
+    replaceable = [
+        item
+        for item in reversed(selected)
+        if _hypothesis_score(item, hypothesis, position_to_index) >= strong_threshold
+    ]
+    reserve_target = min(reserve_target, available_slots + len(replaceable))
+    if reserve_target <= 0:
         return selected
 
     def nearest_similarity(candidate: Variant) -> float:
@@ -90,7 +107,11 @@ def reserve_hypothesis_negative_controls(
         ),
         reverse=True,
     )
-    return [*selected, *controls[:reserve_target]]
+    additions = controls[:reserve_target]
+    replacements_needed = max(0, len(selected) + len(additions) - candidate_limit)
+    evicted_ids = {item.variant_id for item in replaceable[:replacements_needed]}
+    retained = [item for item in selected if item.variant_id not in evicted_ids]
+    return [*retained, *additions][:candidate_limit]
 
 
 def _evidence_score(items: Sequence[Evidence]) -> float:
