@@ -1,10 +1,5 @@
 # Conservation Sub-Critic
 
-## Contract fingerprints
-
-- schema_sha256: 475581baa3fafee0a8bd5bc0451bd122e02f55328e0d30fb3a88048a5e69e95d
-- skill_sha256: e4a1524da3182a6b1da735d8999bafe4e064fdd54ea5f69e37f92cb6739a642a
-
 ## Inputs
 
 Read only `channel_contract`, conservation `evidence`, conservation `kg_packs`, and `analysis`.

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 from collections.abc import Iterable
 from typing import ClassVar, Protocol
 
@@ -94,6 +93,7 @@ class InMemoryChangeWriter:
 
     def __init__(self) -> None:
         self.proposals: dict[str, KGChangeProposal] = {}
+        self.transaction_ids: dict[str, str] = {}
 
     def commit(self, proposal: KGChangeProposal) -> KGUpdateResult:
         existing = self.proposals.get(proposal.idempotency_key)
@@ -110,7 +110,7 @@ class InMemoryChangeWriter:
             transaction_id=self._transaction_id(proposal.idempotency_key),
         )
 
-    @staticmethod
-    def _transaction_id(value: str) -> str:
-        digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
-        return f"kgtx:{digest}"
+    def _transaction_id(self, value: str) -> str:
+        if value not in self.transaction_ids:
+            self.transaction_ids[value] = f"KGTX{len(self.transaction_ids) + 1:04d}"
+        return self.transaction_ids[value]

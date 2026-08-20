@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 from collections import defaultdict
 from collections.abc import Sequence
@@ -66,21 +65,8 @@ class _UnavailableEvidenceProvider:
 
     def evaluate(self, variant: Variant, *, round_id: int, **_kwargs: Any) -> Evidence:
         statement = f"{self.channel} evidence unavailable: {self.reason}"
-        identity = json.dumps(
-            {
-                "channel": self.channel,
-                "variant_id": variant.variant_id,
-                "round_id": round_id,
-                "reason": self.reason,
-                "context_id": self.context.context_id,
-            },
-            sort_keys=True,
-        )
         return Evidence(
-            evidence_id=(
-                f"ev:{self.channel}:"
-                f"{hashlib.sha256(identity.encode()).hexdigest()[:16]}"
-            ),
+            evidence_id=f"E{round_id}:{self.channel}:{variant.variant_id}",
             variant_id=variant.variant_id,
             channel=self.channel,
             statement=statement,
@@ -136,10 +122,8 @@ def _evaluate_provider(
 
 
 def _evidence_id(channel: str, variant_id: str, round_id: int, statement: str) -> str:
-    digest = hashlib.sha256(
-        f"{channel}|{variant_id}|{round_id}|{statement}".encode()
-    ).hexdigest()[:16]
-    return f"ev:{channel}:{digest}"
+    del statement
+    return f"E{round_id}:{channel}:{variant_id}"
 
 
 class KnowledgeEngine:

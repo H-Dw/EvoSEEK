@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -16,22 +14,10 @@ STRUCTURE_CONTACT_LIST_KEYS = frozenset({"closest_contacts", "interface_contacts
 def compact_static_evidence_id(
     channel: str,
     variant_id: str,
-    parameter_set_id: str,
-    resource_sha256: str,
 ) -> str:
-    """Stable Evidence ID for static channels: no raw_features blob and no round_id."""
+    """Readable Evidence ID; resource/version details remain ordinary provenance."""
 
-    payload = json.dumps(
-        {
-            "channel": channel,
-            "variant_id": variant_id,
-            "parameter_set_id": parameter_set_id,
-            "resource_sha256": resource_sha256,
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    return f"ev:{channel}:{hashlib.sha256(payload.encode('utf-8')).hexdigest()[:16]}"
+    return f"E0:{channel}:{variant_id}"
 
 
 def compact_structure_site(feature: Mapping[str, Any]) -> dict[str, Any]:

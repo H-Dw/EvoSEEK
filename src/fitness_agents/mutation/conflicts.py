@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
@@ -24,8 +23,8 @@ AMINO_ACIDS = frozenset("ACDEFGHIKLMNPQRSTVWY")
 
 
 def _conflict_id(code: str, candidate_ids: Sequence[str]) -> str:
-    material = f"{code}|{'|'.join(sorted(candidate_ids))}"
-    return f"conflict:{hashlib.sha256(material.encode()).hexdigest()[:16]}"
+    suffix = "-".join(sorted(candidate_ids)) or "GLOBAL"
+    return f"C-{code}-{suffix}"
 
 
 def _hamming(left: str, right: str) -> int:

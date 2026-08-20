@@ -40,7 +40,7 @@ class EvolutionIntent(BaseModel):
     desired_direction: Literal["maximize", "minimize"] | None = "maximize"
     sequence_source: Literal["message", "attachment", "configured"] | None = None
     reference_sequence: str | None = None
-    reference_sequence_sha256: str | None = None
+    reference_id: str | None = None
     requested_depth: int | None = Field(default=1, ge=1)
     requested_rounds: int | None = Field(default=1, ge=1)
     requested_budget: int | None = Field(default=None, ge=1)
@@ -68,7 +68,7 @@ class OpenDesignRequestPreview(BaseModel):
     preview_id: str
     action: Literal["design"] = "design"
     objective_text: str
-    reference_sequence_sha256: str
+    reference_id: str
     reference_length: int = Field(ge=1)
     design_space: Literal["open_design"] = "open_design"
     position_policy: Literal["all", "include", "all_except"]

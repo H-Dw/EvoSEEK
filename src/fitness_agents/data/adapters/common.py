@@ -50,12 +50,14 @@ def mutation_tokens(
 def canonical_variant_id(
     spec: DatasetSpec, backbone_id: str, component_sequences: tuple[str, ...]
 ) -> str:
-    payload = json.dumps(
-        [spec.assay_id, backbone_id, list(component_sequences)],
-        ensure_ascii=True,
-        separators=(",", ":"),
-    )
-    return f"sha256:{hashlib.sha256(payload.encode('utf-8')).hexdigest()}"
+    edits = mutation_tokens(component_sequences, spec, backbone_id)
+    if not edits:
+        return f"S-{backbone_id}-WT"
+    readable = []
+    for token in edits:
+        _, component_id, position, _wild_type, mutant = json.loads(token)
+        readable.append(f"{component_id}{position}{mutant}")
+    return f"S-{backbone_id}-{'-'.join(readable)}"
 
 
 def assemble_canonical(

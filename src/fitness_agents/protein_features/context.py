@@ -219,17 +219,11 @@ class ProteinTaskContext:
 
     @property
     def context_id(self) -> str:
-        payload = "|".join(
-            (
-                self.task_id,
-                self.protein_id,
-                self.assay_id,
-                self.full_sequence,
-                ",".join(map(str, self.mutable_positions)),
-                self.numbering_scheme,
-            )
+        positions = "-".join(map(str, self.mutable_positions)) or "none"
+        return (
+            f"CTX:{self.protein_id}:{self.assay_id}:"
+            f"{self.wild_type_code}:{positions}:{self.numbering_scheme}"
         )
-        return f"protein-context:{hashlib.sha256(payload.encode()).hexdigest()[:16]}"
 
     def full_sequence_for_variant(self, compact_variant: str) -> str:
         if len(compact_variant) != len(self.mutable_positions):

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -15,7 +14,6 @@ class RoleProfile:
     name: str
     instructions: str
     metadata: dict[str, object]
-    sha256: str
 
 
 def load_role_profile(role: str, name: str) -> RoleProfile:
@@ -28,7 +26,4 @@ def load_role_profile(role: str, name: str) -> RoleProfile:
     metadata = yaml.safe_load(metadata_path.read_text(encoding="utf-8")) or {}
     if metadata.get("role") != role or metadata.get("name") != name:
         raise ValueError(f"Profile metadata does not match {role}/{name}")
-    digest = hashlib.sha256(
-        (instructions + "\n" + metadata_path.read_text(encoding="utf-8")).encode()
-    ).hexdigest()
-    return RoleProfile(role, name, instructions, metadata, digest)
+    return RoleProfile(role, name, instructions, metadata)

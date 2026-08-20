@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import hashlib
-import heapq
 from collections.abc import Callable, Sequence
+
+import numpy as np
 
 from fitness_agents.contracts.schemas import CampaignState, Evidence, Hypothesis, Variant
 
@@ -21,19 +21,26 @@ def _hypothesis_matches(
     )
 
 
-def _proposal_key(
-    variant: Variant,
+def _proposal_order(
+    candidates: Sequence[Variant],
     *,
     state: CampaignState,
     namespace: str,
-) -> bytes:
-    """Return a label-blind, seed/fold/round-specific ordering key."""
+) -> dict[str, int]:
+    """Return a deterministic seeded tie-break order without content hashes."""
 
-    material = (
-        f"candidate-proposal:v1|{namespace}|seed={state.seed}|"
-        f"round={state.round_id}|{variant.variant_id}"
+    ordered_ids = sorted(item.variant_id for item in candidates)
+    namespace_seed = sum(
+        (index + 1) * ord(character) for index, character in enumerate(namespace)
     )
-    return hashlib.sha256(material.encode("utf-8")).digest()
+    rng = np.random.default_rng(
+        int(state.seed) * 1009 + int(state.round_id) * 9176 + namespace_seed
+    )
+    permutation = rng.permutation(len(ordered_ids))
+    return {
+        ordered_ids[int(source_index)]: len(ordered_ids) - rank
+        for rank, source_index in enumerate(permutation)
+    }
 
 
 class EnumeratingCandidateGenerator:
@@ -59,15 +66,16 @@ class EnumeratingCandidateGenerator:
         if limit <= 0:
             raise ValueError("closed-pool candidate generation requires a positive limit")
         target = min(limit, len(candidates))
-        return heapq.nsmallest(
-            target,
-            candidates,
-            key=lambda item: _proposal_key(
-                item,
-                state=state,
-                namespace=self.sampling_namespace,
-            ),
+        ordered = sorted(candidates, key=lambda item: item.variant_id)
+        namespace_seed = sum(
+            (index + 1) * ord(character)
+            for index, character in enumerate(self.sampling_namespace)
         )
+        rng = np.random.default_rng(
+            int(state.seed) * 1009 + int(state.round_id) * 9176 + namespace_seed
+        )
+        indices = rng.permutation(len(ordered))[:target]
+        return [ordered[int(index)] for index in indices]
 
 
 class HypothesisCandidateGenerator:
@@ -90,15 +98,14 @@ class HypothesisCandidateGenerator:
         evidence: dict[str, list[Evidence]],
         limit: int,
     ) -> list[Variant]:
+        proposal_order = _proposal_order(
+            candidates, state=state, namespace=self.sampling_namespace
+        )
         ranked = sorted(
             candidates,
             key=lambda item: (
                 _hypothesis_matches(item, hypothesis, self.position_to_index),
-                _proposal_key(
-                    item,
-                    state=state,
-                    namespace=self.sampling_namespace,
-                ),
+                proposal_order[item.variant_id],
             ),
             reverse=True,
         )
@@ -143,16 +150,15 @@ class KnowledgeCandidateGenerator:
             denominator = sum(max(entry.confidence, 1e-6) for entry in bundle)
             return sum(entry.score * max(entry.confidence, 1e-6) for entry in bundle) / denominator
 
+        proposal_order = _proposal_order(
+            candidates, state=state, namespace=self.sampling_namespace
+        )
         ranked = sorted(
             candidates,
             key=lambda item: (
                 _hypothesis_matches(item, hypothesis, self.position_to_index),
                 evidence_score(item),
-                _proposal_key(
-                    item,
-                    state=state,
-                    namespace=self.sampling_namespace,
-                ),
+                proposal_order[item.variant_id],
             ),
             reverse=True,
         )

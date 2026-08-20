@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import hashlib
-import json
 from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
@@ -92,6 +90,9 @@ class LocalKnowledgeBase:
             reranker_backend=self.reranker_backend,
         )
         self.last_build_report = None
+        self._query_id_map: dict[
+            tuple[int, str, str, tuple[str, ...], tuple[str, ...]], str
+        ] = {}
 
     def refresh(self):
         self.last_build_report = self.index.build(
@@ -124,19 +125,10 @@ class LocalKnowledgeBase:
                 str(item).strip().casefold() for item in knowledge_types if str(item).strip()
             )
         )
-        query_payload = json.dumps(
-            [
-                self.index.manifest_hash,
-                round_id,
-                intent,
-                query,
-                anchor_tuple,
-                knowledge_type_tuple,
-            ],
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
-        query_id = f"localq:{hashlib.sha256(query_payload.encode()).hexdigest()[:20]}"
+        query_key = (round_id, intent, query, anchor_tuple, knowledge_type_tuple)
+        if query_key not in self._query_id_map:
+            self._query_id_map[query_key] = f"LQ{len(self._query_id_map) + 1:04d}"
+        query_id = self._query_id_map[query_key]
         policy_context = LeakagePolicyContext(
             enabled=self.guard.enabled,
             policy_version="target-leakage-guard:v1",
@@ -198,12 +190,12 @@ class LocalKnowledgeBase:
             chunk_id: claim for claim in result.claims for chunk_id in claim.evidence_chunk_ids
         }
         output = []
-        for chunk in result.chunks:
+        for index, chunk in enumerate(result.chunks, start=1):
             claim = claims_by_chunk.get(chunk.chunk_id)
             confidence = float(chunk.scores.get("retrieval_confidence", 0.0))
             output.append(
                 Evidence(
-                    evidence_id=f"ev:local_rag:{chunk.chunk_id.split(':', 1)[-1]}",
+                    evidence_id=f"E{result.round_id}:local:{index:02d}",
                     variant_id=f"context:{self.protein_id}",
                     channel="local_rag",
                     statement=chunk.text,

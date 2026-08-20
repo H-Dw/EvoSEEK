@@ -16,9 +16,7 @@ class AgentTraceContext(BaseModel):
     variant_id: str | None = None
     request_id: str | None = None
     profile: str | None = None
-    profile_sha256: str | None = None
     schema_name: str | None = None
-    context_sha256: str | None = None
     tool_query_ids: tuple[str, ...] = ()
 
 

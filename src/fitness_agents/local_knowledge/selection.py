@@ -115,17 +115,9 @@ class CandidateEvidenceProjector:
             for variant in variants:
                 if not self._matches(variant, rule):
                     continue
-                evidence_key = "|".join(
-                    (
-                        self.calibration_id,
-                        str(rule["rule_id"]),
-                        result.query_id,
-                        variant.variant_id,
-                    )
-                )
                 evidence_id = (
-                    "ev:local_rag_projection:"
-                    + hashlib.sha256(evidence_key.encode("utf-8")).hexdigest()[:24]
+                    f"E{result.round_id}:local-projection:"
+                    f"{rule['rule_id']}:{variant.variant_id}"
                 )
                 score = float(rule["score"])
                 output.append(

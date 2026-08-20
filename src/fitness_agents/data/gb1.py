@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import zipfile
 from collections.abc import Iterable
@@ -29,9 +28,11 @@ def canonical_mutation_notation(
 
 
 def variant_id(variant: str, assay_id: str = "GB1_IgG_binding_Wu2016") -> str:
-    notation = canonical_mutation_notation(variant)
-    digest = hashlib.sha256(f"GB1|{assay_id}|{notation}".encode()).hexdigest()
-    return f"sha256:{digest}"
+    del assay_id
+    cleaned = str(variant).upper()
+    if len(cleaned) != len(GB1_POSITIONS) or set(cleaned).difference(AA_SET):
+        raise ValueError("GB1 sample IDs require a canonical four-residue site code")
+    return f"S-{cleaned}"
 
 
 def _read_source(path: Path) -> pd.DataFrame:

@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import hashlib
-import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict
 from typing import Any, Protocol
@@ -22,9 +20,16 @@ def _dict_tuple(value: Any) -> tuple[dict[str, Any], ...]:
     return tuple(dict(item) for item in value if isinstance(item, Mapping))
 
 
+_QUERY_ID_MAP: dict[tuple[str, tuple[str, ...]], str] = {}
+
+
 def _stable_query_id(operator: str, query_ids: Sequence[str]) -> str:
-    payload = json.dumps([operator, *query_ids], sort_keys=True).encode("utf-8")
-    return f"kgq:{hashlib.sha256(payload).hexdigest()[:16]}"
+    """Assign a compact process-local query ID and retain the exact key in a local map."""
+
+    key = (str(operator), tuple(str(item) for item in query_ids))
+    if key not in _QUERY_ID_MAP:
+        _QUERY_ID_MAP[key] = f"KGQ{len(_QUERY_ID_MAP) + 1:04d}"
+    return _QUERY_ID_MAP[key]
 
 
 def _collect_provenance(evidence: Sequence[Mapping[str, Any]]) -> tuple[dict[str, Any], ...]:

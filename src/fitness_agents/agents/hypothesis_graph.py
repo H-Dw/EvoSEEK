@@ -6,7 +6,6 @@ from collections import defaultdict
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextvars import copy_context
-from dataclasses import replace
 from inspect import Parameter, signature
 from typing import Any
 
@@ -29,7 +28,6 @@ from fitness_agents.kg_interaction.contracts import InteractionResult
 from .context_projection import (
     FEATURE_CHANNELS,
     KGContextPartitioner,
-    canonical_sha256,
     main_synthesis_evidence_cards,
     select_main_review_evidence_cards,
 )
@@ -82,33 +80,6 @@ def _conflicts(
                 )
             )
     return tuple(conflicts)
-
-
-def _default_explanation(
-    approved: tuple[ApprovedChannelAnalysis, ...],
-    conflicts: tuple[CrossChannelConflict, ...],
-) -> dict[str, Any]:
-    return {
-        "summary": "Synthesis of independently reviewed channel analysis cards.",
-        "channel_contributions": [
-            {
-                "channel": item.channel,
-                "analysis_id": item.hypothesis.analysis_id,
-                "analysis_summary": item.hypothesis.analysis_summary,
-                "evidence_ids": list(item.hypothesis.evidence_ids),
-                "uncertainty": item.hypothesis.uncertainty,
-                "candidate_hypothesis_ids": [
-                    candidate.hypothesis_id
-                    for candidate in item.hypothesis.candidate_hypotheses
-                ],
-            }
-            for item in approved
-        ],
-        "conflicts": [item.model_dump(mode="json") for item in conflicts],
-        "limitations": [
-            "Channel outputs are analysis cards, not measured fitness or validated mechanisms."
-        ],
-    }
 
 
 class HypothesisReviewGraph:
@@ -178,9 +149,7 @@ class HypothesisReviewGraph:
             evidence=evidence,
             packs=packs,
         )
-        input_hash = canonical_sha256(
-            immutable_context.model_dump(mode="json", exclude={"retry_control"})
-        )
+        input_receipt_id = f"IN-{channel[:2].upper()}-R{immutable_context.round_id:02d}"
         retry_control = None
         last_code = "CHILD_REVIEW_EXHAUSTED"
         last_completion: dict[str, Any] = {}
@@ -200,7 +169,7 @@ class HypothesisReviewGraph:
             )
             hypothesis = None
             analysis_batches = ()
-            output_hash = None
+            output_receipt_id = None
             try:
                 reset_completion_receipt()
                 proposal = self.child_scientists[channel].propose(context=context)
@@ -225,7 +194,9 @@ class HypothesisReviewGraph:
                 validate_channel_hypothesis(
                     hypothesis.model_dump(mode="json"), context=context
                 )
-                output_hash = canonical_sha256(hypothesis.model_dump(mode="json"))
+                output_receipt_id = (
+                    f"OUT-{channel[:2].upper()}-R{context.round_id:02d}-A{attempt:02d}"
+                )
                 review = self.child_critics[channel].review(
                     context=context, hypothesis=hypothesis
                 )
@@ -239,9 +210,9 @@ class HypothesisReviewGraph:
                         channel=channel,
                         attempt=attempt,
                         disposition="FAILED",
-                        input_sha256=input_hash,
+                        input_receipt_id=input_receipt_id,
                         evidence_universe=branch_evidence_universe,
-                        output_sha256=output_hash,
+                        output_receipt_id=output_receipt_id,
                         analysis=hypothesis,
                         analysis_batches=analysis_batches,
                         error_code=failure["error_code"],
@@ -265,9 +236,9 @@ class HypothesisReviewGraph:
                         "REVISE": "REVISE",
                         "REJECT": "REJECTED",
                     }[review.verdict],
-                    input_sha256=input_hash,
+                    input_receipt_id=input_receipt_id,
                     evidence_universe=branch_evidence_universe,
-                    output_sha256=output_hash,
+                    output_receipt_id=output_receipt_id,
                     analysis=hypothesis,
                     analysis_batches=analysis_batches,
                     review=review,
@@ -281,8 +252,8 @@ class HypothesisReviewGraph:
                     analysis=hypothesis,
                     review=review,
                     attempt=attempt,
-                    input_sha256=input_hash,
-                    output_sha256=output_hash,
+                    input_receipt_id=input_receipt_id,
+                    output_receipt_id=output_receipt_id,
                 )
                 return BranchReceipt(
                     channel=channel,
@@ -302,8 +273,8 @@ class HypothesisReviewGraph:
                 "schema": "critic_retry_control.v1",
                 "priority": "highest",
                 "attempt": attempt + 1,
-                "immutable_input_sha256": input_hash,
-                "rejected_output_sha256": output_hash,
+                "immutable_input_receipt_id": input_receipt_id,
+                "rejected_output_receipt_id": output_receipt_id,
                 "decision_id": review.decision_id,
                 "issue_codes": [item.code for item in review.issues],
                 "required_changes": list(review.required_changes),
@@ -397,9 +368,7 @@ class HypothesisReviewGraph:
             interaction=interaction,
             approved=approved,
         )
-        evidence_universe_sha256 = canonical_sha256(
-            evidence_universe.model_dump(mode="json")
-        )
+        evidence_universe_id = f"EU-R{context.round_id:02d}"
         main_review_attempts: list[MainReviewAttemptArtifact] = []
         last_hypothesis: Hypothesis | None = None
         last_review = None
@@ -408,14 +377,7 @@ class HypothesisReviewGraph:
             hypothesis = None
             review = None
             selected_evidence_cards = ()
-            input_payload = {
-                "attempt": attempt,
-                "approved": [item.model_dump(mode="json") for item in approved],
-                "conflicts": [item.model_dump(mode="json") for item in conflicts],
-                "evidence_universe_sha256": evidence_universe_sha256,
-                "revision": revision,
-            }
-            input_sha256 = canonical_sha256(input_payload)
+            input_receipt_id = f"MAIN-IN-R{context.round_id:02d}-A{attempt:02d}"
             try:
                 proposal = main_proposer(
                     approved_subhypotheses=approved,
@@ -429,25 +391,13 @@ class HypothesisReviewGraph:
                     selected_evidence_cards = select_main_review_evidence_cards(
                         proposal, all_main_evidence_cards
                     )
-                    input_sha256 = canonical_sha256(
-                        {
-                            **input_payload,
-                            "proposal": proposal.model_dump(mode="json"),
-                            "evidence_cards": [
-                                item.model_dump(mode="json")
-                                for item in selected_evidence_cards
-                            ],
-                        }
-                    )
                     main_review_attempts.append(
                         MainReviewAttemptArtifact(
                             hypothesis_attempt=attempt,
                             disposition="ABSTAINED",
-                            input_sha256=input_sha256,
-                            output_sha256=canonical_sha256(
-                                proposal.model_dump(mode="json")
-                            ),
-                            evidence_universe_sha256=evidence_universe_sha256,
+                            input_receipt_id=input_receipt_id,
+                            output_receipt_id=f"MAIN-OUT-R{context.round_id:02d}-A{attempt:02d}",
+                            evidence_universe_id=evidence_universe_id,
                             evidence_cards=selected_evidence_cards,
                             abstention=proposal,
                         )
@@ -463,29 +413,11 @@ class HypothesisReviewGraph:
                         failure_code="NO_SUPPORTED_HYPOTHESIS",
                     )
                 hypothesis = proposal
-                if not hypothesis.explanation:
-                    hypothesis = replace(
-                        hypothesis,
-                        explanation=_default_explanation(approved, conflicts),
-                    )
                 selected_evidence_cards = select_main_review_evidence_cards(
                     hypothesis, all_main_evidence_cards
                 )
                 critic_evidence_universe = RoleVisibleEvidenceUniverse.from_role_sources(
                     role="main_critic", evidence=selected_evidence_cards
-                )
-                input_sha256 = canonical_sha256(
-                    {
-                        **input_payload,
-                        "hypothesis": hypothesis.__dict__,
-                        "evidence_cards": [
-                            item.model_dump(mode="json")
-                            for item in selected_evidence_cards
-                        ],
-                        "critic_evidence_universe": critic_evidence_universe.model_dump(
-                            mode="json"
-                        ),
-                    }
                 )
                 review_parameters = signature(self.main_critic.review).parameters.values()
                 review_kwargs = {
@@ -508,13 +440,13 @@ class HypothesisReviewGraph:
                     MainReviewAttemptArtifact(
                         hypothesis_attempt=attempt,
                         disposition="FAILED",
-                        input_sha256=input_sha256,
-                        output_sha256=(
-                            canonical_sha256(hypothesis.__dict__)
+                        input_receipt_id=input_receipt_id,
+                        output_receipt_id=(
+                            f"MAIN-OUT-R{context.round_id:02d}-A{attempt:02d}"
                             if hypothesis is not None
                             else None
                         ),
-                        evidence_universe_sha256=evidence_universe_sha256,
+                        evidence_universe_id=evidence_universe_id,
                         evidence_cards=selected_evidence_cards,
                         hypothesis=(
                             hypothesis.__dict__ if hypothesis is not None else None
@@ -546,14 +478,9 @@ class HypothesisReviewGraph:
                 MainReviewAttemptArtifact(
                     hypothesis_attempt=attempt,
                     disposition=disposition,
-                    input_sha256=input_sha256,
-                    output_sha256=canonical_sha256(
-                        {
-                            "hypothesis": hypothesis.__dict__,
-                            "review": review.model_dump(mode="json"),
-                        }
-                    ),
-                    evidence_universe_sha256=evidence_universe_sha256,
+                    input_receipt_id=input_receipt_id,
+                    output_receipt_id=f"MAIN-OUT-R{context.round_id:02d}-A{attempt:02d}",
+                    evidence_universe_id=evidence_universe_id,
                     evidence_cards=selected_evidence_cards,
                     hypothesis=hypothesis.__dict__,
                     review=review,
@@ -584,7 +511,7 @@ class HypothesisReviewGraph:
                 "decision_id": review.decision_id,
                 "issue_codes": [item.code for item in review.issues],
                 "required_changes": list(review.required_changes),
-                "summary": review.summary,
+                "explanation": review.explanation,
             }
         return HypothesisPipelineResult(
             status="FAILED",

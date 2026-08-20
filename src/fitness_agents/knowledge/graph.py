@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import sqlite3
 from collections.abc import Sequence
@@ -827,18 +826,22 @@ class ObservationKnowledgeGraph:
         parameters: dict[str, Any],
         result: dict[str, Any],
     ) -> str:
-        canonical = json.dumps(
-            {
-                "operation": operation,
-                "round_id": round_id,
-                "parameters": parameters,
-                "result": result,
-            },
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        query_id = f"kgq:{hashlib.sha256(canonical.encode()).hexdigest()[:16]}"
+        parameters_json = json.dumps(parameters, ensure_ascii=False, sort_keys=True)
+        result_json = json.dumps(result, ensure_ascii=False, sort_keys=True)
+        existing = self.connection.execute(
+            """
+            SELECT query_id FROM agent_queries
+            WHERE operation = ? AND round_id = ? AND parameters_json = ? AND result_json = ?
+            LIMIT 1
+            """,
+            (operation, round_id, parameters_json, result_json),
+        ).fetchone()
+        if existing is not None:
+            return str(existing[0])
+        ordinal = int(
+            self.connection.execute("SELECT COUNT(*) FROM agent_queries").fetchone()[0]
+        ) + 1
+        query_id = f"KGQ{ordinal:04d}"
         with self.connection:
             self.connection.execute(
                 """
@@ -850,8 +853,8 @@ class ObservationKnowledgeGraph:
                     query_id,
                     operation,
                     round_id,
-                    json.dumps(parameters, ensure_ascii=False, sort_keys=True),
-                    json.dumps(result, ensure_ascii=False, sort_keys=True),
+                    parameters_json,
+                    result_json,
                 ),
             )
         return query_id

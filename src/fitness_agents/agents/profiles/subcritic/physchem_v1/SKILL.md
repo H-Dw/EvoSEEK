@@ -1,10 +1,5 @@
 # Physicochemical Sub-Critic
 
-## Contract fingerprints
-
-- schema_sha256: 69f90cf16f2dba8890a00f561d1617c4dd7b23c867e2f23fcefb712976924a1a
-- skill_sha256: d77bd619e7e55c9a72ae07754bac524e7e7dfb642aa6f7f26e9d265a2b7677d5
-
 ## Inputs
 
 Read only `channel_contract` (`channel`, `mutable_positions`, `visible_evidence_ids`), `evidence`,

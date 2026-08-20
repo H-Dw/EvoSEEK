@@ -146,8 +146,8 @@ class _BatchedScientist(_Scientist):
                     batch_id="b000",
                     split_depth=0,
                     sample_ids=("v1",),
-                    input_sha256="a" * 64,
-                    output_sha256="b" * 64,
+                    input_receipt_id="IN-01",
+                    output_receipt_id="OUT-01",
                     evidence_universe=RoleVisibleEvidenceUniverse.from_role_sources(
                         role=f"subscientist:{context.channel}",
                         evidence=context.evidence,
@@ -235,7 +235,8 @@ def test_feature_child_sample_card_is_fitness_blind_and_channel_typed() -> None:
     payload = child.model_dump(mode="json")
     serialized = str(payload["visible_observations"])
     assert "measured_fitness" not in serialized
-    assert payload["visible_observations"][0]["variant_id"] == "v1"
+    assert payload["visible_observations"][0]["sample_id"] == "S01"
+    assert payload["sample_map"] == {"S01": "V39A"}
     assert payload["visible_observations"][0]["evidence_ids"] == ["ev:physchem"]
     assert (
         payload["visible_observations"][0]["feature_values"]["ev:physchem"]["kind"]
@@ -248,7 +249,7 @@ def test_feature_child_sample_card_is_fitness_blind_and_channel_typed() -> None:
         fact.from_residue,
         fact.to_residue,
         fact.delta,
-    ) == ("v1", 39, "V", "A", 1.0)
+    ) == ("S01", 39, "V", "A", 1.0)
 
     valid = ChannelHypothesisOutput(
         analysis_id="analysis:physchem:fact-binding",
@@ -305,7 +306,8 @@ def test_three_child_branches_execute_in_parallel_and_main_gets_only_approved_su
     assert result.main_review.verdict == "APPROVE"
     assert result.main_review_attempts[-1].disposition == "APPROVED"
     assert len(result.main_review_attempts[-1].evidence_cards) <= 12
-    assert result.main_hypothesis["explanation"]["channel_contributions"]
+    assert "explanation" not in result.main_hypothesis
+    assert result.main_review.explanation
     assert all(len(item.review_attempts) == 1 for item in result.branches)
     assert all(item.review_attempts[0].disposition == "APPROVED" for item in result.branches)
     assert result.evidence_universe is not None
@@ -380,8 +382,7 @@ def test_graph_persists_typed_subscientist_batch_artifacts_without_forwarding_th
         item.review_attempts[0].analysis_batches[0].sample_ids == ("v1",)
         for item in result.branches
     )
-    main_explanation = result.main_hypothesis["explanation"]
-    assert "analysis_batches" not in str(main_explanation)
+    assert "analysis_batches" not in result.main_review.explanation
 
 
 def test_main_critic_accepts_exact_rag_id_visible_in_base_interaction() -> None:
@@ -593,7 +594,10 @@ class _ReviseMainOnceCritic(RuleBasedMainHypothesisCritic):
                 ],
                 required_changes=["LOWER_CONFIDENCE"],
                 cited_evidence_ids=[],
-                summary="Lower confidence and preserve uncertainty.",
+                explanation=(
+                    "The exact hypothesis is testable, but its confidence exceeds the "
+                    "visible uncertainty."
+                ),
             )
         return super().review(
             hypothesis=hypothesis,

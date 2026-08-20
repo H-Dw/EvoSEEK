@@ -503,8 +503,6 @@ class StaticStructureProvider:
             evidence_id=compact_static_evidence_id(
                 self.channel,
                 variant.variant_id,
-                self.parameter_set_id,
-                self.resource_sha256,
             ),
             variant_id=variant.variant_id,
             channel=self.channel,

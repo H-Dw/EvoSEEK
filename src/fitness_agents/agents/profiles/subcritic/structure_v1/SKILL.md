@@ -1,10 +1,5 @@
 # Structure Sub-Critic
 
-## Contract fingerprints
-
-- schema_sha256: 4c91811251858faa57a722ed5001143f4819887145c98eb59c1983b1db112f4f
-- skill_sha256: 3891ae6d7a5c110c0dd31054ffe9a56fb8a1b9bfa696ab73201fc9b78e9f6ff9
-
 ## Inputs
 
 Read only `channel_contract`, structure `evidence`, structure `kg_packs`, and `analysis`.

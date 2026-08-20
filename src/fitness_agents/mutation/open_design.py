@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 from collections.abc import Sequence
 from typing import Protocol
 
@@ -21,10 +20,6 @@ class OpenDesignProposer(Protocol):
     name: str
 
     def propose(self) -> list[SequenceProposal]: ...
-
-
-def _proposal_id(sequence: str) -> str:
-    return f"sha256:{hashlib.sha256(sequence.encode('ascii')).hexdigest()}"
 
 
 def resolve_design_positions(
@@ -89,16 +84,18 @@ class AllPositionSubstitutionProposer:
     def propose(self) -> list[SequenceProposal]:
         proposals: list[SequenceProposal] = []
         reference = self.context.full_sequence
+        proposal_index = 0
         for position in self.positions:
             sequence_index = self.context.position_to_sequence_index[position]
             wild_type = reference[sequence_index]
             for mutant in self.config.allowed_residues:
                 if mutant == wild_type:
                     continue
+                proposal_index += 1
                 sequence = reference[:sequence_index] + mutant + reference[sequence_index + 1 :]
                 proposals.append(
                     SequenceProposal(
-                        proposal_id=_proposal_id(sequence),
+                        proposal_id=f"P{proposal_index:05d}",
                         reference_sequence=reference,
                         sequence=sequence,
                         edits=(SequenceEdit(position, wild_type, mutant),),

@@ -53,9 +53,14 @@ def test_all_hierarchical_role_profiles_are_versioned_and_loadable() -> None:
         critic = load_role_profile("subcritic", f"{channel}_v1")
         assert channel in scientist.instructions.lower()
         assert channel in critic.instructions.lower()
-        assert scientist.sha256 and critic.sha256
-    assert load_role_profile("scientist", "synthesis_v1").sha256
-    assert load_role_profile("critic", "hypothesis_v1").sha256
+        assert "sha256" not in scientist.instructions.casefold()
+        assert "sha256" not in critic.instructions.casefold()
+    assert "sha256" not in load_role_profile(
+        "scientist", "synthesis_v1"
+    ).instructions.casefold()
+    assert "sha256" not in load_role_profile(
+        "critic", "hypothesis_v1"
+    ).instructions.casefold()
 
 
 def test_formal_retry_caps_reject_unbounded_configuration() -> None:
