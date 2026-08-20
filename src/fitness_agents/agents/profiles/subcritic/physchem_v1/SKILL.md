@@ -34,12 +34,13 @@ Required actions: `NARROW_ANALYSIS`, `ADD_EVIDENCE_LINK`,
 
 Return the generated `PhyschemReviewBody` JSON only. `review_scope` is `physchem`; at most 12 issues,
 12 required changes, and 16 cited IDs; each issue message and summary is at most 400 characters.
-Do not output a decision ID.
 
-## Examples
+Use the fixed `rating` region as the source of the downstream action. Score 0 for an unassessable
+response, 1 for a non-repairable blocker, 2 for major repairable defects, 3 for bounded repairable
+defects, 4 for an acceptable and textually correct analysis, and 5 only for complete, well-scoped,
+supported analysis. Scores 0–1 map to `REJECT`, 2–3 to `REVISE`, and 4–5 to `APPROVE`.
+Ratings 2–3 require actionable suggestions and matching changes. Any `text_errors` caps the score
+at 3.
 
-APPROVE: `{"review_scope":"physchem","verdict":"APPROVE","issues":[],"required_changes":[],"cited_evidence_ids":["ev:pc1"],"summary":"The analysis separates the descriptor observation from its bounded interpretation."}`
-
-REVISE: `{"review_scope":"physchem","verdict":"REVISE","issues":[{"code":"OBSERVATION_HYPOTHESIS_CONFLATED","severity":"blocker","message":"A descriptor observation is presented as a fitness hypothesis.","evidence_ids":["ev:pc1"]}],"required_changes":["SEPARATE_OBSERVATION_FROM_HYPOTHESIS","REMOVE_FITNESS_INFERENCE"],"cited_evidence_ids":["ev:pc1"],"summary":"Separate the tool observation from the optional downstream hypothesis."}`
-
-REJECT: `{"review_scope":"physchem","verdict":"REJECT","issues":[{"code":"FINDING_UNSUPPORTED","severity":"blocker","message":"The central finding has no physicochemical support in the visible input.","evidence_ids":[]}],"required_changes":[],"cited_evidence_ids":[],"summary":"The analysis has no assessable channel basis."}`
+Return exactly one `sample_reviews` item for every visible request-local sample, separating the
+sample's feature analysis from the Critic explanation.

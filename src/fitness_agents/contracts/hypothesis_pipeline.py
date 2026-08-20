@@ -11,6 +11,39 @@ from fitness_agents.contracts.evidence_universe import RoleVisibleEvidenceUniver
 ChannelName = Literal["physchem", "conservation", "structure"]
 ReviewVerdictName = Literal["APPROVE", "REVISE", "REJECT"]
 
+
+def verdict_for_rating(score: int) -> ReviewVerdictName:
+    """Map the model's fixed Rating region to the only legal downstream action."""
+
+    if score < 2:
+        return "REJECT"
+    if score < 4:
+        return "REVISE"
+    return "APPROVE"
+
+
+class CriticRatingRegion(BaseModel):
+    """Shared, model-visible Rating region used by every semantic Critic."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    score: int = Field(ge=0, le=5)
+    rationale: str = Field(min_length=1, max_length=400)
+    suggestions: list[Annotated[str, Field(min_length=1, max_length=300)]] = Field(
+        default_factory=list, max_length=12
+    )
+    text_errors: list[Annotated[str, Field(min_length=1, max_length=240)]] = Field(
+        default_factory=list, max_length=8
+    )
+
+    @model_validator(mode="after")
+    def validate_rating_band(self) -> CriticRatingRegion:
+        if 2 <= self.score <= 3 and not self.suggestions:
+            raise ValueError("Rating 2-3 requires at least one actionable suggestion")
+        if self.score >= 4 and self.text_errors:
+            raise ValueError("Rating 4-5 is forbidden while declared text errors remain")
+        return self
+
 PhyschemIssueCode = Literal[
     "ANALYSIS_SCOPE_OVERREACH",
     "FINDING_UNSUPPORTED",
@@ -226,6 +259,9 @@ class PhyschemInterpretationOutput(BaseModel):
         default_factory=list, max_length=4
     )
     uncertainty: str = Field(min_length=1, max_length=300)
+    sample_ids: list[str] = Field(default_factory=list, max_length=16)
+    evidence_ids: list[str] = Field(default_factory=list, max_length=16)
+    fact_ids: list[str] = Field(default_factory=list, max_length=32)
 
 
 class ChannelCandidateHypothesis(BaseModel):
@@ -364,15 +400,33 @@ class MainReviewIssue(_ReviewIssueBase):
     code: MainIssueCode
 
 
+class SampleCriticExplanation(BaseModel):
+    """One sample's feature interpretation and Critic explanation."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    sample_id: str = Field(min_length=1, max_length=160)
+    feature_analysis: str = Field(min_length=1, max_length=300)
+    critic_explanation: str = Field(min_length=1, max_length=300)
+
+
 class _ReviewBodyBase(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     verdict: ReviewVerdictName
+    rating: CriticRatingRegion
     cited_evidence_ids: list[str] = Field(max_length=16)
     summary: str = Field(min_length=1, max_length=400)
+    sample_reviews: list[SampleCriticExplanation] = Field(
+        default_factory=list, max_length=128
+    )
 
     @model_validator(mode="after")
     def consistent_verdict(self) -> _ReviewBodyBase:
+        expected = verdict_for_rating(self.rating.score)
+        if self.verdict != expected:
+            raise ValueError(
+                f"verdict must be {expected} for Rating score {self.rating.score}"
+            )
         blockers = [item for item in self.issues if item.severity == "blocker"]
         if self.verdict == "APPROVE" and (blockers or self.required_changes):
             raise ValueError("APPROVE cannot contain blockers or required changes")
@@ -406,6 +460,7 @@ class MainReviewBody(BaseModel):
 
     review_scope: Literal["main"] = "main"
     verdict: ReviewVerdictName
+    rating: CriticRatingRegion
     issues: list[MainReviewIssue] = Field(max_length=12)
     required_changes: list[MainRequiredAction] = Field(max_length=12)
     cited_evidence_ids: list[str] = Field(max_length=16)
@@ -417,6 +472,11 @@ class MainReviewBody(BaseModel):
 
     @model_validator(mode="after")
     def consistent_verdict(self) -> MainReviewBody:
+        expected = verdict_for_rating(self.rating.score)
+        if self.verdict != expected:
+            raise ValueError(
+                f"verdict must be {expected} for Rating score {self.rating.score}"
+            )
         blockers = [item for item in self.issues if item.severity == "blocker"]
         if self.verdict == "APPROVE" and (blockers or self.required_changes):
             raise ValueError("APPROVE cannot contain blockers or required changes")

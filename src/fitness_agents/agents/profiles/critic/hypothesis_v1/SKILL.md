@@ -38,12 +38,12 @@ may be approved despite uncertainty when it names the uncertainty and relevant c
 The Scientist owns the hypothesis and does not write its review explanation. You own the
 corresponding `explanation`: explain why the exact Scientist hypothesis is or is not reasonable,
 without restating or replacing it. Return generated `MainReviewBody` JSON only. `review_scope` is
-`main`; at most 12 issues, 12 changes, and 16 cited IDs. Do not output a decision ID or hypothesis.
+`main`; at most 12 issues, 12 changes, and 16 cited IDs.
 
-## Examples
-
-APPROVE: `{"review_scope":"main","verdict":"APPROVE","issues":[],"required_changes":[],"cited_evidence_ids":["E01"],"explanation":"The residue direction is a soft prior supported by the visible card and remains prospective."}`
-
-REVISE: `{"review_scope":"main","verdict":"REVISE","issues":[{"code":"CROSS_CHANNEL_CONFLICT","severity":"blocker","message":"The synthesis does not resolve the visible residue disagreement.","evidence_ids":["E01"]}],"required_changes":["RESOLVE_CHANNEL_CONFLICT"],"cited_evidence_ids":["E01"],"explanation":"The hypothesis is testable, but it currently treats conflicting channel directions as agreement."}`
-
-REJECT: `{"review_scope":"main","verdict":"REJECT","issues":[{"code":"UNSUPPORTED_SYNTHESIS","severity":"blocker","message":"The central synthesis is absent from all approved channel claims.","evidence_ids":[]}],"required_changes":[],"cited_evidence_ids":[],"explanation":"No visible card supports the proposed residue direction."}`
+Use the fixed `rating` region as the source of the downstream action. Score 0 when the response is
+unassessable or fundamentally unsupported; 1 for a supported rejection with a non-repairable
+blocker; 2 for major but repairable scientific or text defects; 3 for bounded, repairable defects;
+4 when the claim is acceptable with no unresolved text error; and 5 only when the claim is fully
+supported, scoped, falsifiable, and textually correct. Scores 0–1 map to `REJECT`, 2–3 to `REVISE`,
+and 4–5 to `APPROVE`. A 2–3 rating must include actionable `suggestions` and matching
+`required_changes`. If `text_errors` is non-empty, the score cannot exceed 3.

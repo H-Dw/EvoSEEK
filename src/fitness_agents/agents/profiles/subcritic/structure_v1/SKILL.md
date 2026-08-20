@@ -29,13 +29,14 @@ Required actions: `NARROW_ANALYSIS`, `ADD_EVIDENCE_LINK`,
 ## Output limits
 
 Return generated `StructureReviewBody` JSON only. `review_scope` is `structure`; at most 12 issues,
-12 changes, and 16 cited IDs; messages and summary are at most 400 characters. Do not output a
-decision ID.
+12 changes, and 16 cited IDs; messages and summary are at most 400 characters.
 
-## Examples
+Use the fixed `rating` region as the source of the downstream action. Score 0 for an unassessable
+response, 1 for a non-repairable blocker, 2 for major repairable defects, 3 for bounded repairable
+defects, 4 for an acceptable and textually correct analysis, and 5 only for complete, well-scoped,
+supported analysis. Scores 0–1 map to `REJECT`, 2–3 to `REVISE`, and 4–5 to `APPROVE`.
+Ratings 2–3 require actionable suggestions and matching changes. Any `text_errors` caps the score
+at 3.
 
-APPROVE: `{"review_scope":"structure","verdict":"APPROVE","issues":[],"required_changes":[],"cited_evidence_ids":["ev:st1"],"summary":"The analysis separates static observations from unsupported dynamic hypotheses."}`
-
-REVISE: `{"review_scope":"structure","verdict":"REVISE","issues":[{"code":"DYNAMICS_OVERREACH","severity":"blocker","message":"A static observation is presented as an established dynamic transition.","evidence_ids":["ev:st1"]}],"required_changes":["REMOVE_DYNAMICS_CLAIM","LIMIT_TO_STATIC_STRUCTURE","SEPARATE_OBSERVATION_FROM_HYPOTHESIS"],"cited_evidence_ids":["ev:st1"],"summary":"Separate static context from the optional dynamic hypothesis."}`
-
-REJECT: `{"review_scope":"structure","verdict":"REJECT","issues":[{"code":"FINDING_UNSUPPORTED","severity":"blocker","message":"The central finding has no structural evidence in the visible input.","evidence_ids":[]}],"required_changes":[],"cited_evidence_ids":[],"summary":"The analysis has no assessable channel basis."}`
+Return exactly one `sample_reviews` item for every visible request-local sample, separating the
+sample's feature analysis from the Critic explanation.

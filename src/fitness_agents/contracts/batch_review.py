@@ -90,6 +90,9 @@ class BatchRevisionFeedbackReceipt(BaseModel):
     excluded_substitutions: tuple[ResidueSubstitutionCard, ...] = Field(max_length=64)
     required_residues_by_position: dict[str, tuple[str, ...]] = Field(default_factory=dict)
     applies_to_arms: tuple[CandidateIntentArm, ...] = ()
+    critic_rating_score: int = Field(ge=0, le=5)
+    critic_suggestions: tuple[str, ...] = Field(default=(), max_length=32)
+    decision_history: tuple[str, ...] = Field(default=(), max_length=8)
 
 
 class RevisionQuotaShortfallReceipt(BaseModel):

@@ -12,18 +12,59 @@ from fitness_agents.agents.critic import (
     CritiqueDecisionOutput,
     _decision_from_payload,
 )
-from fitness_agents.agents.output_contracts import MainSynthesisOutput
 from fitness_agents.contracts.hypothesis_pipeline import (
     ChannelHypothesisOutput,
     ConservationReviewBody,
     MainReviewBody,
-    PhyschemReviewBody,
     PhyschemInterpretationOutput,
+    PhyschemReviewBody,
     StructureReviewBody,
 )
 from fitness_agents.contracts.schemas import DraftBatch
 
 ROOT = Path(__file__).parents[2]
+
+
+def test_rating_region_controls_critic_verdict_and_text_error_ceiling() -> None:
+    base = {
+        "falsification_readiness": "ready",
+        "candidate_issues": [],
+        "batch_level_risks": [],
+        "evidence_conflicts": [],
+        "unsupported_claims": [],
+        "required_changes": [],
+        "cited_evidence_ids": [],
+        "confidence": 0.9,
+        "explanation": "Bounded review.",
+    }
+    approved = CritiqueDecisionBodyOutput.model_validate(
+        {
+            **base,
+            "verdict": "APPROVE",
+            "rating": {
+                "score": 4,
+                "rationale": "No unresolved defect.",
+                "suggestions": [],
+                "text_errors": [],
+            },
+        }
+    )
+    assert approved.rating.score == 4
+    with pytest.raises(ValidationError, match="verdict must be REVISE"):
+        CritiqueDecisionBodyOutput.model_validate(
+            {
+                **base,
+                "verdict": "APPROVE",
+                "rating": {
+                    "score": 3,
+                    "rationale": "Repairable text defect.",
+                    "suggestions": ["Correct the text defect."],
+                    "text_errors": ["One statement is internally inconsistent."],
+                },
+            }
+        )
+
+
 def _backticks_between(text: str, start: str, end: str) -> set[str]:
     fragment = text.split(start, 1)[1].split(end, 1)[0]
     return set(re.findall(r"`([A-Z][A-Z0-9_]+)`", fragment))

@@ -78,6 +78,12 @@ class RuleBasedMainHypothesisCritic:
             review_scope="main",
             decision_id=f"MC-{hypothesis.hypothesis_id}",
             verdict=verdict,
+            rating={
+                "score": 5,
+                "rationale": "The hypothesis is testable and has no unresolved text error.",
+                "suggestions": [],
+                "text_errors": [],
+            },
             issues=issues,
             required_changes=changes,
             cited_evidence_ids=list(hypothesis.evidence_ids),
@@ -201,6 +207,10 @@ class RemoteMainHypothesisCritic:
                     "role": "system",
                     "content": (
                         self.profile
+                        + "\nWrite the evaluation in the fixed rating object. score 0-1 means "
+                        "REJECT, 2-3 means REVISE with actionable suggestions, and 4-5 means "
+                        "APPROVE. Any declared text error caps the score at 3. The verdict must "
+                        "match the score band."
                         + "\nThe Scientist owns the hypothesis. Do not restate or replace it. "
                         "Return your corresponding scientific assessment in explanation, plus "
                         "the typed verdict/issues/actions needed by the review loop."

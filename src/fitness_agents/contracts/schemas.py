@@ -227,6 +227,7 @@ class ReThinkReflection:
     advisory_only: bool = True
     selection_eligible: bool = False
     next_round_action: str = "no_change"
+    dimension_assessments: tuple[dict[str, Any], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -397,10 +398,17 @@ class CritiqueDecision:
     cited_evidence_ids: tuple[str, ...] = ()
     confidence: float = 0.0
     summary: str = ""
+    rating_score: int | None = None
+    rating_rationale: str = ""
+    rating_suggestions: tuple[str, ...] = ()
+    rating_text_errors: tuple[str, ...] = ()
+    sample_reviews: tuple[dict[str, Any], ...] = ()
 
     def __post_init__(self) -> None:
         if not 0.0 <= self.confidence <= 1.0:
             raise ValueError("CritiqueDecision confidence must be in [0, 1]")
+        if self.rating_score is not None and not 0 <= self.rating_score <= 5:
+            raise ValueError("CritiqueDecision rating_score must be in [0, 5]")
 
 
 @dataclass(frozen=True)

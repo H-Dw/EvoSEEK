@@ -35,13 +35,14 @@ Required actions: `NARROW_ANALYSIS`, `ADD_EVIDENCE_LINK`,
 ## Output limits
 
 Return generated `ConservationReviewBody` JSON only. `review_scope` is `conservation`; at most 12
-issues, 12 changes, and 16 cited IDs; messages and summary are at most 400 characters. Do not output
-a decision ID.
+issues, 12 changes, and 16 cited IDs; messages and summary are at most 400 characters.
 
-## Examples
+Use the fixed `rating` region as the source of the downstream action. Score 0 for an unassessable
+response, 1 for a non-repairable blocker, 2 for major repairable defects, 3 for bounded repairable
+defects, 4 for an acceptable and textually correct analysis, and 5 only for complete, well-scoped,
+supported analysis. Scores 0–1 map to `REJECT`, 2–3 to `REVISE`, and 4–5 to `APPROVE`.
+Ratings 2–3 require actionable suggestions and matching changes. Any `text_errors` caps the score
+at 3.
 
-APPROVE: `{"review_scope":"conservation","verdict":"APPROVE","issues":[],"required_changes":[],"cited_evidence_ids":["ev:msa1"],"summary":"The analysis reports coverage limits and keeps optional hypotheses separate."}`
-
-REVISE: `{"review_scope":"conservation","verdict":"REVISE","issues":[{"code":"NEFF_INSUFFICIENT","severity":"blocker","message":"The interpretation omits the visible low effective sequence count.","evidence_ids":["ev:msa1"]}],"required_changes":["REPORT_NEFF","LOWER_CONFIDENCE"],"cited_evidence_ids":["ev:msa1"],"summary":"Report Neff and lower confidence in the interpretation."}`
-
-REJECT: `{"review_scope":"conservation","verdict":"REJECT","issues":[{"code":"FINDING_UNSUPPORTED","severity":"blocker","message":"The central finding has no conservation evidence in the visible input.","evidence_ids":[]}],"required_changes":[],"cited_evidence_ids":[],"summary":"The analysis has no assessable channel basis."}`
+Return exactly one `sample_reviews` item for every visible request-local sample, separating the
+sample's feature analysis from the Critic explanation.

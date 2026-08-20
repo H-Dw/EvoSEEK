@@ -239,11 +239,17 @@ bounded Critic explanation paired with the exact Scientist hypothesis and review
 
 ## 7.1 Decision examples
 
-APPROVE: `{"verdict":"APPROVE","falsification_readiness":"ready","candidate_issues":[],"batch_level_risks":[],"evidence_conflicts":[],"unsupported_claims":[],"required_changes":[],"cited_evidence_ids":[],"confidence":0.9,"explanation":"The batch is executable and falsification-ready."}`
+The fixed `rating` region controls the downstream action. Score 0 when the response is unassessable;
+1 for a supported, non-repairable blocker; 2 for major but repairable scientific or text defects; 3
+for bounded, repairable defects; 4 when the batch is acceptable with no unresolved text error; and
+5 only when it is fully supported, scoped, falsification-ready, and textually correct. Scores 0–1
+map to `REJECT`, 2–3 to `REVISE`, and 4–5 to `APPROVE`. A 2–3 rating requires actionable
+`suggestions` and matching machine-executable `required_changes`. If `text_errors` is non-empty,
+the score cannot exceed 3.
 
-REVISE (only when the receipt says `required_minimum_batch_distance=1` and `threshold_satisfied=false`): `{"verdict":"REVISE","falsification_readiness":"ready","candidate_issues":[],"batch_level_risks":[{"code":"INSUFFICIENT_DIVERSITY","severity":"warning","statement":"The batch does not meet the preregistered distance threshold.","candidate_ids":[],"evidence_ids":[]}],"evidence_conflicts":[],"unsupported_claims":[],"required_changes":[{"action":"INCREASE_DIVERSITY","target_ids":[],"parameters":{"minimum_batch_distance":1,"excluded_substitutions":[]},"rationale":"Meet the runtime-owned preregistered diversity threshold.","evidence_ids":[],"priority":1}],"cited_evidence_ids":[],"confidence":0.8,"explanation":"Revise only to meet the unsatisfied deterministic threshold."}`
-
-REJECT: `{"verdict":"REJECT","falsification_readiness":"untestable","candidate_issues":[],"batch_level_risks":[],"evidence_conflicts":[],"unsupported_claims":[],"required_changes":[{"action":"ABORT_ROUND","target_ids":[],"parameters":{"excluded_substitutions":[]},"rationale":"A blocking deterministic conflict remains.","evidence_ids":[],"priority":0}],"cited_evidence_ids":[],"confidence":1.0,"explanation":"Reject because a blocking conflict remains."}`
+Return exactly one `sample_reviews` entry for every request-local candidate. Each entry must keep
+`feature_analysis` separate from `critic_explanation` and include only suggestions that apply to
+that sample. Batch-level `explanation` and rating do not replace these sample-level reviews.
 
 ## 8. Prohibited behavior
 

@@ -322,6 +322,9 @@ class RevisionPlanner:
                 )
             },
             applies_to_arms=plan.constraints.applies_to_arms,
+            critic_rating_score=int(decision.rating_score or 0),
+            critic_suggestions=tuple(decision.rating_suggestions),
+            decision_history=(decision.decision_id,),
         )
 
 
@@ -574,7 +577,7 @@ class BoundedReviewLoop:
                 )
             exclusions = merged_exclusions
             constraints = merged_constraints
-            revision_feedback = self.revision_planner.feedback_receipt(
+            next_feedback = self.revision_planner.feedback_receipt(
                 decision,
                 RevisionPlan(
                     constraints=constraints,
@@ -583,6 +586,28 @@ class BoundedReviewLoop:
                     executable=True,
                 ),
             )
+            if revision_feedback is not None:
+                next_feedback = next_feedback.model_copy(
+                    update={
+                        "critic_suggestions": tuple(
+                            dict.fromkeys(
+                                (
+                                    *revision_feedback.critic_suggestions,
+                                    *next_feedback.critic_suggestions,
+                                )
+                            )
+                        ),
+                        "decision_history": tuple(
+                            dict.fromkeys(
+                                (
+                                    *revision_feedback.decision_history,
+                                    *next_feedback.decision_history,
+                                )
+                            )
+                        ),
+                    }
+                )
+            revision_feedback = next_feedback
             parent_id = draft.draft_batch_id
             previous_draft_signature = draft_signature
         raise AssertionError("Bounded review loop terminated unexpectedly")
