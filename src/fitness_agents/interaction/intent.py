@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import re
 
 from fitness_agents.contracts.interaction import EvolutionIntent, UserConstraintIntent
@@ -102,7 +101,6 @@ class DeterministicEvolutionIntentParser:
             missing.append("reference_sequence")
         if not objective:
             missing.append("objective_text")
-        digest = hashlib.sha256(sequence.encode("ascii")).hexdigest() if sequence else None
         policy_text = {
             "all": "全部位置",
             "include": f"指定位置 {list(constraints.include_positions)}",
@@ -117,7 +115,7 @@ class DeterministicEvolutionIntentParser:
             desired_direction=direction,
             sequence_source=source,
             reference_sequence=sequence,
-            reference_sequence_sha256=digest,
+            reference_id="REF01" if sequence else None,
             requested_depth=requested_depth,
             requested_rounds=requested_rounds,
             requested_budget=requested_budget,
@@ -125,4 +123,3 @@ class DeterministicEvolutionIntentParser:
             missing_fields=tuple(missing),
             confirmation_summary=summary,
         )
-

@@ -1,16 +1,25 @@
-# 面向 GB1 结合能力定向进化的科学智能体
+# EvoSEEK: Evidence-Governed Multi-Agent Protein Directed Evolution with Coupled Scientific-Knowledge and Experimental-Memory Graphs
 
-## 1. 问题定义
+## 1. 研究背景
 
-### 1.1 任务定义与系统架构
+蛋白定向进化需要在指数增长的序列空间中，以有限实验测量寻找满足目标功能的变体。其优化过程同时受到低样本、实验批次昂贵、fitness landscape 稀疏和上位性显著等约束；单点突变的局部收益可能在组合后改变符号，大面积无功能区域也会削弱随机文库和均匀训练集的有效信息密度。[14][15][17] 因而，测试集上的平均预测精度与固定实验预算下的最优变体发现能力属于两个不同目标。
 
-本项目选择实验标签覆盖充分的 GB1 作为当前系统的测试对象。该 assay 测量 GB1 与 IgG-Fc 的结合能力，系统任务随之定义为在固定实验预算下最大化结合 fitness。优化位点为 `V39/D40/G41/V54`，WT 四位点序列为 `VDGV`。[1][2][I1]
+现有 AI 定向进化工作主要沿四条路线推进。MLDE 与 informed training-set design 使用少量组合文库训练监督模型，并通过训练集选择降低无功能样本比例；Low-N 和 EVOLVEpro 利用蛋白语言模型表征提高少样本学习效率；ALDE 以批量贝叶斯优化和不确定性量化协调探索与利用；KnowRLM、LatProtRL、SAMPLE 和 ORI 分别将知识图谱、强化学习、机器人实验或湿实验反馈引入序列搜索与闭环更新。[5][15–22] 这些方法强化了表示学习、fitness prediction、acquisition、生成策略和实验自动化。
 
-系统以当前已测变体为起点，每轮分析实验结果、形成突变假设、选择候选，并通过虚拟实验 oracle 获得新标签，构成“数据分析—假设生成—候选选择—实验反馈”的迭代闭环。
+本项目将 AI 辅助定向进化表述为固定实验预算下的序贯决策问题。系统从当前已测变体出发，每轮读取允许访问的实验历史，形成可证伪的突变假设，完成候选审批与批次选择，再由密封虚拟实验 oracle 揭示新标签；新观察从下一轮开始可见，形成“知识检索 → 证据推理 → 批次选择 → 结果验证 → 记忆更新”的闭环。实验比较固定初始观测、候选池、数据折和查询预算，并分别评价发现效用、机制贡献和无泄漏可重放性。[I2][I3]
 
-实验知识图谱（KG）构成统一知识管理层。KG 持续记录变体、突变、实验 fitness、科学假设、证据来源和轮次关系；RAG 从外部定向进化与结合知识库检索相关条目，并将带来源信息的检索结果接入结构化 KG。Scientist 与 Critic 通过 KG 工具获得实验记录、理化性质、结构信息和外部知识。当前配置使用实验观测支持数值选择，外部知识用于假设形成与候选解释。[I2]
+该任务面临四类相互耦合的挑战。第一，文献知识、模型预测和实验记录分散在不同载体与轮次中，并具有不同的适用范围、证据权威和时间效力；未经约束的融合容易把一般机制、候选解释和 fitness 真值混为一体。第二，强上位性使理化、保守性和结构信号可能相互冲突，单一 Agent 同时承担证据读取、假设生成和自我审查时难以定位推理错误。第三，低样本、有限实验预算和代理模型的 OOD 失准要求候选选择协调局部利用与覆盖探索；假设、负结果、dry prediction 与 wet observation 若未被跨轮关联，系统还会重复已暴露的失败模式。[13–17] 第四，Multi-Agent、RAG、KG、Critic 和 acquisition 的组合增加了标签泄漏、流程漂移和组件归因难度。科学 Multi-Agent、图推理和动态 KG 已显示角色协作与实验记忆的潜力[25–27]，定向进化仍需要统一的证据权限、时间可见性和对照协议。
 
-### 1.2 GB1 数据集选择
+围绕上述挑战，本项目提出四项关键贡献（key contributions）：
+
+1. **跨轮双图谱证据底座。** 系统分离外部科学知识 KG 与 campaign-specific 实验记忆 KG，并以 provenance-aware `EvidencePack` 连接两者，使带来源、证据类型、选择资格和轮次可见性的图谱信息进入假设生成、候选解释和后续轮次选择；未经任务校准的通用知识保持 context-only。[I2][I8][I11]
+2. **证据治理型分层 Multi-Agent 推理。** 理化、保守性和结构通道分别由 Sub-Scientist 与 Sub-Critic 处理，主 Scientist 综合已批准的子假设，主 Critic 和批次 Critic 分别控制假设与实验提交。角色隔离、引用闭包和 fail-closed 合同将证据权限落实为可执行接口，支持冲突定位、证据不足时弃权和按通道消融。[I10][I14]
+3. **面向实验预算的决策—反思闭环。** Agent-UQ 将假设靶向、证据/历史先验、覆盖探索和匹配对照组织为可审计批次；Critic 在选择前检查候选，ReThink 在结果揭示后关联假设、dry prediction 与 wet observation，并将验证与反驳写入下一轮实验记忆。[I7][I15]
+4. **无泄漏且可归因的评估协议。** 角色能力视图、密封 oracle、轮次开放规则和一次性 final-test 访问共同限定信息边界；所有路线共享数据折、初始观测、候选池和查询预算，层级 Agent、双图谱、RAG、UQ 与 ReThink 通过同折、同 seed 消融评估独立贡献。[I3][I4][I7]
+
+对应地，双图谱底座预期提高 provenance 完整率、证据复用率和假设—观察的一致性，并降低干湿证据混用；分层 Multi-Agent 推理预期减少无效候选、false-pass、未知证据 ID 和未处理的跨通道冲突；决策—反思闭环预期在相同查询预算下提高 `best@budget`、AULC 和 top-k hit rate，降低 regret 与跨轮重复错误；无泄漏评估协议预期保持 final-test 零提前访问，并提高不同 fold、seed 和组件配置之间的可重放性与归因能力。上述预期性能是第 4 节对照与消融实验的验证目标，先导结果与独立组件贡献分别报告。
+
+### 1.1 数据集选择
 
 数据集选择关注 fitness 定义、实验标签覆盖、组合突变结构和闭环评估成本。丰富的实测标签可以将候选标签隐藏在 oracle 中，并在统一数据折和查询预算下比较不同方法。[I5] ProteinGym 与 FLIP 汇集多种蛋白和 assay，适合数据标准化与跨蛋白评估；当前实验从中选择一个标签覆盖充分、fitness 定义统一的具体 assay。[2][3]
 
@@ -18,7 +27,7 @@ GFP 的多点景观为稀疏采样，AAV 涉及较长突变区段、高阶变体
 
 实验评价分为两部分：最终测试集衡量模型的排序与头部识别能力；闭环轨迹衡量固定查询预算下的最佳已测 fitness、命中率和 regret。不同方法使用相同数据折、初始观测和查询预算进行比较。
 
-### 1.3 适应度预测模型选择
+### 1.2 适应度预测模型选择
 
 GB1 闭环从 96 条已测变体启动，预测模型需要在少量标签下学习四个位点的组合效应，并为候选排序提供可用的不确定性。Kermut 以 ESM-2 表征、ProteinMPNN 位点条件概率和残基空间距离构造复合核，再用高斯过程输出 assay fitness 的后验均值与标准差。该结构同时覆盖序列、局部结构和多突变关系，精确 GP 的计算规模也适合当前标签预算。[4][I6]
 
@@ -43,34 +52,46 @@ oracle 仅接受候选池内、未查询且未超预算的变体。每轮新标�
 
 <div style="page-break-before: always;"></div>
 
-## 3. 预测模型、Agent/KG 与主动学习架构
+## 3. 证据治理型 Multi-Agent、双层 KG 与主动学习架构
 
 ```mermaid
 flowchart LR
-    L["GPT-5.6 Sol + 学术检索 Skills<br/>文献发现·核验·知识原子化"] --> E["可复核的 Markdown 知识库<br/>版本化发布"]
-    E --> R["本地 RAG<br/>检索·泄漏过滤·来源追踪"] --> SKG["结构化知识 KG"]
-    O["已揭示观测/预测/轮次"] --> OKG["运行 KG"]
-    SKG --> P["EvidencePack 与通道分区"]
-    OKG --> P
-    P --> S1["理化 Sub-Scientist<br/>→ Sub-Critic"]
-    P --> S2["保守性 Sub-Scientist<br/>→ Sub-Critic"]
-    P --> S3["结构 Sub-Scientist<br/>→ Sub-Critic"]
-    S1 --> J["批准子假设<br/>去重与冲突矩阵"]
-    S2 --> J
-    S3 --> J
-    J --> MS["主 Scientist<br/>综合可证伪假设"] --> MC["主假设 Critic"]
-    MC --> G["候选枚举与过滤"] --> U["Agent-UQ 分臂选择"] --> B["候选批次"]
-    B --> M["Baseline / Kermut<br/>dry validation"] --> BC["批次 Critic"]
-    B --> BC --> X["虚拟实验 / Oracle"]
-    X --> T["ReThink"] --> OKG
-    O -. "可插拔路线" .-> A["校准 posterior<br/>Hybrid Batch"] -.-> B
+    subgraph K["知识循环：离线更新，在线冻结"]
+        L["学术检索与来源核验"] --> E["原子化、版本化 Markdown"]
+        E --> R["本地 RAG<br/>泄漏过滤·来源追踪"] --> SKG["科学知识 KG"]
+    end
+
+    subgraph D["推理决策循环：选择前治理"]
+        SKG --> P["EvidencePack<br/>证据类型·可见性·选择资格"]
+        OKG --> P
+        P --> S1["理化 Sub-Scientist<br/>→ Sub-Critic"]
+        P --> S2["保守性 Sub-Scientist<br/>→ Sub-Critic"]
+        P --> S3["结构 Sub-Scientist<br/>→ Sub-Critic"]
+        S1 --> J["批准子假设<br/>去重与冲突矩阵"]
+        S2 --> J
+        S3 --> J
+        J --> MS["主 Scientist<br/>综合可证伪假设"] --> MC["主假设 Critic"]
+        MC --> G["候选枚举与过滤"] --> U["Agent-UQ 分臂选择"] --> B["候选批次"]
+        B --> M["Baseline / Kermut<br/>dry validation"] --> BC["批次 Critic"]
+        B --> BC
+    end
+
+    subgraph X["实验学习循环：结果后更新"]
+        BC --> O["虚拟实验 / Oracle"]
+        O --> T["ReThink<br/>假设、预测与观察归因"] --> OKG["实验记忆 KG<br/>按轮次开放"]
+    end
+
+    OKG -. "仅历史轮次" .-> P
+    OKG -. "可插拔路线" .-> A["校准 posterior<br/>Hybrid Batch"] -.-> B
 ```
+
+该架构由三个相互锁定的循环组成。知识循环把外部文献和操作知识转化为带来源、适用条件和使用边界的冻结快照；推理决策循环将允许使用的证据投影给专业化智能体，并在候选占用实验预算前完成假设与批次审批；实验学习循环在标签揭示后关联假设、dry prediction 与 observation，再把验证和 ReThink 记录开放给后续轮次。三个循环共享数据契约，同时保持知识类型和时间方向。[I2][I8][I10][I11]
 
 ### 3.1 智能体思考与调度框架
 
-当前系统采用**合同驱动的分层 DAG，并在局部加入有界自适应修订**。`CampaignRunner` 预注册每轮的任务顺序、角色权限、输入输出合同和终止条件；三个证据分支并行执行，分支内按“Sub-Scientist—Sub-Critic—修订”串行运行，主 Scientist 汇总后再经过主 Critic。实验结果揭示后，ReThink 将假设检验结果送入下一轮。[I10]
+GB1 闭环具有固定实验预算、预注册任务分解和严格数据可见性，控制面需要优先保证折间一致性与失败可审计性。系统采用**合同驱动的分层 DAG，并在局部加入有界自适应修订**。`CampaignRunner` 预注册每轮的任务顺序、角色权限、输入输出合同和终止条件；三个证据分支并行执行，分支内按“Sub-Scientist → Sub-Critic → 修订”串行运行，主 Scientist 汇总后再经过主 Critic。实验结果揭示后，ReThink 将假设检验结果送入下一轮。[I10]
 
-ReAct 的自主“思考—工具—观察”循环和 LLM 规划型 Plan-and-Execute 均未进入主控制面。[10] GB1 的任务分解、实验预算和可见数据边界在运行前已经确定，固定 DAG 可保持折间流程一致，并让每次查询、修订和拒绝都能审计。自适应性集中在证据可用性、Critic 修订、候选选择和跨轮反馈，适合小样本、强约束的实验闭环。
+ReAct 提供开放的“思考、工具调用、观察”循环[10]，适合动态任务分解；本实验的自主性集中在证据可用性、Critic 修订、候选选择和跨轮反馈。固定 DAG 保持数据边界和调用顺序稳定，有界修订则保留科学推理所需的适应性。每次检索、工具调用、修订、拒绝和放行均形成结构化工件，使系统能够同时评价 fitness 收益与流程可靠性。
 
 ### 3.2 Multi-Agent 分层设计
 
@@ -84,7 +105,7 @@ ReAct 的自主“思考—工具—观察”循环和 LLM 规划型 Plan-and-Ex
 
 结构与保守性通道为小样本推理提供互补先验。保守性 Provider 对预计算 A3M 进行序列一致性重加权，输出单点频率、野生型相对 log-odds、熵和有效样本量；当前 GB1 对齐的 Neff/L 约为 0.27，系统启用单点 profile 并关闭 pairwise coevolution。结构 Provider 从 1PGB chain A 提取接触、溶剂可及性和粗粒度主链环境，用于判断突变位点的局部堆积与暴露约束；该结构对应游离 GB1 单体，证据范围限定为折叠环境。两类证据分别进入 Sub-Scientist 与 Sub-Critic，原始分数的选择权重为零，缺失资源统一标记为 `unavailable`。[I14]
 
-单一 Agent 需要同时处理原始特征、外部文献、跨通道冲突、候选选择和自我审查，容易形成上下文拥塞与证据语义混用。分层 Multi-Agent 将科学解释、证据审查、全局综合和事后学习拆成可验证节点，使失败可定位、角色可替换、权限可限制。[I10] 当前实现已通过离线分层闭环测试；其 fitness 增益仍需在相同 fold、seed 和预算下与 single-Agent 路线比较。
+科学 Multi-Agent 已被用于蛋白设计协作和知识图谱驱动的假设生成[25][26]，CRITIC 与 Reflexion 则分别展示了工具反馈校验和基于反馈的语言记忆[23][24]。当前架构把这些能力收敛到定向进化的实验预算和证据边界：分层节点分别承担科学解释、证据审批、跨域综合、批次门禁和结果后学习，失败可以定位到具体通道与合同。当前实现已通过离线分层闭环测试；fitness 增益仍需在相同 fold、seed 和预算下与 single-Agent 路线比较。
 
 ### 3.3 预测模型与闭环
 
@@ -101,27 +122,27 @@ ReAct 的自主“思考—工具—观察”循环和 LLM 规划型 Plan-and-Ex
 
 Agent-UQ 的兼容输出沿用 `fitness_std` 字段，其语义由 `selection_driver=agent_uq` 标记为覆盖不确定性。OOD 是基于序列距离的风险信号；`hybrid_batch` 和 Critic 负责消费这些数值，interval coverage 与 Gaussian NLL 负责评价校准质量。Sub-Scientist 输出的 `uncertainty` 为定性说明，不进入数值后验。
 
-### 3.4 主动学习设计
+### 3.4 实验记忆 KG 和外部科学知识 KG
 
-主动学习路线同时启用 `selection_driver: active_learning` 与 `active_learning.enabled: true`。每轮先用已揭示标签拟合并校准 Kermut posterior，再由 `hybrid_batch` 将 16 个实验名额分为 8 个利用候选、4 个不确定性探索候选和 4 个知识候选；OOD 惩罚与 Hamming 多样性约束贯穿三路选择。新揭示的 wet fitness 进入下一轮训练，形成“预测—选择—测量—更新”闭环。[5][13][I12]
-
-该路线以 `best@budget`、AULC 和 regret 衡量优化效率，并用 interval coverage、Gaussian NLL 及 No-UQ 消融检查不确定性是否带来决策收益。Agent-UQ、主动学习、predictor 和 random 路线共享数据折、初始观测与查询预算，支持配对比较。[I12]
-
-### 3.5 双向 KG 与本地 RAG
-
-KG 汇聚两条知识流。实验知识流把 `Observation`、`Prediction`、`Hypothesis`、Critic 决策、`Validation` 和 ReThink 结果按轮次写入运行图与结构化图，形成可重放的实验记忆；外部知识流把本地文献与操作知识经 RAG 转换为 `Document—Chunk—Claim—CitationSupport—Publication—Evidence` 关系，形成可复用的科学知识层。[I8][I11] KG 主要服务于 Agent 上下文、Critic 审查、跨轮反馈和选择先验，无需承载完整模型特征或全文。
+双层 KG 将一般科学知识与本 campaign 产生的实验记忆分别持久化。**科学知识层**把本地文献与操作知识组织为 `Document → Chunk → Claim → CitationSupport → Publication → Evidence` 关系；**实验记忆层**把 `Observation`、`Prediction`、`Hypothesis`、Critic 决策、`Validation` 和 ReThink 按轮次关联，形成可重放的决策历史。[I8][I11] 两层通过 provenance-aware `EvidencePack` 协作，保留证据类型、来源、权威和轮次可见性。KnowRLM 使用氨基酸知识图谱引导强化学习序列策略[18]；本项目的双层 KG 聚焦证据治理与实验记忆，可与不同 predictor、acquisition 或 generator 组合。
 
 外部知识先在实验闭环之外生产。GPT-5.6 Sol 调用学术检索、引文核验和结构化写作 Skills，围绕目标、assay 与作用机制搜索文献，将实验操作、适用条件、可观察读数、决策边界和来源整理为原子化 Markdown。[I13] 原始论文与 PDF 保留为引用和逐条核验依据，版本化 Markdown 作为 RAG 直接索引的知识服务层。
 
-该流程在入库前完成跨文献聚合、去重和主张原子化，使检索单元围绕高密度、可执行知识组织。RAG 无需在每轮重新解析长篇 PDF，也能减少按页面或固定窗口切分产生的零散片段。Markdown 支持逐行复核、引用纠错、版本比较和局部更新，审核通过的知识快照才进入索引。
+该流程在入库前完成跨文献聚合、去重和主张原子化，使检索单元围绕“实验动作、可观察读出、适用条件、决策边界”组织。Markdown 支持逐行复核、引用纠错、版本比较和局部更新；审核通过的知识快照才进入索引。在线闭环无需重复解析长篇 PDF，也不会因搜索结果实时变化而改变不同 fold 的知识条件。
 
-运行日志只能还原事件顺序，结构化 KG 还能表达变体、assay、条件、证据、反证和来源之间的语义关系。LLM 获取的是按任务和轮次裁剪的相关子图，证据类型与权限在进入提示词前已经确定；这种约束使外部知识能够引导假设方向，同时保留实验观测的最高权威等级。[7][8][I8]
+结构化 KG 表达变体、assay、条件、证据、反证和来源之间的语义关系，运行 manifest 记录节点完成状态与调用顺序。LLM 获取按任务、证据域和轮次裁剪的相关子图，证据类型与权限在进入提示词前已经确定。外部知识由此参与假设形成，实验观测保持最高权威等级。[7][8][27][I8]
 
 KG 负责知识表示、查询和跨轮持久化；LangGraph 负责节点调度、状态流转与恢复。[11] 当前 `CampaignRunner` 和 `HypothesisReviewGraph` 已实现类型化状态、并行分支、有界重试和审批门禁，接入 LangGraph 只会替换工作流运行层，无法替代实验知识模型。现阶段保留项目内控制器，可减少依赖迁移并维持既有 oracle、预算和审批状态机。
 
-当前 RAG 路线从版本化本地原子知识库建立 SQLite 索引，每轮经过查询清洗、目标泄漏过滤、词法或混合召回、top-k/token 限制和 no-answer 门禁；命中内容携带来源并按 `retrieved_only` 写入结构化 KG，再以只读 `EvidencePack` 提供给对应 Agent。[6][I11] 未经 GB1 校准的检索证据保持 context-only，不直接形成 fitness 分数。
+当前 RAG 路线从版本化本地原子知识库建立 SQLite 索引，每轮经过查询清洗、目标泄漏过滤、词法或混合召回、top-k/token 限制和 no-answer 门禁；命中内容携带来源并按 `retrieved_only` 写入科学知识 KG，再以只读 `EvidencePack` 提供给对应 Agent。[6][I11] 未经 GB1 校准的检索证据保持 context-only，不直接形成 fitness 分数。
 
-Agentic RAG 与 Deep Research 涵盖的文献发现、反证搜索和引用核验能力由上述离线流程承担。[12] 同步实验循环采用本地 RAG，可固定语料版本、查询预算和延迟，保证不同折与消融条件读取同一知识快照，并降低联网内容变化、提示注入和来源状态漂移。新增外部知识经过审核后发布为下一版本地语料，再进入后续实验。
+Agentic RAG 与 Deep Research 涵盖的文献发现、反证搜索和引用核验能力由上述离线流程承担。[12] 这种双时间尺度设计允许科学知识持续更新，同时使单次实验比较保持固定语料版本、查询预算和延迟。新增知识经过审核后发布为下一版本地语料，再进入后续实验。
+
+### 3.5 主动学习设计
+
+主动学习路线同时启用 `selection_driver: active_learning` 与 `active_learning.enabled: true`。每轮先用已揭示标签拟合并校准 Kermut posterior，再由 `hybrid_batch` 将 16 个实验名额分为 8 个利用候选、4 个不确定性探索候选和 4 个知识候选；OOD 惩罚与 Hamming 多样性约束贯穿三路选择。新揭示的 wet fitness 进入下一轮训练，形成“预测 → 选择 → 测量 → 更新”闭环。[5][13][I12]
+
+该路线以 `best@budget`、AULC 和 regret 衡量优化效率，并用 interval coverage、Gaussian NLL 及 No-UQ 消融检查不确定性是否带来决策收益。Agent-UQ、主动学习、predictor 和 random 路线共享数据折、初始观测与查询预算，支持配对比较。[I12]
 
 ## 4. 主要结果、对照实验与消融矩阵
 
@@ -171,6 +192,8 @@ Qwen RAG 的末轮 batch mean 依次为 1.55、1.81 和 2.17，三折均值为 1
 
 ## 5. 局限、未来工作及来源声明
 
+研究背景提出的预期效果是由任务约束和实现接口推导出的可检验假设。当前三折先导结果支持完整路线能够运行并优于随机选择，但尚未显示 RAG 相对无 RAG 知识智能体或 Kermut greedy 的总体优势。层级 Multi-Agent、双层 KG 和 ReThink 的独立贡献将在完整配对消融后判定。
+
 当前实验采用受限候选池筛选：系统只在 GB1 四个预设位点组合突变，并从给定候选中选取序列。该设置未覆盖开放序列设计与实际实验约束。评估仅包含 GB1 binding assay，缺少其他结合靶标和蛋白质性质数据，现有结果尚不能支持框架泛化性结论。[I1][I5][I16]
 
 本地知识库的主题和规模有限，后续需比较不同语料范围与知识类型对假设质量和实验收益的影响。Scientist、Critic 和 ReThink 目前统一使用 DeepSeek V4 Flash，实验结果包含单一模型效应。固定的本地 RAG 快照让不同 LLM 在同一知识和预算下接受比较，同时降低运行期外部搜索的来源漂移和安全风险。当前引用检查只验证标识与证据闭包，后续需加入文献真实性与主张支持关系核验。[I10][I11][I16]
@@ -183,7 +206,7 @@ ReThink 已接收 dry prediction 与 wet observation 并将反思写回 KG，现
 
 [1] Wu, N. C., Dai, L., Olson, C. A., Lloyd-Smith, J. O., & Sun, R. (2016). *Adaptation in protein fitness landscapes is facilitated by indirect paths*. **eLife, 5**, e16965. [https://doi.org/10.7554/eLife.16965](https://doi.org/10.7554/eLife.16965)
 
-[2] Dallago, C., Mou, J., Johnston, K. E., Wittmann, B. J., Bhattacharya, N., Goldman, S., Madani, A., & Yang, K. K. (2021). *FLIP: Benchmark tasks in fitness landscape inference for proteins*. **Advances in Neural Information Processing Systems, 34**, 26601–26622. [https://doi.org/10.1101/2021.11.09.467890](https://doi.org/10.1101/2021.11.09.467890)
+[2] Dallago, C., Mou, J., Johnston, K. E., Wittmann, B. J., Bhattacharya, N., Goldman, S., Madani, A., & Yang, K. K. (2021). *FLIP: Benchmark tasks in fitness landscape inference for proteins*. **Advances in Neural Information Processing Systems, 34**, 26601–26622. [论文](https://datasets-benchmarks-proceedings.neurips.cc/paper/2021/hash/2b44928ae11fb9384c4cf38708677c48-Abstract-round2.html)
 
 [3] Notin, P. et al. (2023). *ProteinGym: Large-Scale Benchmarks for Protein Fitness Prediction and Design*. **NeurIPS 36, Datasets and Benchmarks**. [论文](https://proceedings.neurips.cc/paper_files/paper/2023/file/cac723e5ff29f65e3fcbb0739ae91bee-Paper-Datasets_and_Benchmarks.pdf)
 
@@ -191,7 +214,7 @@ ReThink 已接收 dry prediction 与 wet observation 并将反思写回 KG，现
 
 [5] Yang, J. et al. (2025). *Active learning-assisted directed evolution*. **Nature Communications, 16**, 714. [https://doi.org/10.1038/s41467-025-55987-8](https://doi.org/10.1038/s41467-025-55987-8)
 
-[6] Lewis, P. et al. (2020). *Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks*. **NeurIPS 33**. [论文](https://proceedings.neurips.cc/paper/2020/hash/6b493230-Abstract.html)
+[6] Lewis, P. et al. (2020). *Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks*. **NeurIPS 33**. [论文](https://proceedings.neurips.cc/paper/2020/hash/6b493230205f780e1bc26945df7481e5-Abstract.html)
 
 [7] Soman, K., Rose, P. W., Morris, J. H., & Baranzini, S. E. (2024). *Biomedical knowledge graph-optimized prompt generation for large language models*. **Bioinformatics, 40**(9), btae560. [https://doi.org/10.1093/bioinformatics/btae560](https://doi.org/10.1093/bioinformatics/btae560)
 
@@ -206,6 +229,34 @@ ReThink 已接收 dry prediction 与 wet observation 并将反思写回 KG，现
 [12] Shao, Y. et al. (2024). *Assisting in Writing Wikipedia-like Articles From Scratch with Large Language Models*. **NAACL 2024**. [论文](https://aclanthology.org/2024.naacl-long.347/)
 
 [13] Greenman, K. P., Amini, A. P., & Yang, K. K. (2025). *Benchmarking uncertainty quantification for protein engineering*. **PLOS Computational Biology, 21**(1), e1012639. [https://doi.org/10.1371/journal.pcbi.1012639](https://doi.org/10.1371/journal.pcbi.1012639)
+
+[14] Yang, K. K., Wu, Z., & Arnold, F. H. (2019). *Machine-learning-guided directed evolution for protein engineering*. **Nature Methods, 16**, 687–694. [https://doi.org/10.1038/s41592-019-0496-6](https://doi.org/10.1038/s41592-019-0496-6)
+
+[15] Wu, Z., Kan, S. B. J., Lewis, R. D., Wittmann, B. J., & Arnold, F. H. (2019). *Machine learning-assisted directed protein evolution with combinatorial libraries*. **Proceedings of the National Academy of Sciences, 116**, 8852–8858. [https://doi.org/10.1073/pnas.1901979116](https://doi.org/10.1073/pnas.1901979116)
+
+[16] Biswas, S. et al. (2021). *Low-N protein engineering with data-efficient deep learning*. **Nature Methods, 18**, 389–396. [https://doi.org/10.1038/s41592-021-01100-y](https://doi.org/10.1038/s41592-021-01100-y)
+
+[17] Wittmann, B. J., Yue, Y., & Arnold, F. H. (2021). *Informed training set design enables efficient machine learning-assisted directed protein evolution*. **Cell Systems, 12**, 1026–1045.e7. [https://doi.org/10.1016/j.cels.2021.07.008](https://doi.org/10.1016/j.cels.2021.07.008)
+
+[18] Wang, Y. et al. (2024). *Knowledge-aware Reinforced Language Models for Protein Directed Evolution*. **Proceedings of the 41st International Conference on Machine Learning, PMLR 235**, 52260–52273. [论文](https://proceedings.mlr.press/v235/wang24cq.html)
+
+[19] Jiang, K. et al. (2025). *Rapid in silico directed evolution by a protein language model with EVOLVEpro*. **Science, 387**, eadr6006. [https://doi.org/10.1126/science.adr6006](https://doi.org/10.1126/science.adr6006)
+
+[20] Rapp, J. T. et al. (2024). *SAMPLE: self-driving autonomous machines for protein landscape exploration*. **Nature Chemical Engineering, 1**, 97–107. [https://doi.org/10.1038/s44286-023-00002-4](https://doi.org/10.1038/s44286-023-00002-4)
+
+[21] Yao, S. et al. (2026). *Ontology-guided protein sequence design via reinforcement learning from wet-lab feedback*. **Nature Communications**. [https://doi.org/10.1038/s41467-026-69855-6](https://doi.org/10.1038/s41467-026-69855-6)
+
+[22] Lee, M. et al. (2024). *Robust Optimization in Protein Fitness Landscapes Using Reinforcement Learning in Latent Space*. **Proceedings of the 41st International Conference on Machine Learning, PMLR 235**, 26976–26990. [论文](https://proceedings.mlr.press/v235/lee24x.html)
+
+[23] Shinn, N. et al. (2023). *Reflexion: Language Agents with Verbal Reinforcement Learning*. **NeurIPS 36**. [论文](https://proceedings.neurips.cc/paper_files/paper/2023/hash/1b44b878bb782e6954cd888628510e90-Abstract-Conference.html)
+
+[24] Gou, Z. et al. (2024). *CRITIC: Large Language Models Can Self-Correct with Tool-Interactive Critiquing*. **ICLR 2024**. [论文](https://proceedings.iclr.cc/paper_files/paper/2024/hash/fef126561bbf9d4467dbb8d27334b8fe-Abstract-Conference.html)
+
+[25] Swanson, K. et al. (2025). *The Virtual Lab: AI agents design new SARS-CoV-2 nanobodies with experimental validation*. **Nature**. [https://doi.org/10.1038/s41586-025-09442-9](https://doi.org/10.1038/s41586-025-09442-9)
+
+[26] Ghafarollahi, A., & Buehler, M. J. (2025). *SciAgents: Automating scientific discovery through multi-agent intelligent graph reasoning*. **Advanced Materials, 37**, 2413523. [https://doi.org/10.1002/adma.202413523](https://doi.org/10.1002/adma.202413523)
+
+[27] Bai, J. et al. (2024). *A dynamic knowledge graph approach to distributed self-driving laboratories*. **Nature Communications, 15**, 462. [https://doi.org/10.1038/s41467-023-44599-9](https://doi.org/10.1038/s41467-023-44599-9)
 
 ## 实现依据
 

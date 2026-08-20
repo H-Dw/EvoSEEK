@@ -25,7 +25,7 @@ class _Client:
         return type("Response", (), {"choices": [choice], "usage": None})()
 
 
-def test_reasoning_draft_and_json_render_are_separate_requests() -> None:
+def test_valid_reasoning_draft_skips_redundant_json_render() -> None:
     client = _Client()
     output = complete_structured(
         client=client,
@@ -45,12 +45,9 @@ def test_reasoning_draft_and_json_render_are_separate_requests() -> None:
         semantic_retries=0,
     )
     assert output.verdict == "APPROVE"
-    assert len(client.calls) == 2
+    assert len(client.calls) == 1
     assert client.calls[0]["reasoning_effort"] == "high"
     assert client.calls[0]["extra_body"]["thinking"]["type"] == "enabled"
-    assert "reasoning_effort" not in client.calls[1]
-    assert client.calls[1]["extra_body"]["thinking"]["type"] == "disabled"
-    assert client.calls[1]["messages"][-2]["role"] == "assistant"
 
 
 class _BoundedOutput(BaseModel):

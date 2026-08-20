@@ -78,7 +78,7 @@ def build_app(config_path: str | Path):
                 )
                 preview_button = gr.Button("解析并预览", variant="primary")
                 confirmation = gr.Checkbox(
-                    label="我已核对 reference hash、允许位置、预算和模型能力"
+                    label="我已核对参考序列、允许位置、预算和模型能力"
                 )
                 run_button = gr.Button("确认并运行")
             with gr.Column(scale=2):

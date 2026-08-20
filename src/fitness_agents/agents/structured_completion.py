@@ -137,6 +137,12 @@ def complete_structured(
             trace_context={**(trace_context or {}), "completion_stage": "reasoning_draft"},
             preserve_thinking_on_retry=preserve_reasoning_on_retry,
         )
+        try:
+            normalized_draft = validate(draft)
+        except (ValidationError, UnknownEvidenceIdsError, SemanticOutputValidationError):
+            normalized_draft = None
+        if normalized_draft is not None:
+            return output_type.model_validate(normalized_draft)
         effective_messages = [
             *(item for item in messages if item.get("role") == "system"),
             {

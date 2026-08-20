@@ -17,7 +17,13 @@ from fitness_agents.agents.critic import CriticAgent, OpenAICriticClient, RuleBa
 from fitness_agents.agents.llm import MockScientistLLMClient, OpenAICompatibleLLMClient
 from fitness_agents.agents.remote_llm import load_project_env, resolve_secret
 from fitness_agents.agents.scientist import ScientistAgent, assert_sanitized
-from fitness_agents.config import CriticConfig, KnowledgeConfig, ModelConfig, TaskConfig
+from fitness_agents.config import (
+    CriticConfig,
+    KnowledgeConfig,
+    LearnableParameterSpec,
+    ModelConfig,
+    TaskConfig,
+)
 from fitness_agents.contracts.schemas import CampaignState, ReviewVerdict
 from fitness_agents.data import load_dataset_bundle
 from fitness_agents.evaluation.hypotheses import (
@@ -28,6 +34,7 @@ from fitness_agents.knowledge import KnowledgeEngine
 from fitness_agents.loop.backends import ApprovalEnforcingBackend, CsvOracleBackend
 from fitness_agents.loop.review import BoundedReviewLoop
 from fitness_agents.models import create_predictor
+from fitness_agents.protein_features import ProteinTaskContext
 from fitness_agents.utils.progress import configure_progress_logging
 from fitness_agents.validation.batch import BatchHardValidator, build_draft_batch
 
@@ -108,10 +115,31 @@ def main() -> None:
     predictions = model.predict(candidates)
     prediction_map = {item.variant_id: item for item in predictions}
 
+    task = TaskConfig(
+        task_id="module_agent_review",
+        protein_id="GB1",
+        assay_id="module_test_assay",
+        wild_type_sites="VDGV",
+        mutable_positions=[39, 40, 41, 54],
+        objective="maximize",
+        public_data_path=paths["public"],
+        oracle_data_path=paths["oracle"],
+    )
+    task_context = ProteinTaskContext.from_task(task)
+
     knowledge = KnowledgeEngine(
-        KnowledgeConfig(),
+        KnowledgeConfig(
+            parameters={
+                "kg.shrinkage_pseudocount": LearnableParameterSpec(value=3.0),
+                "kg.confidence_base": LearnableParameterSpec(value=0.25),
+                "kg.support_gain": LearnableParameterSpec(value=0.03),
+                "kg.confidence_cap": LearnableParameterSpec(value=0.85),
+            }
+        ),
         graph_path=output / "agent_knowledge.sqlite",
         assay_id="module_test_assay",
+        protein_id=task.protein_id,
+        task_context=task_context,
     )
     knowledge.update(bundle.initial_variants, bundle.initial_observations)
     evidence = knowledge.evidence_for(candidates, round_id=1)
@@ -119,6 +147,8 @@ def main() -> None:
     state = CampaignState("module-agent-review", "knowledge_agent", int(config["seed"]), round_id=1)
     scientist = ScientistAgent(
         MockScientistLLMClient(),
+        task_context=task_context,
+        objective=task.objective,
         knowledge_graph=knowledge.agent_tool(max_rows=6),
     )
     hypothesis = scientist.propose_hypothesis(
@@ -146,16 +176,6 @@ def main() -> None:
         round_id=1,
         target_variant_ids=selected_ids,
         visible_observations=bundle.initial_observations,
-    )
-    task = TaskConfig(
-        task_id="module_agent_review",
-        protein_id="GB1",
-        assay_id="module_test_assay",
-        wild_type_sites="VDGV",
-        mutable_positions=[39, 40, 41, 54],
-        objective="maximize",
-        public_data_path=paths["public"],
-        oracle_data_path=paths["oracle"],
     )
     critic_config = CriticConfig(**config["critic"])
     validator = BatchHardValidator(task, critic_config)
@@ -203,7 +223,7 @@ def main() -> None:
     receipt_guard = False
     try:
         approved_backend.submit(
-            replace(review.approved_batch, approval_receipt_hash="0" * 64)
+            replace(review.approved_batch, approval_id="AP-UNKNOWN")
         )
     except PermissionError:
         receipt_guard = True
@@ -230,6 +250,8 @@ def main() -> None:
                 reasoning_effort=str(remote_values.get("reasoning_effort") or "high"),
                 thinking=str(remote_values.get("thinking") or "enabled"),
             ),
+            task_context=task_context,
+            objective=task.objective,
             knowledge_graph=knowledge.agent_tool(max_rows=6),
         )
         remote_hypothesis = remote_scientist.propose_hypothesis(

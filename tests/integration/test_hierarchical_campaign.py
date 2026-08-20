@@ -70,3 +70,5 @@ def test_failed_required_hypothesis_node_finalizes_artifacts_but_never_passes(
     assert summary["pass_eligible"] is False
     assert completion["evaluation_status"] != "passed"
     assert completion["required_node_failures"]
+    assert completion["planned_batch_sizes"] == [2]
+    assert completion["actual_batch_sizes"] == [0]

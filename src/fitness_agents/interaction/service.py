@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -126,24 +124,12 @@ class EvolutionApplicationService:
                 )
                 for position in positions
             )
-        payload = {
-            "intent": intent.model_dump(mode="json"),
-            "config": str(self.config_path.resolve()),
-            "positions": positions,
-            "budget": budget,
-            "reference_sha256": intent.reference_sequence_sha256,
-        }
-        preview_id = "preview:" + hashlib.sha256(
-            json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
-        ).hexdigest()[:20]
+        preview_id = "PV01"
         ready = not blockers and config is not None and design_space is not None
         preview = OpenDesignRequestPreview(
             preview_id=preview_id,
             objective_text=objective,
-            reference_sequence_sha256=(
-                intent.reference_sequence_sha256
-                or hashlib.sha256(configured_reference.encode("ascii")).hexdigest()
-            ),
+            reference_id=intent.reference_id or "REF01",
             reference_length=len(reference or configured_reference),
             position_policy=intent.constraints.position_policy,
             resolved_positions=positions,
