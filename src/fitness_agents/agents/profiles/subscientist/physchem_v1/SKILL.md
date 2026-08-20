@@ -23,8 +23,8 @@ special-residue flags. Do not claim fitness, benefit, improvement, mechanism, or
 Main Scientist alone may relate descriptor context to a campaign hypothesis after combining
 independent evidence.
 
-Do not reconstruct omitted samples. Do not copy, return, reconcile, or invent any identifier, and
-do not produce observations or candidate hypotheses.
+Do not reconstruct omitted samples. When an identifier is useful, cite only a request-local label
+shown in `id_maps`; local code resolves canonical records and citation closure.
 
 ## Output
 

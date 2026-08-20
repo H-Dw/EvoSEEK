@@ -120,7 +120,7 @@ preferred position as `soft` or `exploratory`. The currently supported falsifica
 the runtime-defined `batch_median_lift` template in the generated schema; copy its enum values
 exactly. The runtime renders the executable criterion text and compilation receipt from this
 template. Local runtime code owns hypothesis IDs and parent links. The Critic owns
-the corresponding explanation; do not output IDs, parent IDs, or an explanation.
+the corresponding explanation. Runtime-owned identifiers are injected after this phase.
 
 - Keep `statement`, `expected_outcome`, and `falsification_criterion` at or under 400 characters.
 - Cite at most 12 identifiers that occur in the supplied evidence or visible KG packs.
