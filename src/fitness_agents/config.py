@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -1288,9 +1288,9 @@ class HierarchicalHypothesisConfig:
     )
     main_scientist_profile: str = "synthesis_v1"
     main_critic_profile: str = "hypothesis_v1"
-    child_max_tokens: int = 4096
-    child_critic_max_tokens: int = 2048
-    main_critic_max_tokens: int = 4096
+    child_max_tokens: int = 20000
+    child_critic_max_tokens: int = 20000
+    main_critic_max_tokens: int = 20000
     main_max_input_chars: int | None = None
     child_max_input_chars: int | None = None
     critic_max_input_chars: int | None = None
@@ -1386,6 +1386,10 @@ class ExperimentConfig:
             raise ValueError(
                 "generation.selection_driver=active_learning and active_learning.enabled=true "
                 "must be configured together"
+            )
+        if self.generation.use_fitness_predictors and not self.generation.predictor_models:
+            self.generation = replace(
+                self.generation, predictor_models=(self.model,)
             )
         quota = self.generation.quota_allocation
         if quota.enabled:

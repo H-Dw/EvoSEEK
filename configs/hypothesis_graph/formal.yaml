@@ -19,6 +19,6 @@ child_critic_profiles:
   structure: structure_v1
 main_scientist_profile: synthesis_v1
 main_critic_profile: hypothesis_v1
-child_max_tokens: 4096
-child_critic_max_tokens: 2048
-main_critic_max_tokens: 4096
+child_max_tokens: 20000
+child_critic_max_tokens: 20000
+main_critic_max_tokens: 20000

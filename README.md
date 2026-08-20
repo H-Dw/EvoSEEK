@@ -77,7 +77,7 @@ source .venv/bin/activate
 
 | Profile | 安装内容 | 适用场景 |
 |---|---|---|
-| `base` | 核心运行时（numpy / pandas / scikit-learn / scipy / PyYAML / pydantic） | 仅跑 CPU ensemble 与 mock LLM |
+| `base` | 核心运行时（numpy / pandas / scikit-learn / scipy / PyYAML / pydantic / httpx） | 仅跑 CPU ensemble 与 mock LLM |
 | `dev`（默认） | `base` + pytest、ruff | 本地开发、CI、单元测试 |
 | `llm` | `dev` + `openai` | 调用 DeepSeek 或 OpenAI 兼容的远程 Scientist / Critic |
 
@@ -118,7 +118,7 @@ conda activate fitness-agents
 python scripts/check_environment.py
 ```
 
-`environment.yml` 固定 Python 3.11，并安装核心依赖与可编辑包。远程 LLM、RAG、Kermut、UI
+`environment.yml` 固定 Python 3.11，并安装核心依赖（含 `httpx>=0.27,<1`）与可编辑包。远程 LLM、RAG、Kermut、UI
 仍需在激活后按第 1.6 节补装 extras。
 
 ### 1.6 按用途安装可选 extras

@@ -97,7 +97,14 @@ def _write_campaign(
                 "hierarchical_hypothesis": {
                     "enabled": enabled,
                     "required_channels": ["physchem", "conservation", "structure"],
+                    "child_max_tokens": 20000,
+                    "child_critic_max_tokens": 20000,
+                    "main_critic_max_tokens": 20000,
                 },
+                "llm": {"max_tokens": 20000},
+                "critic": {"max_tokens": 20000},
+                "model": "onehot_heterogeneous_ensemble",
+                "validation": {"enabled": True},
                 "knowledge_channels": {
                     "physchem": spec["channels"],
                     "conservation": spec["channels"],
@@ -118,6 +125,8 @@ def _write_campaign(
                 },
                 "generation": {
                     "selection_driver": "active_learning" if spec["al"] else "agent_uq",
+                    "use_fitness_predictors": True,
+                    "predictor_models": ["onehot_heterogeneous_ensemble"],
                     "quota_allocation": {"enabled": not spec["al"]},
                 },
                 "active_learning": {"enabled": spec["al"]},
@@ -149,6 +158,8 @@ def _write_campaign(
         "final_prediction_metrics": {"spearman": 0.4},
         "queries_used": budget * rounds,
         "rounds_aborted": 0,
+        "placeholder_predictor": False,
+        "fitness_predictors_used_for_generation": True,
         "data_source": {"fold_index": fold_index, "assignment_sha256": f"assign-fold-{fold_index}"},
     }
     return summary
@@ -165,6 +176,17 @@ def test_hierarchical_scientist_config_matches_formal_al96_protocol() -> None:
     assert config.critic.review_controls is False
     assert config.critic.review_diversity is False
     assert config.knowledge.local_knowledge.enabled is False
+    assert config.generation.use_fitness_predictors is True
+    assert [item.name for item in config.generation.predictor_models] == [
+        "onehot_heterogeneous_ensemble"
+    ]
+    assert config.generation.predictor_weight == 1.0
+    assert config.validation.enabled is True
+    assert config.llm.max_tokens == 20000
+    assert config.critic.max_tokens == 20000
+    assert hierarchy.child_max_tokens == 20000
+    assert hierarchy.child_critic_max_tokens == 20000
+    assert hierarchy.main_critic_max_tokens == 20000
     assert hierarchy.enabled is True
     assert hierarchy.required_channels == ("physchem", "conservation", "structure")
     assert hierarchy.max_parallel_branches == 3
@@ -491,6 +513,10 @@ def test_default_matrix_is_twelve_jobs_in_three_waves_of_four(
         "controls": False,
         "diversity": False,
     }
+    assert schedule["placeholder_predictor"] is False
+    assert schedule["max_tokens"] == 20000
+    assert schedule["fitness_predictor"] == "onehot_heterogeneous_ensemble"
+    assert schedule["use_fitness_predictors"] is True
     jobs = schedule["jobs"]
     assert len(jobs) == 12
     assert [job["condition"] for job in jobs] == [
@@ -523,6 +549,12 @@ def test_default_matrix_is_twelve_jobs_in_three_waves_of_four(
     ]
     assert {job["condition"] for job in jobs} == set(runner.DEFAULT_CONDITIONS)
     assert {job["fold_index"] for job in jobs} == {0, 1, 2}
+    assert all("--worker-placeholder-predictor" not in job["command"] for job in jobs)
+    assert all("--worker-max-tokens" in job["command"] for job in jobs)
+    assert all(
+        job["command"][job["command"].index("--worker-max-tokens") + 1] == "20000"
+        for job in jobs
+    )
 
 
 def test_batch_review_scope_flags_are_audited_and_forwarded(
@@ -638,3 +670,62 @@ def test_audit_accepts_base_kg_without_feature_pipeline(tmp_path) -> None:
     )
     assert audit["passed"] is True
     assert audit["failed_checks"] == []
+
+
+def test_placeholder_predictor_flag_is_rejected(monkeypatch) -> None:
+    runner = _load_runner()
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["run_hierarchical_scientist.py", "--placeholder-predictor", "--dry-run"],
+    )
+    with pytest.raises(SystemExit, match="cannot use --placeholder-predictor"):
+        runner.main()
+
+
+def test_apply_token_budget_sets_all_role_limits() -> None:
+    runner = _load_runner()
+    base = load_experiment_config("configs/experiments/hierarchical_scientist.deepseek.yaml")
+    updated = runner.apply_token_budget(base, 20000)
+    assert updated.llm.max_tokens == 20000
+    assert updated.critic.max_tokens == 20000
+    assert updated.hierarchical_hypothesis.child_max_tokens == 20000
+    assert updated.hierarchical_hypothesis.child_critic_max_tokens == 20000
+    assert updated.hierarchical_hypothesis.main_critic_max_tokens == 20000
+    with pytest.raises(ValueError, match="between 1 and 20000"):
+        runner.apply_token_budget(base, 20001)
+
+
+def test_apply_real_fitness_predictors_enables_registered_model() -> None:
+    runner = _load_runner()
+    base = load_experiment_config("configs/experiments/hierarchical_scientist.deepseek.yaml")
+    disabled = replace(
+        base,
+        generation=replace(
+            base.generation,
+            use_fitness_predictors=False,
+            predictor_models=(),
+            predictor_weight=0.0,
+        ),
+        validation=replace(base.validation, enabled=False),
+    )
+    updated = runner.apply_real_fitness_predictors(disabled)
+    assert updated.generation.use_fitness_predictors is True
+    assert updated.generation.predictor_models == (base.model,)
+    assert updated.generation.predictor_weight == 1.0
+    assert updated.validation.enabled is True
+
+
+def test_audit_rejects_placeholder_predictor(tmp_path) -> None:
+    runner = _load_runner()
+    summary = _write_campaign(tmp_path / "run-placeholder", fold_index=0)
+    summary["placeholder_predictor"] = True
+    audit = runner.audit_hierarchical_run(
+        summary,
+        condition="hierarchical",
+        expected_fold=0,
+        expected_rounds=3,
+        expected_budget=16,
+    )
+    assert audit["passed"] is False
+    assert "placeholder_predictor_disabled" in audit["failed_checks"]

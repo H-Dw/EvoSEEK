@@ -6,6 +6,9 @@ Same-task folds are isolated processes. Default matrix is 4 conditions x 3 folds
 out 3 child LLM calls; kg_base* jobs do not. Use --max-parallel 2 if DeepSeek
 contends. RAG sqlite paths are per condition/fold so parallel jobs do not share
 a writer.
+
+Formal runs call the configured remote LLM and score candidates with the
+registered fitness predictor. Placeholder predictors are not accepted.
 """
 
 from __future__ import annotations
@@ -14,6 +17,7 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -22,10 +26,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from fitness_agents.agents.output_guards import MAX_OUTPUT_TOKENS
 from fitness_agents.agents.remote_llm import load_project_env, resolve_secret
 from fitness_agents.config import load_experiment_config, project_root
 from fitness_agents.contracts.capabilities import PredictorCapabilities
 from fitness_agents.contracts.schemas import Prediction
+from fitness_agents.models import available_predictors
 from fitness_agents.reporting import aggregate_runs
 
 REQUIRED_CHANNELS = ("physchem", "conservation", "structure")
@@ -111,6 +117,7 @@ CONDITION_SPECS: dict[str, ConditionSpec] = {
 }
 ALLOWED_CONDITIONS = tuple(CONDITION_SPECS)
 DEFAULT_CONDITIONS = ("kg_base", "kg_base_rag", "kg_base_al", "kg_3features_rag")
+FORMAL_MAX_TOKENS = MAX_OUTPUT_TOKENS
 _RAG_LOCAL_TEMPLATE = None
 
 
@@ -202,6 +209,52 @@ def _parse_conditions(value: str) -> list[str]:
     if unknown:
         raise ValueError(f"Unknown conditions: {unknown}")
     return items
+
+
+def _validate_max_tokens(value: int) -> int:
+    if not 1 <= value <= FORMAL_MAX_TOKENS:
+        raise ValueError(f"max_tokens must be between 1 and {FORMAL_MAX_TOKENS}")
+    return value
+
+
+def apply_token_budget(config: Any, max_tokens: int) -> Any:
+    budget = _validate_max_tokens(max_tokens)
+    return replace(
+        config,
+        llm=replace(config.llm, max_tokens=budget),
+        critic=replace(config.critic, max_tokens=budget),
+        hierarchical_hypothesis=replace(
+            config.hierarchical_hypothesis,
+            child_max_tokens=budget,
+            child_critic_max_tokens=budget,
+            main_critic_max_tokens=budget,
+        ),
+    )
+
+
+def apply_real_fitness_predictors(config: Any) -> Any:
+    models = config.generation.predictor_models or (config.model,)
+    unknown = [item.name for item in models if item.name not in available_predictors()]
+    if unknown:
+        raise ValueError(f"Unknown fitness predictors: {unknown}")
+    if any("placeholder" in item.name for item in models):
+        raise ValueError("Formal runs cannot use a placeholder fitness predictor")
+    weight = config.generation.predictor_weight if config.generation.predictor_weight > 0 else 1.0
+    validation = (
+        config.validation
+        if config.validation.enabled
+        else replace(config.validation, enabled=True)
+    )
+    return replace(
+        config,
+        generation=replace(
+            config.generation,
+            use_fitness_predictors=True,
+            predictor_models=models,
+            predictor_weight=weight,
+        ),
+        validation=validation,
+    )
 
 
 def apply_condition(
@@ -404,6 +457,36 @@ def audit_hierarchical_run(
             summary.get("data_source", {}).get("fold_index"),
         ),
         _check("llm_is_non_mock", config.get("llm_provider") != "mock", config.get("llm_provider")),
+        _check(
+            "placeholder_predictor_disabled",
+            summary.get("placeholder_predictor") is not True,
+            summary.get("placeholder_predictor"),
+        ),
+        _check(
+            "fitness_predictors_used_for_generation",
+            summary.get("fitness_predictors_used_for_generation") is True,
+            summary.get("fitness_predictors_used_for_generation"),
+        ),
+        _check(
+            "fitness_model_is_registered",
+            str(config.get("model") or "") in available_predictors(),
+            config.get("model"),
+        ),
+        _check(
+            "validation_enabled_for_fitness_scoring",
+            (config.get("validation") or {}).get("enabled") is True,
+            config.get("validation"),
+        ),
+        _check(
+            "llm_max_tokens_is_formal_budget",
+            int((config.get("llm") or {}).get("max_tokens") or 0) == FORMAL_MAX_TOKENS,
+            (config.get("llm") or {}).get("max_tokens"),
+        ),
+        _check(
+            "critic_max_tokens_is_formal_budget",
+            int((config.get("critic") or {}).get("max_tokens") or 0) == FORMAL_MAX_TOKENS,
+            (config.get("critic") or {}).get("max_tokens"),
+        ),
         _check("rounds_match_protocol", int(config.get("rounds") or 0) == expected_rounds, config.get("rounds")),
         _check(
             "budget_matches_protocol",
@@ -427,6 +510,11 @@ def audit_hierarchical_run(
     checks.extend(
         [
             _check("hierarchy_enabled_matches", hierarchy.get("enabled") is spec.hierarchical, hierarchy),
+            _check(
+                "generation_uses_fitness_predictors",
+                generation_cfg.get("use_fitness_predictors") is True,
+                generation_cfg.get("use_fitness_predictors"),
+            ),
             _check("rag_runtime_matches", bool(local_runtime.get("enabled")) == spec.rag, local_runtime),
             _check(
                 "rag_allowed_in_scientist_context",
@@ -504,6 +592,19 @@ def audit_hierarchical_run(
                 required,
             )
         )
+        checks.append(
+            _check(
+                "child_role_max_tokens_are_formal_budget",
+                int(hierarchy.get("child_max_tokens") or 0) == FORMAL_MAX_TOKENS
+                and int(hierarchy.get("child_critic_max_tokens") or 0) == FORMAL_MAX_TOKENS
+                and int(hierarchy.get("main_critic_max_tokens") or 0) == FORMAL_MAX_TOKENS,
+                {
+                    "child_max_tokens": hierarchy.get("child_max_tokens"),
+                    "child_critic_max_tokens": hierarchy.get("child_critic_max_tokens"),
+                    "main_critic_max_tokens": hierarchy.get("main_critic_max_tokens"),
+                },
+            )
+        )
         pipeline_rounds = [
             path for path in round_dirs if (path / "hypothesis_pipeline.json").is_file()
         ]
@@ -570,6 +671,7 @@ def _build_jobs(
     output_root: Path,
     python_executable: str,
     placeholder_predictor: bool = False,
+    max_tokens: int = FORMAL_MAX_TOKENS,
     disable_batch_control_review: bool = False,
     disable_batch_diversity_review: bool = False,
 ) -> list[HierarchicalJob]:
@@ -593,6 +695,8 @@ def _build_jobs(
                 str(output_root),
                 "--worker-rounds",
                 str(expected_rounds),
+                "--worker-max-tokens",
+                str(max_tokens),
             )
             if placeholder_predictor:
                 command = (*command, "--worker-placeholder-predictor")
@@ -787,7 +891,7 @@ def _worker(args: argparse.Namespace) -> None:
         raise SystemExit(f"Unknown condition {args.worker_condition!r}")
     if args.worker_output_root is None:
         raise SystemExit("Worker requires --worker-output-root")
-    from fitness_agents.loop import CampaignRunner, run_campaign
+    from fitness_agents.loop import run_campaign
 
     config = apply_condition(
         load_experiment_config(config_path),
@@ -796,10 +900,17 @@ def _worker(args: argparse.Namespace) -> None:
         seed=seed,
         output_root=args.worker_output_root.resolve(),
     )
+    config = apply_real_fitness_predictors(config)
     if args.worker_rounds is not None:
         if args.worker_rounds < 1:
             raise SystemExit("Worker rounds must be positive")
         config = replace(config, rounds=args.worker_rounds)
+    if args.worker_max_tokens is not None:
+        try:
+            config = apply_token_budget(config, args.worker_max_tokens)
+        except ValueError as error:
+            raise SystemExit(str(error)) from error
+        os.environ["FITNESS_AGENTS_LLM_MAX_TOKENS"] = str(args.worker_max_tokens)
     if args.disable_batch_control_review or args.disable_batch_diversity_review:
         config = replace(
             config,
@@ -815,14 +926,13 @@ def _worker(args: argparse.Namespace) -> None:
                 ),
             ),
         )
-    summary = (
-        CampaignRunner(
-            config,
-            predictor_factory=_canary_placeholder_predictor_factory,
-        ).run()
-        if args.worker_placeholder_predictor
-        else run_campaign(config)
-    )
+    if args.worker_placeholder_predictor:
+        raise SystemExit(
+            "Formal hierarchical runs cannot use --placeholder-predictor; "
+            "the campaign scores candidates with the configured fitness model"
+        )
+    summary = run_campaign(config)
+    summary["placeholder_predictor"] = False
     print(json.dumps(summary, indent=2))
 
 
@@ -831,7 +941,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Run kg_base, kg_base_rag, kg_base_al, then kg_3features_rag across "
-            "folds of one GB1 AL96 task. Default 4 conditions x 3 folds = 12 jobs; "
+            "folds of one GB1 AL96 task with real DeepSeek calls and the configured "
+            "fitness predictor. Default 4 conditions x 3 folds = 12 jobs; "
             "--max-parallel 4 runs three waves. kg_3features_rag fans out three "
             "child LLM calls; --max-parallel 2 is the rate-limit fallback."
         )
@@ -851,10 +962,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--seed", type=int)
+    parser.add_argument("--rounds", type=int, help="Override campaign rounds")
     parser.add_argument(
-        "--rounds",
+        "--max-tokens",
         type=int,
-        help="Override campaign rounds (used by bounded canary runs)",
+        default=FORMAL_MAX_TOKENS,
+        help=(
+            "Output token budget for Scientist, Critic, and hierarchical child roles. "
+            f"Default {FORMAL_MAX_TOKENS}."
+        ),
     )
     parser.add_argument("--max-parallel", type=int, default=4)
     parser.add_argument("--timeout-seconds", type=float, default=0.0)
@@ -863,7 +979,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--placeholder-predictor",
         action="store_true",
-        help="Use deterministic hash predictions; intended only for API/prompt canaries",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--disable-batch-control-review",
@@ -884,6 +1000,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--worker-condition", help=argparse.SUPPRESS)
     parser.add_argument("--worker-output-root", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--worker-rounds", type=int, help=argparse.SUPPRESS)
+    parser.add_argument("--worker-max-tokens", type=int, help=argparse.SUPPRESS)
     parser.add_argument(
         "--worker-placeholder-predictor", action="store_true", help=argparse.SUPPRESS
     )
@@ -899,8 +1016,19 @@ def main() -> None:
     config_path = args.config if args.config.is_absolute() else root / args.config
     if args.max_parallel < 1:
         raise SystemExit("--max-parallel must be at least 1")
+    if args.placeholder_predictor:
+        raise SystemExit(
+            "Formal hierarchical runs cannot use --placeholder-predictor; "
+            "omit the flag so the configured fitness model scores candidates"
+        )
+    try:
+        max_tokens = _validate_max_tokens(args.max_tokens)
+    except ValueError as error:
+        raise SystemExit(f"--max-tokens {error}") from error
     conditions = _parse_conditions(args.conditions)
-    config = load_experiment_config(config_path)
+    config = apply_real_fitness_predictors(
+        apply_token_budget(load_experiment_config(config_path), max_tokens)
+    )
     expected_rounds = config.rounds if args.rounds is None else args.rounds
     if expected_rounds < 1:
         raise SystemExit("--rounds must be positive")
@@ -929,7 +1057,8 @@ def main() -> None:
         expected_budget=config.budget_per_round,
         output_root=(output_dir / "runs").resolve(),
         python_executable=sys.executable,
-        placeholder_predictor=args.placeholder_predictor,
+        placeholder_predictor=False,
+        max_tokens=max_tokens,
         disable_batch_control_review=args.disable_batch_control_review,
         disable_batch_diversity_review=args.disable_batch_diversity_review,
     )
@@ -947,7 +1076,22 @@ def main() -> None:
         "expected_waves": (len(jobs) + args.max_parallel - 1) // args.max_parallel,
         "expected_rounds": expected_rounds,
         "expected_budget": config.budget_per_round,
-        "placeholder_predictor": args.placeholder_predictor,
+        "placeholder_predictor": False,
+        "fitness_predictor": config.model.name,
+        "generation_predictor_models": [item.name for item in config.generation.predictor_models],
+        "use_fitness_predictors": config.generation.use_fitness_predictors,
+        "max_tokens": max_tokens,
+        "llm_max_tokens": config.llm.max_tokens,
+        "critic_max_tokens": config.critic.max_tokens,
+        "hierarchical_role_max_tokens": {
+            "child_max_tokens": config.hierarchical_hypothesis.child_max_tokens,
+            "child_critic_max_tokens": (
+                config.hierarchical_hypothesis.child_critic_max_tokens
+            ),
+            "main_critic_max_tokens": (
+                config.hierarchical_hypothesis.main_critic_max_tokens
+            ),
+        },
         "batch_review_scope": {
             "controls": (
                 config.critic.review_controls

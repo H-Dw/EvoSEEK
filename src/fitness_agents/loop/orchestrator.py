@@ -1183,6 +1183,7 @@ class CampaignRunner:
                 "profile": self.config.critic.profile,
                 "base_url": self.config.critic.base_url,
                 "max_revision_attempts": self.config.critic.max_revision_attempts,
+                "max_tokens": self.config.critic.max_tokens,
                 "max_transport_retries": self.config.critic.max_model_retries,
                 "output_retry_budgets": {
                     "truncated": self.config.critic.max_truncation_retries,
@@ -1311,6 +1312,15 @@ class CampaignRunner:
                 ),
                 "main_critic_profile": (
                     self.config.hierarchical_hypothesis.main_critic_profile
+                ),
+                "child_max_tokens": (
+                    self.config.hierarchical_hypothesis.child_max_tokens
+                ),
+                "child_critic_max_tokens": (
+                    self.config.hierarchical_hypothesis.child_critic_max_tokens
+                ),
+                "main_critic_max_tokens": (
+                    self.config.hierarchical_hypothesis.main_critic_max_tokens
                 ),
                 "main_max_input_chars": (
                     self.config.hierarchical_hypothesis.main_max_input_chars
@@ -1890,9 +1900,10 @@ class CampaignRunner:
 
             if selection_driver == "agent_uq":
                 if self.config.generation.use_fitness_predictors:
-                    for model_index, model_config in enumerate(
-                        self.config.generation.predictor_models
-                    ):
+                    generation_models = (
+                        self.config.generation.predictor_models or (self.config.model,)
+                    )
+                    for model_index, model_config in enumerate(generation_models):
                         generation_predictor = self._create_and_fit_predictor(
                             model_config,
                             observed_variants,

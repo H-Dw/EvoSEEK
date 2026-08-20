@@ -36,6 +36,9 @@ def test_formal_feature_route_enables_hierarchy_and_bounded_retries() -> None:
     assert config.hierarchical_hypothesis.child_max_input_chars == 120000
     assert config.hierarchical_hypothesis.critic_max_input_chars == 120000
     assert config.hierarchical_hypothesis.subcritic_mode == "remote"
+    assert config.hierarchical_hypothesis.child_max_tokens == 20000
+    assert config.hierarchical_hypothesis.child_critic_max_tokens == 20000
+    assert config.hierarchical_hypothesis.main_critic_max_tokens == 20000
     assert config.llm.allow_unknown_evidence_stripping is False
     smoke = load_experiment_config(
         "configs/experiments/knowledge_agent_features.example.yaml"

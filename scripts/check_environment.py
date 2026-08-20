@@ -9,7 +9,7 @@ import sys
 
 def main() -> None:
     packages = {}
-    for name in ("numpy", "pandas", "sklearn", "scipy", "yaml"):
+    for name in ("numpy", "pandas", "sklearn", "scipy", "yaml", "httpx"):
         module = importlib.import_module(name)
         packages[name] = getattr(module, "__version__", "available")
     print(
