@@ -1,0 +1,32 @@
+mode: random
+seed: 42
+rounds: 3
+budget_per_round: 16
+# Label-blind, seed/fold/round-specific proposal budget. Random samples the
+# downstream batch only inside this fixed candidate set.
+candidate_limit: 32
+acquisition: random
+ucb_beta: 1.5
+diversity_lambda: 0.0
+task_config: configs/task/gb1_binding_al96.yaml
+model_config: configs/model/kermut.yaml
+knowledge_config: configs/knowledge/gb1.yaml
+output_root: artifacts/runs
+llm_provider: mock
+knowledge_enabled: false
+score_shuffle: false
+evidence_deletion: false
+run_label: al96-b16
+condition: random
+generation:
+  selection_driver: random
+  use_fitness_predictors: false
+kg_interaction:
+  enabled: false
+evaluation:
+  metrics: [spearman, pearson, mse, rmse, ndcg, top_k_hit, top_k_recall,
+    regret_at_k, interval_90_coverage, gaussian_nll]
+  top_k: 10
+output:
+  artifacts: [json, csv, markdown, svg, reasoning]
+  top_k: 16

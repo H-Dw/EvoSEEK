@@ -150,8 +150,9 @@ python -m pip install -e ".[ui]"
 python -m pip install -e ".[dev,llm,rag]"
 ```
 
-Kermut 默认走 CPU。若要用 GPU，应先安装与本机 CUDA 匹配的 PyTorch，再装其余 kermut 依赖；
-配置见第 9.1 节。
+Kermut 默认走 CPU。若要用 GPU，**不要**直接 `pip install -e ".[kermut]"`：当前 PyPI 默认
+torch 是 CUDA 13.0 wheel，在 CUDA 12.1 驱动上会报 `NVIDIA driver too old` 并无法调用 GPU。
+应先安装与 `nvidia-smi` 中 CUDA Version 匹配的 PyTorch，再装其余 kermut 依赖；步骤见第 9.1 节。
 
 ### 1.7 配置密钥（`.env`）
 
@@ -517,6 +518,44 @@ API 返回向量会检查数量、顺序、维度、有限值与零向量，并�
 静默截断。manifest 记录 provider、模型家族、模型/部署版本、endpoint 哈希、task/instruction、
 维度和 tokenizer 策略，但不会记录 API key。
 
+第 4.2 节的 `directed_evolution-qwen-v4.sqlite` 只覆盖 directed_evolution 语料，供
+`knowledge_agent_qwen_rag` 使用。Hierarchical Scientist 的 RAG 条件需要另一份含 binding
+claims 的共享索引，见第 4.3 节。
+
+### 4.3 正式矩阵的共享 Qwen corpus index
+
+并行 RAG worker 只读一份预构建的 Qwen 语料索引，各自写入 per-condition/fold overlay，禁止
+边跑边建。密钥从 `.env` 的 `DASHSCOPE_API_KEY` 读取（第 1.7 节）。
+
+Hierarchical Scientist 的 `kg_base_rag` 与 `kg_3features_rag` 要求文件：
+
+`artifacts/local_knowledge/corpus/gb1-reasoning-routes-qwen-v4.sqlite`
+
+该路径由 `configs/knowledge/gb1_reasoning_routes.yaml` 给出，语料同时包含
+`resources/local_knowledge/directed_evolution` 与 `resources/local_knowledge/binding` 的英文
+claims。启动含 RAG 条件的 `scripts/run_hierarchical_scientist.py` 前必须先构建；缺文件时
+调度器会立即退出，12 个 job 都不会启动。
+
+```bash
+python -m fitness_agents.cli knowledge index \
+  configs/experiments/gb1_reasoning_routes_base.yaml
+python -m fitness_agents.cli knowledge inspect \
+  configs/experiments/gb1_reasoning_routes_base.yaml
+```
+
+`inspect` 应打印 corpus 统计。不要把第 4.2 节的 `directed_evolution-qwen-v4.sqlite` 拷贝或改名
+成 `gb1-reasoning-routes-qwen-v4.sqlite`：两份索引的 roots、chunk 与 embedding manifest 不同。
+
+Qwen knowledge-agent AL96（`run_agent_baselines.py --modes knowledge_agent_qwen_rag`）仍使用
+第 4.2 节的 `directed_evolution-qwen-v4.sqlite`。若该文件尚不存在，用同一套 DashScope 密钥构建：
+
+```bash
+python -m fitness_agents.cli knowledge index \
+  configs/experiments/knowledge_agent_qwen_al96.yaml
+python -m fitness_agents.cli knowledge inspect \
+  configs/experiments/knowledge_agent_qwen_al96.yaml
+```
+
 ## 5. 四种规定 baseline
 
 四种模式共享相同 initial/validation/oracle/final split、查询预算、fitness predictor 和 seed。
@@ -551,6 +590,74 @@ python scripts/run_baselines.py --seeds 11,22,33 \
 ```
 
 比较表写入 `artifacts/baseline-comparison-*/run_comparison.{csv,json}`。
+
+### 5.1 GB1-AL96 并行 baseline（`run_agent_baselines.py`）
+
+`scripts/run_baselines.py` 按 seed 串行跑 demo/full 四模式。正式 AL96 五折闭环请用
+`scripts/run_agent_baselines.py`：每个 `(mode, seed, fold)` 是独立进程，可用
+`--max-parallel` 并行。先按第 2.1 节生成 `GB1-AL96-5CV-v1`，并安装 `[llm]` 与 `[kermut]`。
+
+`random` / `fitness_direct` 不调用 LLM、不启用 RAG 或 KG 工具。Scientist 类模式需要
+`DEEPSEEK_API_KEY`。`knowledge_agent_qwen_rag` 另外需要 `DASHSCOPE_API_KEY` 和第 4.2 节的
+Qwen 索引。
+
+检查调度表（不启动 campaign）：
+
+```bash
+python scripts/run_agent_baselines.py \
+  --preset al96 \
+  --modes random,fitness_direct \
+  --seeds 42 \
+  --folds 0,1,2 \
+  --max-parallel 3 \
+  --dry-run
+```
+
+后台跑 random 与 fitness_direct（6 个 job；`--max-parallel 3` 分两波）：
+
+```bash
+nohup python scripts/run_agent_baselines.py \
+  --preset al96 \
+  --modes random,fitness_direct \
+  --seeds 42 \
+  --folds 0,1,2 \
+  --max-parallel 3 \
+  --cuda-devices 0,1,2 \
+  > random_fitness_direct_b16.log 2>&1 &
+```
+
+默认 `--modes` 为 `random,fitness_direct,knowledge_agent`。加上 Knowledge Agent：
+
+```bash
+nohup python scripts/run_agent_baselines.py \
+  --preset al96 \
+  --modes random,fitness_direct,knowledge_agent \
+  --seeds 42 \
+  --folds 0,1,2 \
+  --max-parallel 3 \
+  --cuda-devices 0,1,2 \
+  > agent_baselines.log 2>&1 &
+```
+
+`--preset al96` 可用模式：
+
+| `--modes` | 作用 |
+|---|---|
+| `random` | 在配置的 `candidate_limit` 池内随机选湿实验 batch |
+| `fitness_direct` | 同一池内 Kermut greedy |
+| `llm_agent` | DeepSeek Scientist，无 KG / RAG |
+| `knowledge_agent` | observation KG，无文档 RAG |
+| `knowledge_agent_rag` | 本地 BGE RAG（第 4.1 节） |
+| `knowledge_agent_qwen_rag` | Qwen embedding / rerank RAG（第 4.2 节索引） |
+
+`--comparison rag`、`agents`、`llm_vs_qwen_rag` 等命名集合见脚本内 `COMPARISON_SETS`。产物写入
+`artifacts/agent-baselines-<时间戳>/`（`schedule.json`、`job_logs/`、`report.json`、`aggregate/`）。
+`--folds config`（默认）沿用各 YAML 的 `fold_index`；正式三折比较请显式传 `--folds 0,1,2`。
+
+Kermut 配置见 `configs/model/kermut.yaml`（`device: cuda:0`）。请在 conda 环境
+`fitness-agents` 中启动（第 9.1 节）。`--max-parallel 3` 或 `4` 时加上
+`--cuda-devices 0,1,2,3`（默认 `auto` 也会按可见卡数分配），让并发 job 各占一张卡。
+不要与第 16 节 Hierarchical Scientist 同时打满同一组 GPU。
 
 ## 6. 模块消融
 
@@ -644,14 +751,36 @@ register_predictor("my_kermut_adapter", my_predictor_factory)
 
 ### 9.1 安装 Kermut 后端
 
-核心环境不强制安装 PyTorch。需要 Kermut 时安装对应可选依赖：
+核心环境不强制安装 PyTorch。需要 Kermut 时，先看 `nvidia-smi` 右上角的 **CUDA Version**（这是驱动
+最高支持的 toolkit，不是 `nvcc` 版本），再安装匹配的 PyTorch。然后装 GPyTorch 与 `fair-esm`。
+Kermut 的复合核与 Exact-GP 核心已经包含在项目中，不需要另外安装上游 Kermut wheel。
+
+本机当前是驱动 530.41.03 / CUDA 12.1、4× RTX 3090。请使用 `fitness-agents` conda 环境，**不要**
+用仓库 `.venv`（其中是 `torch 2.13+cu130`，GPU 不可用）。cu121 官方 wheel 的最高版本是 2.5.1：
+
+```bash
+conda activate fitness-agents
+cd /path/to/fitness-agents
+
+python -m pip install \
+  --index-url https://download.pytorch.org/whl/cu121 \
+  --extra-index-url https://pypi.org/simple \
+  "torch==2.5.1" \
+  "gpytorch>=1.11,<2" \
+  "fair-esm>=2.0,<3"
+
+python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"
+# 期望：2.5.1+cu121  12.1  True
+```
+
+若只跑 CPU，或驱动已支持 CUDA 12.4+，才可以直接：
 
 ```bash
 python -m pip install -e ".[kermut]"
 ```
 
-这会安装 PyTorch、GPyTorch 和 `fair-esm`。Kermut 的复合核与 Exact-GP 核心已经包含在项目中，
-不需要另外安装上游 Kermut wheel。默认使用 CPU；如需 GPU，应安装与本机 CUDA 匹配的 PyTorch。
+`pip install -e ".[kermut]"` 会从 PyPI 拉最新默认 torch（目前为 cu130）。在 CUDA 12.1 驱动上
+`torch.cuda.is_available()` 为 false，日志出现 `NVIDIA driver too old`，进程会继续在 CPU 上跑。
 
 Kermut 还需要两个 assay/蛋白特异的外部资源，项目不会用占位数据替代：
 
@@ -664,7 +793,7 @@ Kermut 还需要两个 assay/蛋白特异的外部资源，项目不会用占位
 
 ```yaml
 name: kermut
-device: cpu
+device: cuda:0
 allow_device_fallback: false
 batch_size: 8
 backend_factory: fitness_agents.models.backends.kermut:create_backend
@@ -697,13 +826,42 @@ GB1 候选表可以使用 `VDGV` 这样的四位点序列，而结构资源仍�
 model_config: configs/model/kermut.yaml
 ```
 
-CPU 是默认激活方式。GPU 和显式回退分别配置为：
+本仓库 `configs/model/kermut.yaml` 已按本机 GPU 设为 `device: cuda:0`。GB1 候选是 265 残基
+FLIP fusion，ESM-2 650M 在独占 24GB 3090 上可以把 `batch_size` 提到 16–32；多进程或与其它作业
+共享显存时保持 8。`allow_device_fallback: false` 表示 GPU 不可用时直接报错，避免再静默落到 CPU。
 
 ```yaml
 device: cuda:0
 allow_device_fallback: false  # GPU 不可用时直接报错
 # allow_device_fallback: true # 明确允许回退到 CPU
+batch_size: 8                 # 共享 3090 时的安全值；独占时可改为 16 或 32
 ```
+
+不要把 YAML 改成 `cuda:0` / `cuda:1` / `cuda:2` / `cuda:3` 来做四卡并行：所有 worker 读同一份
+配置，会一起挤在 `cuda:0` 上。正确做法是保持 `device: cuda:0`，由调度器给每个子进程设置
+`CUDA_VISIBLE_DEVICES`，让该进程只看见一张卡（在进程内仍叫 `cuda:0`）。
+
+`scripts/run_hierarchical_scientist.py` 与 `scripts/run_agent_baselines.py` 提供
+`--cuda-devices`：
+
+| 值 | 行为 |
+|---|---|
+| `auto`（默认） | 发现可见 GPU；`--max-parallel` 不能超过卡数 |
+| `0,1,2,3` | 四卡池，并发 job 各占一张 |
+| `none` | 不隔离，所有 worker 继承父进程设备（多进程会争用 GPU 0） |
+
+四卡同时跑 4 个 Kermut 进程（conda 环境 `fitness-agents`，不要用 `.venv` 的 cu130 torch）：
+
+```bash
+conda activate fitness-agents
+python scripts/run_hierarchical_scientist.py \
+  --max-parallel 4 \
+  --cuda-devices 0,1,2,3 \
+  --dry-run
+```
+
+单 GPU 或显存紧张时用 `--max-parallel 1`。卡数少于并行度时调度器会直接退出，而不是让两份
+ESM-2 650M 挤在同一张 3090 上。
 
 ### 9.3 实时序列与固定候选池
 
@@ -816,7 +974,7 @@ src/fitness_agents/
   reporting/               baseline、消融与干预报告
 scripts/data/              数据下载、准备、验证
 scripts/models/            模型/结构资产准备
-scripts/run_*.py           demo、四 baseline、消融、科学思维测试
+scripts/run_*.py           demo、四 baseline、AL96 并行 baseline、Hierarchical Scientist、消融、科学思维测试
 scripts/tests/             分层测试命令
 tests/                     unit/integration/leakage/e2e
 services/structure/        可选 GPU sidecar 接口约定
@@ -902,3 +1060,62 @@ LLM hypothesis、主动学习 posterior/acquisition，以及 `kg_truncation_audi
 trace 证明 LLM 在语义上依赖某条 evidence，也不能证明某路线提高 fitness。后者应在相同 fold/seed
 上增加 evidence 删除或置换干预、多个 seed 和置信区间；三通道与未校准 RAG evidence 默认不直接
 升级为测量或 fitness 选择证据。
+
+## 16. Hierarchical Scientist 正式矩阵
+
+`scripts/run_hierarchical_scientist.py` 在 GB1-AL96 前三折上跑四组条件。Scientist / Critic
+走 DeepSeek；RAG embedding / reranker 走 Qwen；fitness 为 Kermut。Agent-UQ 条件不把 fitness
+混进 acquisition；`kg_base_al` 使用显式 Kermut posterior。`--placeholder-predictor` 会被拒绝。
+
+| 条件 | 层级 | 文档 RAG | 三通道特征工具 | 采集 |
+|---|---|---|---|---|
+| `kg_base` | 否 | 否 | 否 | Agent-UQ |
+| `kg_base_rag` | 否 | 是 | 否 | Agent-UQ |
+| `kg_base_al` | 否 | 否 | 否 | Kermut active learning |
+| `kg_3features_rag` | 是（三路子 Scientist） | 是 | physchem / conservation / structure | Agent-UQ |
+
+前置：第 2.1 节 split、第 1.7 节 `DEEPSEEK_API_KEY` 与 `DASHSCOPE_API_KEY`、第 9.2 节 Kermut
+资源。只要 `--conditions` 含 RAG 项，必须先完成第 4.3 节共享 Qwen 索引，否则调度器 fail-closed。
+
+只检查调度表：
+
+```bash
+python scripts/run_hierarchical_scientist.py \
+  --config configs/experiments/hierarchical_scientist.deepseek.yaml \
+  --conditions kg_base,kg_base_rag,kg_base_al,kg_3features_rag \
+  --folds 0,1,2 \
+  --max-parallel 4 \
+  --cuda-devices 0,1,2,3 \
+  --dry-run
+```
+
+正式 12-job 矩阵（4 条件 × 3 折）。默认 `--max-parallel 4` 分三波，每波恰好一个
+`kg_3features_rag`（内部再扇出三路子 Scientist）。DeepSeek 争用时改用 `--max-parallel 2`。
+四张 3090 上同时跑 Kermut 时加 `--cuda-devices 0,1,2,3`（默认 `auto` 等价于发现全部可见卡）；
+YAML 保持 `device: cuda:0`，由调度器按 job 设置 `CUDA_VISIBLE_DEVICES`。必须用 conda 环境
+`fitness-agents`，不要用 `.venv`。
+
+```bash
+conda activate fitness-agents
+nohup python scripts/run_hierarchical_scientist.py \
+  --config configs/experiments/hierarchical_scientist.deepseek.yaml \
+  --conditions kg_base,kg_base_rag,kg_base_al,kg_3features_rag \
+  --folds 0,1,2 \
+  --max-parallel 4 \
+  --cuda-devices 0,1,2,3 \
+  > hierarchical_scientist.log 2>&1 &
+```
+
+产物写入 `artifacts/hierarchical-scientist-<时间戳>/`（`schedule.json`、`fold_logs/`、
+`report.json`、`aggregate/`）。总控看 `hierarchical_scientist.log`；单 job 看
+`fold_logs/<condition>-fXX-sYY.stderr.log`。
+
+只跑不依赖 RAG 的两组时可以暂缓第 4.3 节索引：
+
+```bash
+nohup python scripts/run_hierarchical_scientist.py \
+  --conditions kg_base,kg_base_al \
+  --folds 0,1,2 \
+  --max-parallel 2 \
+  > hierarchical_scientist_base.log 2>&1 &
+```

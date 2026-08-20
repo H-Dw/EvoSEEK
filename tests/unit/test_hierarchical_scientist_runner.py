@@ -387,6 +387,78 @@ def test_same_task_folds_respect_parallel_limit(tmp_path, monkeypatch) -> None:
     assert len(list((tmp_path / "logs").glob("*.stdout.log"))) == 3
 
 
+def test_parallel_jobs_pin_distinct_cuda_devices(tmp_path, monkeypatch) -> None:
+    runner = _load_runner()
+    lock = threading.Lock()
+    borrowed: set[str] = set()
+    max_borrowed = 0
+    seen: list[str] = []
+
+    def fake_run(command, **kwargs):
+        nonlocal max_borrowed
+        env = kwargs["env"]
+        device = env["CUDA_VISIBLE_DEVICES"]
+        fold = int(command[command.index("--worker-fold") + 1])
+        condition = command[command.index("--worker-condition") + 1]
+        with lock:
+            assert device not in borrowed
+            borrowed.add(device)
+            seen.append(device)
+            max_borrowed = max(max_borrowed, len(borrowed))
+        time.sleep(0.05)
+        with lock:
+            borrowed.remove(device)
+        summary = _write_campaign(
+            tmp_path / f"run-{condition}-f{fold:02d}",
+            fold_index=fold,
+            condition=condition,
+        )
+        return subprocess.CompletedProcess(command, 0, json.dumps(summary), "")
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    jobs = runner._build_jobs(
+        script_path=Path("scripts/run_hierarchical_scientist.py"),
+        config_path=Path("config.yaml"),
+        conditions=["kg_base", "kg_base_al"],
+        folds=[0, 1],
+        seed=11,
+        expected_rounds=3,
+        expected_budget=16,
+        expected_candidate_limit=32,
+        output_root=tmp_path / "runs",
+        python_executable=sys.executable,
+    )
+    results = runner.run_fold_jobs(
+        jobs,
+        max_parallel=4,
+        project_dir=tmp_path,
+        output_dir=tmp_path / "logs",
+        cuda_devices=("0", "1", "2", "3"),
+    )
+    assert max_borrowed == 4
+    assert set(seen) == {"0", "1", "2", "3"}
+    assert {result.cuda_device for result in results} == {"0", "1", "2", "3"}
+    assert all(result.status == "passed" for result in results)
+
+
+def test_explicit_cuda_devices_must_cover_max_parallel(monkeypatch) -> None:
+    runner = _load_runner()
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_hierarchical_scientist.py",
+            "--dry-run",
+            "--max-parallel",
+            "4",
+            "--cuda-devices",
+            "0,1",
+        ],
+    )
+    with pytest.raises(SystemExit, match="exceeds 2 CUDA"):
+        runner.main()
+
+
 def test_fold_failure_is_recorded_without_losing_other_folds(tmp_path, monkeypatch) -> None:
     runner = _load_runner()
 
@@ -573,6 +645,9 @@ def test_default_matrix_is_twelve_jobs_in_three_waves_of_four(
     assert schedule["conditions"] == list(runner.DEFAULT_CONDITIONS)
     assert schedule["folds"] == [0, 1, 2]
     assert schedule["max_parallel"] == 4
+    assert schedule["cuda_assignment"]["policy"] == "auto"
+    assert schedule["cuda_assignment"]["isolation"] == "CUDA_VISIBLE_DEVICES"
+    assert schedule["cuda_assignment"]["worker_kermut_device"] == "cuda:0"
     assert schedule["expected_waves"] == 3
     assert schedule["batch_review_scope"] == {
         "controls": True,

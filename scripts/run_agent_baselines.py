@@ -17,6 +17,13 @@ from typing import Any
 from fitness_agents.config import load_experiment_config, project_root
 from fitness_agents.reporting import aggregate_runs
 from fitness_agents.reporting.aggregate import infer_condition
+from fitness_agents.utils.cuda_jobs import (
+    CudaDevicePool,
+    cuda_assignment_record,
+    environment_with_cuda_device,
+    parse_cuda_devices_arg,
+    resolve_cuda_device_pool,
+)
 from fitness_agents.utils.progress import add_logging_arguments, configure_from_args
 
 PRESETS: dict[str, dict[str, str]] = {
@@ -235,6 +242,7 @@ class BaselineJobResult:
     stderr_log: str
     summary: dict[str, Any] | None
     error: str | None = None
+    cuda_device: str | None = None
 
 
 def _parse_summary(stdout: str, job: BaselineJob) -> dict[str, Any]:
@@ -259,63 +267,73 @@ def _run_one_job(
     project_dir: Path,
     output_dir: Path,
     timeout_seconds: float | None,
+    cuda_pool: CudaDevicePool | None = None,
 ) -> BaselineJobResult:
     prefix = _job_id(job.public)
     stdout_path = output_dir / f"{prefix}.stdout.log"
     stderr_path = output_dir / f"{prefix}.stderr.log"
+    cuda_device = cuda_pool.acquire() if cuda_pool is not None else None
+
+    def _result(**kwargs: Any) -> BaselineJobResult:
+        return BaselineJobResult(
+            index=job.index,
+            public=job.public,
+            stdout_log=str(stdout_path),
+            stderr_log=str(stderr_path),
+            cuda_device=cuda_device,
+            **kwargs,
+        )
+
     try:
-        completed = subprocess.run(
-            list(job.command),
-            cwd=project_dir,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout_seconds,
-            check=False,
-        )
-        stdout_path.write_text(completed.stdout, encoding="utf-8")
-        stderr_path.write_text(completed.stderr, encoding="utf-8")
-        summary = None
-        error = None
-        status = "failed"
-        if completed.returncode == 0:
-            try:
-                summary = _parse_summary(completed.stdout, job)
-                status = "completed"
-            except (KeyError, TypeError, ValueError, json.JSONDecodeError) as parse_error:
-                error = f"Campaign output is not a valid summary: {parse_error}"
-        else:
-            error = f"Campaign exited with code {completed.returncode}"
-        return BaselineJobResult(
-            index=job.index,
-            public=job.public,
-            status=status,
-            returncode=completed.returncode,
-            stdout_log=str(stdout_path),
-            stderr_log=str(stderr_path),
-            summary=summary,
-            error=error,
-        )
-    except subprocess.TimeoutExpired as timeout_error:
-        stdout = timeout_error.stdout or ""
-        stderr = timeout_error.stderr or ""
-        if isinstance(stdout, bytes):
-            stdout = stdout.decode("utf-8", errors="replace")
-        if isinstance(stderr, bytes):
-            stderr = stderr.decode("utf-8", errors="replace")
-        stdout_path.write_text(stdout, encoding="utf-8")
-        stderr_path.write_text(stderr, encoding="utf-8")
-        return BaselineJobResult(
-            index=job.index,
-            public=job.public,
-            status="timeout",
-            returncode=124,
-            stdout_log=str(stdout_path),
-            stderr_log=str(stderr_path),
-            summary=None,
-            error=f"Campaign exceeded timeout of {timeout_seconds} seconds",
-        )
+        try:
+            completed = subprocess.run(
+                list(job.command),
+                cwd=project_dir,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout_seconds,
+                check=False,
+                env=environment_with_cuda_device(cuda_device),
+            )
+            stdout_path.write_text(completed.stdout, encoding="utf-8")
+            stderr_path.write_text(completed.stderr, encoding="utf-8")
+            summary = None
+            error = None
+            status = "failed"
+            if completed.returncode == 0:
+                try:
+                    summary = _parse_summary(completed.stdout, job)
+                    status = "completed"
+                except (KeyError, TypeError, ValueError, json.JSONDecodeError) as parse_error:
+                    error = f"Campaign output is not a valid summary: {parse_error}"
+            else:
+                error = f"Campaign exited with code {completed.returncode}"
+            return _result(
+                status=status,
+                returncode=completed.returncode,
+                summary=summary,
+                error=error,
+            )
+        except subprocess.TimeoutExpired as timeout_error:
+            stdout = timeout_error.stdout or ""
+            stderr = timeout_error.stderr or ""
+            if isinstance(stdout, bytes):
+                stdout = stdout.decode("utf-8", errors="replace")
+            if isinstance(stderr, bytes):
+                stderr = stderr.decode("utf-8", errors="replace")
+            stdout_path.write_text(stdout, encoding="utf-8")
+            stderr_path.write_text(stderr, encoding="utf-8")
+            return _result(
+                status="timeout",
+                returncode=124,
+                summary=None,
+                error=f"Campaign exceeded timeout of {timeout_seconds} seconds",
+            )
+    finally:
+        if cuda_pool is not None and cuda_device is not None:
+            cuda_pool.release(cuda_device)
 
 
 def run_baseline_jobs(
@@ -325,6 +343,7 @@ def run_baseline_jobs(
     project_dir: Path,
     output_dir: Path,
     timeout_seconds: float | None = None,
+    cuda_devices: Sequence[str] | None = None,
 ) -> list[BaselineJobResult]:
     if max_parallel < 1:
         raise ValueError("max_parallel must be at least 1")
@@ -333,6 +352,7 @@ def run_baseline_jobs(
     output_dir.mkdir(parents=True, exist_ok=True)
     results: list[BaselineJobResult] = []
     workers = min(max_parallel, len(jobs))
+    cuda_pool = CudaDevicePool(cuda_devices) if cuda_devices else None
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="agent-baseline") as pool:
         future_by_job = {
             pool.submit(
@@ -341,6 +361,7 @@ def run_baseline_jobs(
                 project_dir=project_dir,
                 output_dir=output_dir,
                 timeout_seconds=timeout_seconds,
+                cuda_pool=cuda_pool,
             ): job
             for job in jobs
         }
@@ -348,8 +369,9 @@ def run_baseline_jobs(
             result = future.result()
             results.append(result)
             identity = _job_id(result.public)
+            gpu = f" gpu={result.cuda_device}" if result.cuda_device is not None else ""
             print(
-                f"{identity} status={result.status} returncode={result.returncode}",
+                f"{identity} status={result.status} returncode={result.returncode}{gpu}",
                 flush=True,
             )
     return sorted(results, key=lambda item: item.index)
@@ -385,6 +407,14 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=1,
         help="Maximum concurrent campaign processes. 1 is sequential; 4 runs four jobs at a time.",
+    )
+    parser.add_argument(
+        "--cuda-devices",
+        default="auto",
+        help=(
+            "GPUs for concurrent Kermut workers. auto discovers visible cards; "
+            "0,1,2,3 pins four jobs to four GPUs; none shares the parent devices."
+        ),
     )
     parser.add_argument("--timeout-seconds", type=float, default=0.0)
     parser.add_argument(
@@ -424,6 +454,15 @@ def main() -> None:
     configure_from_args(args)
     if args.max_parallel < 1:
         raise SystemExit("--max-parallel must be at least 1")
+    try:
+        cuda_spec = parse_cuda_devices_arg(args.cuda_devices)
+        cuda_devices = resolve_cuda_device_pool(
+            cuda_spec,
+            max_parallel=args.max_parallel,
+            enforce_capacity=not args.dry_run or cuda_spec != "auto",
+        )
+    except ValueError as error:
+        raise SystemExit(str(error)) from error
     if args.candidate_limit is not None and args.candidate_limit < 1:
         raise SystemExit("--candidate-limit must be positive")
     modes = _resolve_modes(args)
@@ -503,6 +542,11 @@ def main() -> None:
         "comparison": args.comparison,
         "modes": modes,
         "max_parallel": args.max_parallel,
+        "cuda_assignment": cuda_assignment_record(
+            policy=args.cuda_devices,
+            devices=cuda_devices,
+            max_parallel=args.max_parallel,
+        ),
         "timeout_seconds": args.timeout_seconds,
         "imported_files": [str(path) for path in imported_paths],
         "imported_runs": [item["run_id"] for item in imported],
@@ -522,6 +566,7 @@ def main() -> None:
         project_dir=project_root(),
         output_dir=output_dir / "job_logs",
         timeout_seconds=timeout,
+        cuda_devices=cuda_devices,
     )
     summaries, results = list(imported), []
     for summary in imported:
@@ -545,6 +590,7 @@ def main() -> None:
             "stdout_log": item.stdout_log,
             "stderr_log": item.stderr_log,
             "returncode": item.returncode,
+            "cuda_device": item.cuda_device,
         }
         if item.summary is not None:
             record["summary"] = item.summary

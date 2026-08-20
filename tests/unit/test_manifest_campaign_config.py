@@ -5,6 +5,47 @@ import pytest
 from fitness_agents.config import TaskConfig, load_experiment_config
 
 
+def test_al96_b16_baseline_configs_select_sixteen_per_round():
+    random_run = load_experiment_config("configs/experiments/random_al96_b16.yaml")
+    fitness = load_experiment_config("configs/experiments/fitness_direct_al96_b16.yaml")
+    hierarchical = load_experiment_config(
+        "configs/experiments/hierarchical_scientist.deepseek.yaml"
+    )
+    assert random_run.mode == "random"
+    assert fitness.mode == "fitness_direct"
+    for config in (random_run, fitness):
+        assert config.rounds == 3
+        assert config.budget_per_round == 16
+        assert config.output.top_k == 16
+        assert config.seed == 42
+        assert config.task.split_root is not None
+        assert config.task.expected_protocol_version == "GB1-AL96-5CV-v1"
+        assert config.llm.provider == "mock"
+        assert config.knowledge_enabled is False
+        assert config.generation.use_fitness_predictors is (
+            config.mode == "fitness_direct"
+        )
+        assert config.model.name == "kermut"
+        assert config.model.name == hierarchical.model.name
+        assert tuple(config.evaluation.metrics) == tuple(hierarchical.evaluation.metrics)
+        assert config.evaluation.top_k == hierarchical.evaluation.top_k
+        assert config.candidate_limit == hierarchical.candidate_limit == 32
+        assert config.diversity_lambda == 0.0
+        assert not any("onehot" in item.name for item in (
+            config.model,
+            *config.generation.predictor_models,
+            *config.validation.predictor_models,
+        ))
+    assert hierarchical.model.name == "kermut"
+    assert hierarchical.candidate_limit == 32
+    assert hierarchical.generation.use_fitness_predictors is False
+    assert hierarchical.generation.predictor_models == ()
+    assert hierarchical.generation.predictor_weight == 0.0
+    assert random_run.generation.selection_driver == "random"
+    assert fitness.generation.selection_driver == "predictor"
+    assert fitness.acquisition == "greedy"
+
+
 def test_standard_al96_config_uses_manifest_fold_source():
     config = load_experiment_config("configs/experiments/knowledge_agent_al96.yaml")
     assert config.task.split_root is not None

@@ -5,7 +5,8 @@ Same-task folds are isolated processes. Default matrix is 4 conditions x 3 folds
 = 12 jobs; --max-parallel 4 completes them in three waves. Hierarchical jobs fan
 out 3 child LLM calls; kg_base* jobs do not. Use --max-parallel 2 if DeepSeek
 contends. RAG jobs share a prebuilt read-only corpus and use per-condition/fold
-overlay databases so parallel workers do not share a writer.
+overlay databases so parallel workers do not share a writer. Parallel Kermut
+workers are pinned to distinct GPUs with --cuda-devices (default auto).
 
 Formal runs call DeepSeek, use Qwen for RAG, and keep Kermut acquisition and
 post-selection validation roles explicit. Placeholder predictors are not accepted.
@@ -34,6 +35,13 @@ from fitness_agents.contracts.capabilities import PredictorCapabilities
 from fitness_agents.contracts.schemas import Prediction
 from fitness_agents.models import available_predictors
 from fitness_agents.reporting import aggregate_runs
+from fitness_agents.utils.cuda_jobs import (
+    CudaDevicePool,
+    cuda_assignment_record,
+    environment_with_cuda_device,
+    parse_cuda_devices_arg,
+    resolve_cuda_device_pool,
+)
 
 REQUIRED_CHANNELS = ("physchem", "conservation", "structure")
 FEATURE_OPERATORS = frozenset(
@@ -185,6 +193,7 @@ class HierarchicalJobResult:
     summary: dict[str, Any] | None = None
     audit: dict[str, Any] | None = None
     error: str | None = None
+    cuda_device: str | None = None
 
 
 def _parse_folds(value: str, n_folds: int) -> list[int]:
@@ -855,93 +864,88 @@ def _run_one_job(
     project_dir: Path,
     log_dir: Path,
     timeout_seconds: float | None,
+    cuda_pool: CudaDevicePool | None = None,
 ) -> HierarchicalJobResult:
     prefix = f"{job.condition}-f{job.fold_index:02d}-s{job.seed}"
     stdout_path = log_dir / f"{prefix}.stdout.log"
     stderr_path = log_dir / f"{prefix}.stderr.log"
+    cuda_device = cuda_pool.acquire() if cuda_pool is not None else None
 
     def _write_logs(stdout: str, stderr: str) -> None:
         stdout_path.write_text(stdout, encoding="utf-8")
         stderr_path.write_text(stderr, encoding="utf-8")
 
+    def _result(**kwargs: Any) -> HierarchicalJobResult:
+        return HierarchicalJobResult(
+            index=job.index,
+            condition=job.condition,
+            fold_index=job.fold_index,
+            seed=job.seed,
+            stdout_log=str(stdout_path),
+            stderr_log=str(stderr_path),
+            cuda_device=cuda_device,
+            **kwargs,
+        )
+
     try:
-        completed = subprocess.run(
-            list(job.command),
-            cwd=project_dir,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout_seconds,
-            check=False,
-        )
-        _write_logs(completed.stdout, completed.stderr)
-        if completed.returncode != 0:
-            return HierarchicalJobResult(
-                index=job.index,
-                condition=job.condition,
-                fold_index=job.fold_index,
-                seed=job.seed,
-                status="failed",
-                returncode=completed.returncode,
-                stdout_log=str(stdout_path),
-                stderr_log=str(stderr_path),
-                error=f"Campaign exited with code {completed.returncode}",
-            )
         try:
-            summary = json.loads(completed.stdout)
-            audit = audit_hierarchical_run(
-                summary,
-                condition=job.condition,
-                expected_fold=job.fold_index,
-                expected_rounds=job.expected_rounds,
-                expected_budget=job.expected_budget,
-                expected_candidate_limit=job.expected_candidate_limit,
+            completed = subprocess.run(
+                list(job.command),
+                cwd=project_dir,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout_seconds,
+                check=False,
+                env=environment_with_cuda_device(cuda_device),
             )
-        except (KeyError, TypeError, ValueError, json.JSONDecodeError, OSError) as error:
-            return HierarchicalJobResult(
-                index=job.index,
-                condition=job.condition,
-                fold_index=job.fold_index,
-                seed=job.seed,
-                status="audit_failed",
+            _write_logs(completed.stdout, completed.stderr)
+            if completed.returncode != 0:
+                return _result(
+                    status="failed",
+                    returncode=completed.returncode,
+                    error=f"Campaign exited with code {completed.returncode}",
+                )
+            try:
+                summary = json.loads(completed.stdout)
+                audit = audit_hierarchical_run(
+                    summary,
+                    condition=job.condition,
+                    expected_fold=job.fold_index,
+                    expected_rounds=job.expected_rounds,
+                    expected_budget=job.expected_budget,
+                    expected_candidate_limit=job.expected_candidate_limit,
+                )
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError, OSError) as error:
+                return _result(
+                    status="audit_failed",
+                    returncode=0,
+                    error=f"{type(error).__name__}: {error}",
+                )
+            return _result(
+                status="passed" if audit["passed"] else "audit_failed",
                 returncode=0,
-                stdout_log=str(stdout_path),
-                stderr_log=str(stderr_path),
-                error=f"{type(error).__name__}: {error}",
+                summary=summary,
+                audit=audit,
+                error=None if audit["passed"] else f"Audit failed: {audit['failed_checks']}",
             )
-        return HierarchicalJobResult(
-            index=job.index,
-            condition=job.condition,
-            fold_index=job.fold_index,
-            seed=job.seed,
-            status="passed" if audit["passed"] else "audit_failed",
-            returncode=0,
-            stdout_log=str(stdout_path),
-            stderr_log=str(stderr_path),
-            summary=summary,
-            audit=audit,
-            error=None if audit["passed"] else f"Audit failed: {audit['failed_checks']}",
-        )
-    except subprocess.TimeoutExpired as timeout_error:
-        stdout = timeout_error.stdout or ""
-        stderr = timeout_error.stderr or ""
-        if isinstance(stdout, bytes):
-            stdout = stdout.decode("utf-8", errors="replace")
-        if isinstance(stderr, bytes):
-            stderr = stderr.decode("utf-8", errors="replace")
-        _write_logs(stdout, stderr)
-        return HierarchicalJobResult(
-            index=job.index,
-            condition=job.condition,
-            fold_index=job.fold_index,
-            seed=job.seed,
-            status="timeout",
-            returncode=124,
-            stdout_log=str(stdout_path),
-            stderr_log=str(stderr_path),
-            error=f"Campaign exceeded timeout of {timeout_seconds} seconds",
-        )
+        except subprocess.TimeoutExpired as timeout_error:
+            stdout = timeout_error.stdout or ""
+            stderr = timeout_error.stderr or ""
+            if isinstance(stdout, bytes):
+                stdout = stdout.decode("utf-8", errors="replace")
+            if isinstance(stderr, bytes):
+                stderr = stderr.decode("utf-8", errors="replace")
+            _write_logs(stdout, stderr)
+            return _result(
+                status="timeout",
+                returncode=124,
+                error=f"Campaign exceeded timeout of {timeout_seconds} seconds",
+            )
+    finally:
+        if cuda_pool is not None and cuda_device is not None:
+            cuda_pool.release(cuda_device)
 
 
 def run_fold_jobs(
@@ -951,12 +955,14 @@ def run_fold_jobs(
     project_dir: Path,
     output_dir: Path,
     timeout_seconds: float | None = None,
+    cuda_devices: Sequence[str] | None = None,
 ) -> list[HierarchicalJobResult]:
     if max_parallel < 1:
         raise ValueError("max_parallel must be at least 1")
     output_dir.mkdir(parents=True, exist_ok=False)
     results: list[HierarchicalJobResult] = []
     workers = min(max_parallel, len(jobs))
+    cuda_pool = CudaDevicePool(cuda_devices) if cuda_devices else None
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="hierarchical-fold") as pool:
         futures = {
             pool.submit(
@@ -965,15 +971,17 @@ def run_fold_jobs(
                 project_dir=project_dir,
                 log_dir=output_dir,
                 timeout_seconds=timeout_seconds,
+                cuda_pool=cuda_pool,
             ): job
             for job in jobs
         }
         for future in as_completed(futures):
             result = future.result()
             results.append(result)
+            gpu = f" gpu={result.cuda_device}" if result.cuda_device is not None else ""
             print(
                 f"condition={result.condition} fold={result.fold_index:02d} "
-                f"status={result.status} returncode={result.returncode}",
+                f"status={result.status} returncode={result.returncode}{gpu}",
                 flush=True,
             )
     return sorted(results, key=lambda item: item.index)
@@ -1086,7 +1094,9 @@ def parse_args() -> argparse.Namespace:
             "folds of one GB1 AL96 task with real DeepSeek calls and the configured "
             "Kermut dry validator. Default 4 conditions x 3 folds = 12 jobs; "
             "--max-parallel 4 runs three waves. kg_3features_rag fans out three "
-            "child LLM calls; --max-parallel 2 is the rate-limit fallback."
+            "child LLM calls; --max-parallel 2 is the rate-limit fallback. "
+            "Kermut stays device: cuda:0 inside each worker; pass "
+            "--cuda-devices 0,1,2,3 so four concurrent jobs use four cards."
         )
     )
     parser.add_argument(
@@ -1120,6 +1130,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--max-parallel", type=int, default=4)
+    parser.add_argument(
+        "--cuda-devices",
+        default="auto",
+        help=(
+            "GPUs for concurrent Kermut workers. auto discovers visible cards; "
+            "0,1,2,3 pins four jobs to four physical GPUs via CUDA_VISIBLE_DEVICES; "
+            "none inherits the parent environment (all workers share cuda:0)."
+        ),
+    )
     parser.add_argument("--timeout-seconds", type=float, default=0.0)
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--dry-run", action="store_true")
@@ -1176,6 +1195,15 @@ def main() -> None:
     except ValueError as error:
         raise SystemExit(f"--max-tokens {error}") from error
     conditions = _parse_conditions(args.conditions)
+    try:
+        cuda_spec = parse_cuda_devices_arg(args.cuda_devices)
+        cuda_devices = resolve_cuda_device_pool(
+            cuda_spec,
+            max_parallel=args.max_parallel,
+            enforce_capacity=not args.dry_run or cuda_spec != "auto",
+        )
+    except ValueError as error:
+        raise SystemExit(str(error)) from error
     if not args.dry_run:
         try:
             require_prebuilt_rag_corpus(conditions)
@@ -1237,6 +1265,11 @@ def main() -> None:
         "conditions": conditions,
         "seed": seed,
         "max_parallel": args.max_parallel,
+        "cuda_assignment": cuda_assignment_record(
+            policy=args.cuda_devices,
+            devices=cuda_devices,
+            max_parallel=args.max_parallel,
+        ),
         "expected_waves": (len(jobs) + args.max_parallel - 1) // args.max_parallel,
         "expected_rounds": expected_rounds,
         "expected_budget": config.budget_per_round,
@@ -1316,12 +1349,26 @@ def main() -> None:
         json.dumps(schedule, indent=2, ensure_ascii=False, default=str), encoding="utf-8"
     )
     timeout = args.timeout_seconds if args.timeout_seconds > 0 else None
+    model_wants_cuda = str(config.model.device).lower() not in {"cpu", "mps"}
+    if (
+        model_wants_cuda
+        and args.max_parallel > 1
+        and cuda_devices is None
+        and not args.dry_run
+    ):
+        print(
+            "warning: Kermut is configured for CUDA and --max-parallel "
+            f"{args.max_parallel}, but no GPU pool was assigned. All workers "
+            "will share physical GPU 0. Pass --cuda-devices 0,1,2,3 or auto.",
+            file=sys.stderr,
+        )
     results = run_fold_jobs(
         jobs,
         max_parallel=args.max_parallel,
         project_dir=root,
         output_dir=log_dir,
         timeout_seconds=timeout,
+        cuda_devices=cuda_devices,
     )
     result_payload = [asdict(result) for result in results]
     (output_dir / "fold_results.json").write_text(
