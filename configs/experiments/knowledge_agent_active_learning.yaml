@@ -9,7 +9,7 @@ acquisition: greedy
 ucb_beta: 1.5
 diversity_lambda: 0.10
 task_config: configs/task/gb1_binding.yaml
-model_config: configs/model/baseline.yaml
+model_config: configs/model/kermut.yaml
 knowledge_config: configs/knowledge/gb1.yaml
 output_root: artifacts/runs
 llm_config: configs/llm/deepseek.yaml
@@ -39,7 +39,7 @@ active_learning:
   posterior:
     plugin: visible_holdout_ensemble
     predictor_models:
-      - configs/model/baseline.yaml
+      - configs/model/kermut.yaml
     calibration_fraction: 0.20
     min_calibration_size: 8
     min_training_size: 8

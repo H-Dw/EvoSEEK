@@ -4,11 +4,11 @@
 Same-task folds are isolated processes. Default matrix is 4 conditions x 3 folds
 = 12 jobs; --max-parallel 4 completes them in three waves. Hierarchical jobs fan
 out 3 child LLM calls; kg_base* jobs do not. Use --max-parallel 2 if DeepSeek
-contends. RAG sqlite paths are per condition/fold so parallel jobs do not share
-a writer.
+contends. RAG jobs share a prebuilt read-only corpus and use per-condition/fold
+overlay databases so parallel workers do not share a writer.
 
-Formal runs call the configured remote LLM and score candidates with the
-registered fitness predictor. Placeholder predictors are not accepted.
+Formal runs call DeepSeek, use Qwen for RAG, and keep Kermut acquisition and
+post-selection validation roles explicit. Placeholder predictors are not accepted.
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ import json
 import os
 import subprocess
 import sys
+from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
@@ -232,29 +233,36 @@ def apply_token_budget(config: Any, max_tokens: int) -> Any:
     )
 
 
-def apply_real_fitness_predictors(config: Any) -> Any:
-    models = config.generation.predictor_models or (config.model,)
-    unknown = [item.name for item in models if item.name not in available_predictors()]
-    if unknown:
-        raise ValueError(f"Unknown fitness predictors: {unknown}")
-    if any("placeholder" in item.name for item in models):
-        raise ValueError("Formal runs cannot use a placeholder fitness predictor")
-    weight = config.generation.predictor_weight if config.generation.predictor_weight > 0 else 1.0
-    validation = (
-        config.validation
-        if config.validation.enabled
-        else replace(config.validation, enabled=True)
+def validate_formal_fitness_configuration(config: Any) -> Any:
+    """Fail closed unless the formal matrix keeps predictor roles explicit."""
+
+    if config.model.name != "kermut":
+        raise ValueError(
+            "Formal hierarchical runs require model_config=configs/model/kermut.yaml; "
+            "one-hot predictors are test-only explicit overrides outside this runner"
+        )
+    if config.model.name not in available_predictors():
+        raise ValueError("The configured Kermut predictor is not registered")
+    if not config.validation.enabled:
+        raise ValueError("Formal hierarchical runs require post-selection dry validation")
+    if config.generation.use_fitness_predictors:
+        raise ValueError(
+            "Formal Agent-UQ routes must not mix fitness predictions into generation"
+        )
+    if config.generation.predictor_models:
+        raise ValueError(
+            "Formal Agent-UQ routes must leave generation.predictor_models empty"
+        )
+    posterior_models = config.active_learning.posterior.predictor_models or (
+        config.model,
     )
-    return replace(
-        config,
-        generation=replace(
-            config.generation,
-            use_fitness_predictors=True,
-            predictor_models=models,
-            predictor_weight=weight,
-        ),
-        validation=validation,
-    )
+    invalid_posterior = [item.name for item in posterior_models if item.name != "kermut"]
+    if invalid_posterior:
+        raise ValueError(
+            "The kg_base_al posterior must use Kermut; invalid models: "
+            f"{invalid_posterior}"
+        )
+    return config
 
 
 def apply_condition(
@@ -272,6 +280,24 @@ def apply_condition(
     if spec.hierarchical and not config.hierarchical_hypothesis.enabled:
         raise ValueError("hierarchical condition requires hierarchical_hypothesis.enabled")
     local = _local_knowledge_for_spec(config, spec, fold=fold, output_root=output_root)
+    if spec.rag:
+        embedding = local.retrieval.embedding_api_config
+        reranker = local.retrieval.reranker_api_config
+        if (
+            local.retrieval.embedding_backend != "api"
+            or embedding is None
+            or embedding.model_family != "qwen"
+            or embedding.model != "text-embedding-v4"
+            or local.retrieval.reranker_backend != "api"
+            or reranker is None
+            or reranker.model_family != "qwen"
+            or reranker.model != "qwen3-rerank"
+        ):
+            raise ValueError(
+                "Formal RAG conditions require Qwen text-embedding-v4 plus qwen3-rerank"
+            )
+        if not local.allow_remote_context:
+            raise ValueError("Formal RAG conditions must expose bounded RAG context to DeepSeek")
     knowledge = replace(
         config.knowledge,
         physchem="physchem" in spec.channels,
@@ -318,16 +344,27 @@ def _local_knowledge_for_spec(
 ) -> Any:
     if not spec.rag:
         return replace(config.knowledge.local_knowledge, enabled=False)
-    sqlite = output_root.parent / "local_knowledge" / f"{spec.condition_id}-f{fold:02d}.sqlite"
+    template = _rag_local_knowledge_template()
     return replace(
-        _rag_local_knowledge_template(),
+        template,
         enabled=True,
-        index_path=sqlite,
-        corpus_index_path=sqlite,
         retrieval_overlay_path=output_root.parent
         / "local_knowledge"
         / f"{spec.condition_id}-f{fold:02d}-overlay.sqlite",
     )
+
+
+def require_prebuilt_rag_corpus(conditions: Sequence[str]) -> None:
+    if not any(CONDITION_SPECS[item].rag for item in conditions):
+        return
+    local = _rag_local_knowledge_template()
+    corpus_path = local.corpus_index_path or local.index_path
+    if corpus_path is None or not corpus_path.is_file():
+        raise ValueError(
+            "Formal parallel RAG runs require one prebuilt shared Qwen corpus index. "
+            "Build it before launching workers with: python -m fitness_agents.cli "
+            "knowledge index configs/experiments/gb1_reasoning_routes_base.yaml"
+        )
 
 
 def required_tool_calls(
@@ -449,6 +486,23 @@ def audit_hierarchical_run(
             (completion_audit.get("manifest") or {}).get("run_status") == "completed",
         ),
         _check("formal_pass_eligible", (completion_audit.get("manifest") or {}).get("pass_eligible") is True),
+        _check(
+            "planned_actual_batch_sizes_match_protocol",
+            (completion_audit.get("manifest") or {}).get("planned_batch_sizes")
+            == [expected_budget] * expected_rounds
+            and (completion_audit.get("manifest") or {}).get(
+                "actual_batch_sizes"
+            )
+            == [expected_budget] * expected_rounds,
+            {
+                "planned": (completion_audit.get("manifest") or {}).get(
+                    "planned_batch_sizes"
+                ),
+                "actual": (completion_audit.get("manifest") or {}).get(
+                    "actual_batch_sizes"
+                ),
+            },
+        ),
         _check("rounds_aborted_is_zero", int(summary.get("rounds_aborted") or 0) == 0, summary.get("rounds_aborted")),
         _check("condition_matches", summary.get("condition") == condition, summary.get("condition")),
         _check(
@@ -463,13 +517,14 @@ def audit_hierarchical_run(
             summary.get("placeholder_predictor"),
         ),
         _check(
-            "fitness_predictors_used_for_generation",
-            summary.get("fitness_predictors_used_for_generation") is True,
+            "candidate_pool_predictor_scope_matches",
+            bool(summary.get("fitness_predictors_used_for_generation"))
+            == spec.active_learning,
             summary.get("fitness_predictors_used_for_generation"),
         ),
         _check(
-            "fitness_model_is_registered",
-            str(config.get("model") or "") in available_predictors(),
+            "fitness_model_is_kermut",
+            config.get("model") == "kermut",
             config.get("model"),
         ),
         _check(
@@ -488,6 +543,11 @@ def audit_hierarchical_run(
             (config.get("critic") or {}).get("max_tokens"),
         ),
         _check("rounds_match_protocol", int(config.get("rounds") or 0) == expected_rounds, config.get("rounds")),
+        _check(
+            "candidate_pool_matches_protocol",
+            int(config.get("candidate_limit") or 0) == 64,
+            config.get("candidate_limit"),
+        ),
         _check(
             "budget_matches_protocol",
             int(config.get("budget_per_round") or 0) == expected_budget,
@@ -511,9 +571,15 @@ def audit_hierarchical_run(
         [
             _check("hierarchy_enabled_matches", hierarchy.get("enabled") is spec.hierarchical, hierarchy),
             _check(
-                "generation_uses_fitness_predictors",
-                generation_cfg.get("use_fitness_predictors") is True,
+                "agent_uq_generation_predictors_disabled",
+                generation_cfg.get("use_fitness_predictors") is False,
                 generation_cfg.get("use_fitness_predictors"),
+            ),
+            _check(
+                "active_learning_posterior_is_kermut",
+                (not spec.active_learning)
+                or (al_cfg.get("posterior_models") == ["kermut"]),
+                al_cfg.get("posterior_models"),
             ),
             _check("rag_runtime_matches", bool(local_runtime.get("enabled")) == spec.rag, local_runtime),
             _check(
@@ -584,6 +650,48 @@ def audit_hierarchical_run(
             sorted(enabled_operators.intersection(rag_operators)),
         )
     )
+    for round_dir in round_dirs:
+        scope_path = round_dir / "prediction_scope_receipt.json"
+        checks.append(
+            _check(f"{round_dir.name}_prediction_scope_receipt", scope_path.is_file())
+        )
+        if not scope_path.is_file():
+            continue
+        scope = json.loads(scope_path.read_text(encoding="utf-8"))
+        calls = scope.get("dry_validation_calls") or []
+        checks.extend(
+            [
+                _check(
+                    f"{round_dir.name}_approved_batch_size",
+                    int(scope.get("approved_batch_size") or 0) == expected_budget,
+                    scope.get("approved_batch_size"),
+                ),
+                _check(
+                    f"{round_dir.name}_dry_validation_selected_only",
+                    scope.get("dry_validation_scope")
+                    == "draft_selected_candidates_only"
+                    and scope.get("all_dry_validation_targets_were_draft_selected")
+                    is True
+                    and all(
+                        int(item.get("candidate_count") or 0) <= expected_budget
+                        for item in calls
+                    ),
+                    scope,
+                ),
+                _check(
+                    f"{round_dir.name}_acquisition_prediction_scope",
+                    scope.get("acquisition_prediction_scope")
+                    == ("candidate_pool" if spec.active_learning else "none"),
+                    scope.get("acquisition_prediction_scope"),
+                ),
+                _check(
+                    f"{round_dir.name}_oracle_scope",
+                    scope.get("oracle_measurement_scope")
+                    == "approved_batch_only",
+                    scope.get("oracle_measurement_scope"),
+                ),
+            ]
+        )
     if spec.hierarchical:
         checks.append(
             _check(
@@ -900,7 +1008,11 @@ def _worker(args: argparse.Namespace) -> None:
         seed=seed,
         output_root=args.worker_output_root.resolve(),
     )
-    config = apply_real_fitness_predictors(config)
+    try:
+        require_prebuilt_rag_corpus([args.worker_condition])
+    except ValueError as error:
+        raise SystemExit(str(error)) from error
+    config = validate_formal_fitness_configuration(config)
     if args.worker_rounds is not None:
         if args.worker_rounds < 1:
             raise SystemExit("Worker rounds must be positive")
@@ -942,7 +1054,7 @@ def parse_args() -> argparse.Namespace:
         description=(
             "Run kg_base, kg_base_rag, kg_base_al, then kg_3features_rag across "
             "folds of one GB1 AL96 task with real DeepSeek calls and the configured "
-            "fitness predictor. Default 4 conditions x 3 folds = 12 jobs; "
+            "Kermut dry validator. Default 4 conditions x 3 folds = 12 jobs; "
             "--max-parallel 4 runs three waves. kg_3features_rag fans out three "
             "child LLM calls; --max-parallel 2 is the rate-limit fallback."
         )
@@ -1026,7 +1138,12 @@ def main() -> None:
     except ValueError as error:
         raise SystemExit(f"--max-tokens {error}") from error
     conditions = _parse_conditions(args.conditions)
-    config = apply_real_fitness_predictors(
+    if not args.dry_run:
+        try:
+            require_prebuilt_rag_corpus(conditions)
+        except ValueError as error:
+            raise SystemExit(str(error)) from error
+    config = validate_formal_fitness_configuration(
         apply_token_budget(load_experiment_config(config_path), max_tokens)
     )
     expected_rounds = config.rounds if args.rounds is None else args.rounds
@@ -1062,6 +1179,11 @@ def main() -> None:
         disable_batch_control_review=args.disable_batch_control_review,
         disable_batch_diversity_review=args.disable_batch_diversity_review,
     )
+    rag_local = (
+        _rag_local_knowledge_template()
+        if any(CONDITION_SPECS[item].rag for item in conditions)
+        else None
+    )
     schedule = {
         "schema_version": "hierarchical-scientist-schedule:v1",
         "config": str(config_path.resolve()),
@@ -1076,10 +1198,46 @@ def main() -> None:
         "expected_waves": (len(jobs) + args.max_parallel - 1) // args.max_parallel,
         "expected_rounds": expected_rounds,
         "expected_budget": config.budget_per_round,
+        "expected_candidate_pool": config.candidate_limit,
         "placeholder_predictor": False,
         "fitness_predictor": config.model.name,
         "generation_predictor_models": [item.name for item in config.generation.predictor_models],
         "use_fitness_predictors": config.generation.use_fitness_predictors,
+        "predictor_roles": {
+            "agent_uq_acquisition": "disabled",
+            "active_learning_acquisition": "kermut",
+            "post_selection_dry_validation": "kermut",
+            "oracle_measurement": "approved_batch_only",
+        },
+        "rag_backend": (
+            {
+                "embedding": rag_local.retrieval.embedding_api_config.model,
+                "reranker": rag_local.retrieval.reranker_api_config.model,
+                "corpus_index": str(
+                    rag_local.corpus_index_path or rag_local.index_path
+                ),
+                "per_job_overlay": True,
+            }
+            if rag_local is not None
+            else None
+        ),
+        "kg_tool_call_budget": {
+            item: {
+                "required": required_tool_calls(
+                    CONDITION_SPECS[item],
+                    variant_limit=config.kg_interaction.feature_variant_limit,
+                    feature_tool_strategy=(
+                        config.kg_interaction.feature_tool_strategy
+                        if CONDITION_SPECS[item].channels
+                        else "context_only"
+                    ),
+                ),
+                "configured": _interaction_for_spec(
+                    config, CONDITION_SPECS[item]
+                ).max_tool_calls,
+            }
+            for item in conditions
+        },
         "max_tokens": max_tokens,
         "llm_max_tokens": config.llm.max_tokens,
         "critic_max_tokens": config.critic.max_tokens,

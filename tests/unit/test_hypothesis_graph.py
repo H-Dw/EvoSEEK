@@ -2,14 +2,18 @@ from __future__ import annotations
 
 from threading import Barrier
 
+import pytest
+
 from fitness_agents.agents.context_projection import (
     KGContextPartitioner,
     approved_analysis_payload,
 )
 from fitness_agents.agents.hypothesis_graph import HypothesisReviewGraph
 from fitness_agents.agents.main_hypothesis_critic import RuleBasedMainHypothesisCritic
+from fitness_agents.agents.output_guards import SemanticOutputValidationError
 from fitness_agents.agents.remote_llm import RemoteLLMCompletionError, complete_json
 from fitness_agents.agents.subcritic import RuleBasedSubCritic
+from fitness_agents.agents.subscientist import validate_channel_hypothesis
 from fitness_agents.contracts.agent_io import ScientistContextInput
 from fitness_agents.contracts.evidence_universe import RoleVisibleEvidenceUniverse
 from fitness_agents.contracts.hypothesis_pipeline import (
@@ -213,7 +217,12 @@ def test_feature_child_sample_card_is_fitness_blind_and_channel_typed() -> None:
         **{
             **_evidence("physchem").__dict__,
             "raw_features": {
-                "sites": {"39": {"mutation": "V39A", "charge_delta": 1.0}}
+                "sites": {
+                    "39": {
+                        "mutation": "V39A",
+                        "deltas": {"nominal_charge": 1.0},
+                    }
+                }
             },
         }
     )
@@ -232,6 +241,48 @@ def test_feature_child_sample_card_is_fitness_blind_and_channel_typed() -> None:
         payload["visible_observations"][0]["feature_values"]["ev:physchem"]["kind"]
         == "physchem"
     )
+    fact = child.visible_observations[0].descriptor_facts[0]
+    assert (
+        fact.sample_id,
+        fact.position,
+        fact.from_residue,
+        fact.to_residue,
+        fact.delta,
+    ) == ("v1", 39, "V", "A", 1.0)
+
+    valid = ChannelHypothesisOutput(
+        analysis_id="analysis:physchem:fact-binding",
+        channel="physchem",
+        analysis_summary="One typed descriptor delta is visible.",
+        findings=[
+            {
+                "finding_id": "finding:physchem:fact-binding",
+                "kind": "OBSERVATION",
+                "statement": "Nominal charge delta is 1 for V39A in sample v1.",
+                "evidence_ids": ["ev:physchem"],
+                "fact_ids": [fact.fact_id],
+                "confidence": "medium",
+            }
+        ],
+        candidate_hypotheses=[],
+        evidence_ids=["ev:physchem"],
+        fact_ids=[fact.fact_id],
+        counterevidence=[],
+        uncertainty="A descriptor delta is not a fitness measurement.",
+    )
+    validate_channel_hypothesis(valid.model_dump(mode="json"), context=child)
+
+    mismatched = valid.model_copy(
+        update={
+            "findings": [
+                valid.findings[0].model_copy(
+                    update={"statement": "Nominal charge delta is 1 for G41D."}
+                )
+            ]
+        }
+    )
+    with pytest.raises(SemanticOutputValidationError, match="match the cited mutation"):
+        validate_channel_hypothesis(mismatched.model_dump(mode="json"), context=child)
 
 
 def test_three_child_branches_execute_in_parallel_and_main_gets_only_approved_summaries() -> None:

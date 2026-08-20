@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -38,6 +39,9 @@ _PACK_SAMPLE_FIELDS = (
     "directional_signals",
     "caveats",
     "provenance",
+)
+_MUTATION_REFERENCE_RE = re.compile(
+    r"\b([ACDEFGHIKLMNPQRSTVWY][1-9][0-9]*[ACDEFGHIKLMNPQRSTVWY])\b"
 )
 
 
@@ -195,7 +199,9 @@ def _aggregate_batch_analyses(
 
     findings = []
     seen_finding_ids: set[str] = set()
-    seen_finding_signatures: set[tuple[str, tuple[str, ...], str]] = set()
+    seen_finding_signatures: set[
+        tuple[str, tuple[str, ...], tuple[str, ...], str]
+    ] = set()
     ordered_findings = [
         (batch, analysis.findings[index])
         for index in range(max((len(item.findings) for item in analyses), default=0))
@@ -207,10 +213,18 @@ def _aggregate_batch_analyses(
         if len(findings) >= 8:
             return
         evidence_signature = tuple(sorted(finding.evidence_ids))
+        fact_signature = tuple(sorted(finding.fact_ids))
         statement_signature = (
-            "" if evidence_signature else " ".join(finding.statement.casefold().split())
+            ""
+            if evidence_signature or fact_signature
+            else " ".join(finding.statement.casefold().split())
         )
-        signature = (finding.kind, evidence_signature, statement_signature)
+        signature = (
+            finding.kind,
+            evidence_signature,
+            fact_signature,
+            statement_signature,
+        )
         aggregate_id = _aggregate_item_id(
             kind="finding",
             batch_id=batch.batch_id,
@@ -264,16 +278,53 @@ def _aggregate_batch_analyses(
         hypothesis_index += 1
 
     evidence_ids: list[str] = []
+    fact_ids: list[str] = []
+    fact_by_id = context.descriptor_fact_by_id
     projected_findings = []
     projected_hypotheses = []
     for finding in findings:
+        allowed_facts = []
+        for fact_id in finding.fact_ids:
+            fact = fact_by_id.get(fact_id)
+            if fact is None:
+                continue
+            evidence_has_room = (
+                fact.evidence_id in evidence_ids or len(evidence_ids) < 12
+            )
+            fact_has_room = fact_id in fact_ids or len(fact_ids) < 24
+            if not evidence_has_room or not fact_has_room:
+                continue
+            if fact.evidence_id not in evidence_ids:
+                evidence_ids.append(fact.evidence_id)
+            if fact_id not in fact_ids:
+                fact_ids.append(fact_id)
+            allowed_facts.append(fact_id)
+        if (
+            context.channel == "physchem"
+            and finding.kind == "OBSERVATION"
+            and finding.fact_ids
+            and not allowed_facts
+        ):
+            continue
         allowed = []
-        for evidence_id in finding.evidence_ids:
+        required_fact_evidence = [
+            fact_by_id[fact_id].evidence_id
+            for fact_id in allowed_facts
+            if fact_id in fact_by_id
+        ]
+        for evidence_id in [*required_fact_evidence, *finding.evidence_ids]:
             if evidence_id in evidence_ids or len(evidence_ids) < 12:
                 if evidence_id not in evidence_ids:
                     evidence_ids.append(evidence_id)
                 allowed.append(evidence_id)
-        projected_findings.append(finding.model_copy(update={"evidence_ids": allowed}))
+        projected_findings.append(
+            finding.model_copy(
+                update={
+                    "evidence_ids": list(dict.fromkeys(allowed)),
+                    "fact_ids": allowed_facts,
+                }
+            )
+        )
     for hypothesis in hypotheses:
         allowed = []
         for evidence_id in hypothesis.evidence_ids:
@@ -283,6 +334,7 @@ def _aggregate_batch_analyses(
                 allowed.append(evidence_id)
         projected_hypotheses.append(hypothesis.model_copy(update={"evidence_ids": allowed}))
     evidence_ids = sorted(evidence_ids)
+    fact_ids = sorted(fact_ids)
 
     counterevidence = list(
         dict.fromkeys(
@@ -318,6 +370,7 @@ def _aggregate_batch_analyses(
         findings=projected_findings,
         candidate_hypotheses=projected_hypotheses,
         evidence_ids=evidence_ids,
+        fact_ids=fact_ids,
         counterevidence=counterevidence,
         uncertainty=uncertainty,
     )
@@ -349,7 +402,61 @@ def validate_channel_hypothesis(
             "the finding, change kind to LIMITATION and keep evidence_ids empty",
             paths=uncited_paths,
         )
+    visible_fact_ids = set(context.descriptor_fact_by_id)
+    cited_fact_ids = {
+        fact_id for finding in output.findings for fact_id in finding.fact_ids
+    }
+    if unknown_fact_ids := sorted(cited_fact_ids.difference(visible_fact_ids)):
+        raise SemanticOutputValidationError(
+            f"child Scientist cites unknown descriptor fact IDs: {unknown_fact_ids}",
+            paths=tuple(
+                f"findings.{index}.fact_ids"
+                for index, finding in enumerate(output.findings)
+                if set(finding.fact_ids).intersection(unknown_fact_ids)
+            ),
+        )
     if output.channel == "physchem":
+        fact_by_id = context.descriptor_fact_by_id
+        missing_fact_paths = tuple(
+            f"findings.{index}.fact_ids"
+            for index, finding in enumerate(output.findings)
+            if fact_by_id
+            and finding.kind == "OBSERVATION"
+            and not finding.fact_ids
+        )
+        if missing_fact_paths:
+            raise SemanticOutputValidationError(
+                "physchem OBSERVATION findings must cite typed descriptor fact IDs",
+                paths=missing_fact_paths,
+            )
+        unknown_fact_paths: list[str] = []
+        mismatched_fact_paths: list[str] = []
+        for index, finding in enumerate(output.findings):
+            referenced_facts = [
+                fact_by_id[fact_id]
+                for fact_id in finding.fact_ids
+                if fact_id in fact_by_id
+            ]
+            if len(referenced_facts) != len(finding.fact_ids):
+                unknown_fact_paths.append(f"findings.{index}.fact_ids")
+                continue
+            required_evidence = {fact.evidence_id for fact in referenced_facts}
+            if not required_evidence.issubset(finding.evidence_ids):
+                mismatched_fact_paths.append(f"findings.{index}.evidence_ids")
+            statement_mutations = set(
+                _MUTATION_REFERENCE_RE.findall(finding.statement.upper())
+            )
+            referenced_mutations = {
+                f"{fact.from_residue}{fact.position}{fact.to_residue}"
+                for fact in referenced_facts
+            }
+            if statement_mutations.difference(referenced_mutations):
+                mismatched_fact_paths.append(f"findings.{index}.statement")
+        if unknown_fact_paths or mismatched_fact_paths:
+            raise SemanticOutputValidationError(
+                "descriptor fact references must be visible and match the cited mutation/evidence",
+                paths=tuple(unknown_fact_paths + mismatched_fact_paths),
+            )
         forbidden_observation_claims = (
             "measured fitness",
             "higher fitness",
@@ -427,7 +534,32 @@ class RuleBasedSubScientist:
             if visible_statements
             else f"No usable {context.channel} evidence is available; retain a bounded null direction."
         )
-        evidence_ids = sorted(context.visible_evidence_ids)[:8]
+        fact_by_id = context.descriptor_fact_by_id
+        selected_facts = list(fact_by_id.values())[:8]
+        fact_ids = [item.fact_id for item in selected_facts]
+        fact_evidence_ids = list(
+            dict.fromkeys(item.evidence_id for item in selected_facts)
+        )
+        evidence_ids = sorted(
+            (
+                fact_evidence_ids
+                + sorted(
+                    set(context.visible_evidence_ids).difference(fact_evidence_ids)
+                )
+            )[:8]
+        )
+        if context.channel == "physchem" and selected_facts:
+            fact = selected_facts[0]
+            claim = (
+                f"Descriptor {fact.descriptor} delta {fact.delta:g} for "
+                f"{fact.from_residue}{fact.position}{fact.to_residue} in sample "
+                f"{fact.sample_id}."
+            )
+        finding_kind = (
+            "OBSERVATION"
+            if evidence_ids and (context.channel != "physchem" or fact_ids)
+            else "LIMITATION"
+        )
         output = ChannelAnalysisOutput(
             analysis_id=(
                 f"analysis:{context.run_id}:r{context.round_id}:{context.channel}:"
@@ -438,14 +570,16 @@ class RuleBasedSubScientist:
             findings=[
                 {
                     "finding_id": f"finding:{context.channel}:1",
-                    "kind": "OBSERVATION" if evidence_ids else "LIMITATION",
+                    "kind": finding_kind,
                     "statement": claim[:300],
                     "evidence_ids": evidence_ids[:8],
+                    "fact_ids": fact_ids,
                     "confidence": "low",
                 }
             ],
             candidate_hypotheses=[],
             evidence_ids=evidence_ids,
+            fact_ids=sorted(fact_ids),
             counterevidence=[],
             uncertainty=(
                 "This smoke analysis is limited to visible channel evidence and does not "

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Iterable
 from dataclasses import asdict, replace
 from typing import Any
@@ -12,6 +13,7 @@ from fitness_agents.contracts.agent_io import ScientistContextInput
 from fitness_agents.contracts.hypothesis_pipeline import (
     ChannelEvidenceInput,
     ChannelName,
+    DescriptorObservationFact,
     MainSynthesisEvidenceCard,
 )
 from fitness_agents.contracts.mutation_evidence import mutation_evidence_prompt_payload
@@ -27,11 +29,74 @@ FEATURE_OPERATOR_CHANNEL: dict[str, ChannelName] = {
     "query_structure_environment": "structure",
 }
 FEATURE_OPERATORS = frozenset({*FEATURE_OPERATOR_CHANNEL, "query_feature_bundle"})
+_MUTATION_TOKEN_RE = re.compile(r"^([ACDEFGHIKLMNPQRSTVWY])(\d+)([ACDEFGHIKLMNPQRSTVWY])$")
 
 
 def canonical_sha256(value: Any) -> str:
     raw = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode()).hexdigest()
+
+
+def _descriptor_observation_facts(
+    *,
+    sample_id: str,
+    residues_by_position: dict[str, str],
+    evidence_payloads: list[dict[str, Any]],
+    mutable_positions: tuple[int, ...],
+    wild_type_sites: str,
+) -> tuple[DescriptorObservationFact, ...]:
+    wild_type_by_position = {
+        position: wild_type_sites[index]
+        for index, position in enumerate(mutable_positions)
+    }
+    facts: dict[str, DescriptorObservationFact] = {}
+    for payload in evidence_payloads:
+        evidence_id = str(payload.get("evidence_id") or "")
+        features = dict(payload.get("features") or {})
+        if not evidence_id or features.get("kind") != "physchem":
+            continue
+        for raw_site in features.get("sites", ()):
+            site = dict(raw_site)
+            try:
+                position = int(site.get("position"))
+            except (TypeError, ValueError):
+                continue
+            from_residue = wild_type_by_position.get(position)
+            to_residue = residues_by_position.get(str(position))
+            mutation = str(site.get("mutation") or "")
+            match = _MUTATION_TOKEN_RE.fullmatch(mutation)
+            if match is not None and int(match.group(2)) == position:
+                from_residue = match.group(1)
+                to_residue = match.group(3)
+            if from_residue is None or to_residue is None:
+                continue
+            for raw_delta in site.get("deltas", ()):
+                delta = dict(raw_delta)
+                descriptor = str(delta.get("name") or "")
+                try:
+                    value = float(delta.get("value"))
+                except (TypeError, ValueError):
+                    continue
+                if not descriptor:
+                    continue
+                digest = hashlib.sha256(
+                    (
+                        f"{evidence_id}|{sample_id}|{position}|{from_residue}|"
+                        f"{to_residue}|{descriptor}"
+                    ).encode()
+                ).hexdigest()[:24]
+                fact = DescriptorObservationFact(
+                    fact_id=f"fact:descriptor:{digest}",
+                    evidence_id=evidence_id,
+                    sample_id=sample_id,
+                    position=position,
+                    from_residue=from_residue,
+                    to_residue=to_residue,
+                    descriptor=descriptor,
+                    delta=value,
+                )
+                facts[fact.fact_id] = fact
+    return tuple(facts[key] for key in sorted(facts))
 
 
 def _dedupe_dicts(items: tuple[dict[str, Any], ...], *, keys: tuple[str, ...]) -> tuple[dict[str, Any], ...]:
@@ -207,6 +272,13 @@ class KGContextPartitioner:
             observation = dict(raw_observation)
             variant_id = str(observation.get("variant_id") or "")
             matching = evidence_by_variant.get(variant_id, [])
+            sample_id = str(observation.get("sample_id") or variant_id)
+            residues_by_position = {
+                str(key): str(value)
+                for key, value in dict(
+                    observation.get("residues_by_position") or {}
+                ).items()
+            }
             sequence_sha256 = str(observation.get("sequence_sha256") or "")
             if len(sequence_sha256) != 64:
                 sequence_sha256 = hashlib.sha256(
@@ -214,18 +286,13 @@ class KGContextPartitioner:
                 ).hexdigest()
             sample_cards.append(
                 {
-                    "sample_id": str(observation.get("sample_id") or variant_id),
+                    "sample_id": sample_id,
                     "variant_id": variant_id,
                     "mutation_notation": str(
                         observation.get("mutation_notation") or "WT"
                     ),
                     "sequence_sha256": sequence_sha256,
-                    "residues_by_position": {
-                        str(key): str(value)
-                        for key, value in dict(
-                            observation.get("residues_by_position") or {}
-                        ).items()
-                    },
+                    "residues_by_position": residues_by_position,
                     "evidence_ids": tuple(
                         sorted(
                             str(item["evidence_id"])
@@ -238,6 +305,13 @@ class KGContextPartitioner:
                         for item in matching
                         if item.get("evidence_id")
                     },
+                    "descriptor_facts": _descriptor_observation_facts(
+                        sample_id=sample_id,
+                        residues_by_position=residues_by_position,
+                        evidence_payloads=matching,
+                        mutable_positions=context.mutable_positions,
+                        wild_type_sites=context.wild_type_sites,
+                    ),
                 }
             )
         return ChannelEvidenceInput(

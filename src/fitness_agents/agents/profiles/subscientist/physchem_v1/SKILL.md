@@ -2,8 +2,8 @@
 
 ## Contract fingerprints
 
-- schema_sha256: c677b8d78b18fa758a681718739db41050c8b85d1b78e6d1815891ae7381a5ef
-- skill_sha256: 00a539d60868c7b60a0a8d97747f5b8437868eb9c94326b820085a29233d3be3
+- schema_sha256: 44982dea7f345f78d2ec297c143162d5f2e25da7596130bfb6444d777f9daa71
+- skill_sha256: f5b1e2e5a2c2714a021c490704afdc8d54d3d990bc6214ccd91a3997d6e6f87a
 
 ## Inputs
 
@@ -37,9 +37,16 @@ exact ID applies, emit a `LIMITATION` with `evidence_ids: []` (or omit the unsup
 invent placeholder `ev:` identifiers. IDs shown in examples are syntax examples and are never valid
 for a runtime request unless that exact ID also appears in the supplied evidence universe.
 
+Each visible descriptor delta is supplied as a typed `descriptor_facts` card containing `fact_id`,
+`sample_id`, `position`, `from_residue`, `to_residue`, `descriptor`, and `delta`. Every
+`OBSERVATION` must cite the exact supporting `fact_id` in `fact_ids` and cite that fact's
+`evidence_id`. Never reuse a valid fact ID for a different sample or mutation. If a statement names
+a mutation token such as `G41D`, it must exactly match the cited fact card.
+
 Construct nested items first. Then set `evidence_ids` to exactly
 `sorted(unique(findings[*].evidence_ids ∪ candidate_hypotheses[*].evidence_ids))`. Do not add an ID
 used only by the summary or omit any nested ID.
+Set top-level `fact_ids` to exactly `sorted(unique(findings[*].fact_ids))`.
 
 ## Output
 
@@ -51,7 +58,7 @@ maps may be empty and otherwise may use only supplied positions and canonical am
 Keep a safety margin below the schema: target `analysis_summary` and `uncertainty` at or below 280
 characters, finding statements at or below 260, and other 400-character fields at or below 320.
 
-Analysis-only example: `{"analysis_id":"analysis:pc:1","channel":"physchem","analysis_summary":"The visible descriptor change is bounded and does not establish fitness.","findings":[{"finding_id":"finding:pc:1","kind":"OBSERVATION","statement":"The named descriptor differs for the supplied residue context.","evidence_ids":["ev:pc1"],"confidence":"medium"}],"candidate_hypotheses":[],"evidence_ids":["ev:pc1"],"counterevidence":[],"uncertainty":"Descriptor direction is not an assay outcome or mechanism."}`
+Analysis-only example: `{"analysis_id":"analysis:pc:1","channel":"physchem","analysis_summary":"The visible descriptor change is bounded and does not establish fitness.","findings":[{"finding_id":"finding:pc:1","kind":"OBSERVATION","statement":"Hydropathy delta is 1.2 for G41D in sample s1.","evidence_ids":["ev:pc1"],"fact_ids":["fact:descriptor:visible1"],"confidence":"medium"}],"candidate_hypotheses":[],"evidence_ids":["ev:pc1"],"fact_ids":["fact:descriptor:visible1"],"counterevidence":[],"uncertainty":"Descriptor direction is not an assay outcome or mechanism."}`
 
 Invalid citation-closure example: `findings[0].evidence_ids=["ev:pc2"]` with top-level
 `evidence_ids=["ev:pc1"]`. The nested ID is undeclared, so rebuild the exact sorted union.

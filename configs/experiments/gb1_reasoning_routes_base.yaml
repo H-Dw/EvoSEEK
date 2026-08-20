@@ -8,7 +8,7 @@ acquisition: greedy
 ucb_beta: 1.5
 diversity_lambda: 0.10
 task_config: configs/task/gb1_binding_reasoning_routes.yaml
-model_config: configs/model/baseline.yaml
+model_config: configs/model/kermut.yaml
 knowledge_config: configs/knowledge/gb1_reasoning_routes.yaml
 output_root: artifacts/runs/reasoning-routes
 llm_config: configs/llm/deepseek.yaml
@@ -41,7 +41,7 @@ active_learning:
   module: lightweight_calibrated_hybrid
   posterior:
     plugin: visible_holdout_ensemble
-    predictor_models: [configs/model/baseline.yaml]
+    predictor_models: [configs/model/kermut.yaml]
     calibration_fraction: 0.20
     min_calibration_size: 8
     min_training_size: 8

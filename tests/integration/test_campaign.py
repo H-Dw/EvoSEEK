@@ -108,6 +108,11 @@ def test_configured_active_learning_module_enters_main_loop(config_factory):
         )
     )
     state = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
+    scope = json.loads(
+        (run_dir / "round_01/prediction_scope_receipt.json").read_text(
+            encoding="utf-8"
+        )
+    )
 
     assert summary["selection_driver"] == "active_learning"
     assert summary["fitness_predictors_used_for_generation"] is True
@@ -115,6 +120,8 @@ def test_configured_active_learning_module_enters_main_loop(config_factory):
     assert posterior["calibration"]["status"] == "calibrated"
     assert sum(acquisition["selection"]["quotas"].values()) == 4
     assert len(acquisition["selection"]["selected_ids"]) == 4
+    assert scope["acquisition_prediction_scope"] == "candidate_pool"
+    assert scope["dry_validation_candidate_count"] == 4
     assert {
         item["selection_driver"] for item in state["selections"]
     } == {"active_learning:lightweight_calibrated_hybrid"}
@@ -130,7 +137,7 @@ def test_configured_active_learning_module_enters_main_loop(config_factory):
         ("knowledge_agent", "greedy", True, 40),
     ],
 )
-def test_each_baseline_completes_with_global_ranks(
+def test_each_baseline_completes_with_audited_prediction_scopes(
     config_factory, mode, acquisition, knowledge_enabled, candidate_limit
 ):
     config = config_factory(
@@ -150,6 +157,18 @@ def test_each_baseline_completes_with_global_ranks(
     assert len(records) == 3
     assert all(record["model_rank_all"] >= 1 for record in records)
     assert all(record["total_candidates"] == 88 for record in records)
+    scope = json.loads(
+        (
+            config.output_root
+            / summary["run_id"]
+            / "round_01/prediction_scope_receipt.json"
+        ).read_text()
+    )
+    assert scope["dry_validation_candidate_count"] == 3
+    assert scope["approved_batch_size"] == 3
+    assert scope["acquisition_prediction_scope"] == (
+        "candidate_pool" if mode == "fitness_direct" else "none"
+    )
     if mode == "knowledge_agent":
         assert state["hypotheses"]
         assert state["hypotheses"][0]["evidence_ids"]
@@ -181,9 +200,18 @@ def test_agent_selection_precedes_dry_validation_and_writes_full_kg_outputs(conf
         "hypothesis_context",
         "query_assay_association",
         "explain_variant",
+        "compare_variants",
     ]
     matrix = json.loads((run_dir / "round_01/validation_matrix.json").read_text())
     assert {item["validation_type"] for item in matrix} == {"wet", "dry"}
+    scope = json.loads(
+        (run_dir / "round_01/prediction_scope_receipt.json").read_text()
+    )
+    assert scope["acquisition_prediction_scope"] == "none"
+    assert scope["dry_validation_scope"] == "draft_selected_candidates_only"
+    assert scope["dry_validation_candidate_count"] == 2
+    assert scope["approved_batch_size"] == 2
+    assert scope["oracle_measurement_scope"] == "approved_batch_only"
     assert min(item["base_weight"] for item in matrix if item["validation_type"] == "wet") > max(
         item["base_weight"] for item in matrix if item["validation_type"] == "dry"
     )

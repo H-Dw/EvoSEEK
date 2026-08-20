@@ -112,7 +112,16 @@ def _job_public(mode: str, config: Any) -> dict[str, Any]:
         "condition": config.condition or mode,
         "seed": config.seed,
         "fold_index": config.task.fold_index,
+        "rounds": config.rounds,
+        "budget_per_round": config.budget_per_round,
+        "candidate_limit": config.candidate_limit,
         "provider": config.llm.provider,
+        "fitness_model": config.model.name,
+        "selection_driver": config.generation.selection_driver,
+        "generation_uses_fitness_predictors": (
+            config.generation.use_fitness_predictors
+        ),
+        "dry_validation_enabled": config.validation.enabled,
         "knowledge_enabled": config.knowledge_enabled,
         "local_knowledge_enabled": local_enabled,
         "allow_remote_context": bool(local.allow_remote_context),
@@ -199,9 +208,7 @@ def _matches_requested(
         return False
     fold = summary.get("data_source", {}).get("fold_index")
     concrete_folds = [item for item in folds if item is not None]
-    if concrete_folds and fold not in concrete_folds:
-        return False
-    return True
+    return not concrete_folds or fold in concrete_folds
 
 
 @dataclass(frozen=True)

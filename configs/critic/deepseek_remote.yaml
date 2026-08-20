@@ -24,7 +24,7 @@ profile: scientific_v1
 ood_warning_threshold: null
 model_disagreement_threshold: null
 min_batch_distance: 1
-review_controls: false
-review_diversity: false
+review_controls: true
+review_diversity: true
 max_tokens: 20000
 thinking: disabled

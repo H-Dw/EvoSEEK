@@ -1,8 +1,10 @@
 mode: fitness_direct
 seed: 11
 rounds: 3
-budget_per_round: 32
-candidate_limit: 0
+budget_per_round: 16
+# Kermut acquisition inference ranks this bounded proposal pool; only the selected
+# batch enters dry validation and oracle measurement.
+candidate_limit: 64
 acquisition: greedy
 ucb_beta: 1.5
 diversity_lambda: 0.10

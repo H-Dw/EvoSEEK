@@ -1,7 +1,8 @@
 # Formal three-channel hierarchical Scientist on GB1 AL96.
 # Protocol: 3 rounds x budget 16, Agent-UQ 8/3/3/2, DeepSeek V4 Flash.
-# Real LLM calls plus the GB1 one-hot ensemble for fitness scoring; no placeholder
-# predictor. Role output budgets are 20k tokens.
+# Real LLM calls plus Kermut for post-selection dry validation. Agent-UQ does not
+# use fitness predictions for acquisition; the active-learning condition owns its
+# explicit Kermut posterior. Role output budgets are 20k tokens.
 # Launch same-task folds in parallel with scripts/run_hierarchical_scientist.py.
 # Default matrix: kg_base, kg_base_rag, kg_base_al, kg_3features_rag x 3 folds.
 # --max-parallel 6 runs them in two waves in that condition order.
@@ -15,7 +16,7 @@ acquisition: greedy
 ucb_beta: 1.5
 diversity_lambda: 0.10
 task_config: configs/task/gb1_binding_reasoning_routes.yaml
-model_config: configs/model/baseline.yaml
+model_config: configs/model/kermut.yaml
 knowledge_config: configs/knowledge/gb1_features.example.yaml
 output_root: artifacts/runs/hierarchical-scientist
 llm_config: configs/llm/deepseek.yaml
@@ -26,13 +27,13 @@ evidence_deletion: false
 condition: hierarchical
 generation:
   selection_driver: agent_uq
-  use_fitness_predictors: true
-  predictor_models: [configs/model/baseline.yaml]
+  use_fitness_predictors: false
+  predictor_models: []
   hypothesis_weight: 1.0
   evidence_weight: 0.65
   prior_weight: 0.80
   uncertainty_beta: 0.75
-  predictor_weight: 1.0
+  predictor_weight: 0.0
   gp_length_scale: 1.0
   hypothesis_recency_decay: 0.85
   quota_allocation:
@@ -47,7 +48,7 @@ active_learning:
   module: lightweight_calibrated_hybrid
   posterior:
     plugin: visible_holdout_ensemble
-    predictor_models: [configs/model/baseline.yaml]
+    predictor_models: [configs/model/kermut.yaml]
     calibration_fraction: 0.20
     min_calibration_size: 8
     min_training_size: 8
@@ -132,7 +133,9 @@ kg_interaction:
     - MutationEffectEstimate
     - HAS_EPISTASIS_ESTIMATE
   truncation_audit_sample_rows: 3
-  max_tool_calls: 15
+  # The complete kg_3features_rag plan currently needs 15 calls. Keep three
+  # spare slots so compare_variants is not the first step lost after plan growth.
+  max_tool_calls: 18
   max_rows: 24
   use_counterevidence: true
   stop_when_sufficient: false

@@ -24,7 +24,7 @@ GB1 闭环从 96 条已测变体启动，预测模型需要在少量标签下学
 
 模型选择采用同一 GB1 assay 的直接结果。ProteinGym 监督式基准中，Kermut 在 random、contiguous 和 modulo 切分上的 Spearman 分别为 0.781、0.778 和 0.778；ProteinNPT 为 0.858、−0.322 和 −0.322，ESM-1v embedding 为 0.731、0.310 和 0.259，one-hot 为 0.710、−0.222 和 −0.222。[9][I9] Kermut 在不同突变分布下保持稳定排序，更契合由低阶观测搜索高阶组合的闭环任务。
 
-其他模型承担补充角色：零样本蛋白语言模型提供进化先验，FSFP 适合资源充足时增加少样本排序头，Pythia-PPI 和 AlphaFold 类模型用于结合能或界面可信度复核，one-hot 异质集成保留为透明基线。当前系统将 Kermut 用作任务特异预测与 dry validation；实验或密封 oracle 提供 fitness 真值。[I6][I7][I9]
+当前系统将 Kermut 用于任务特异预测与 dry validation；实验或密封 oracle 提供 fitness 真值。[I6][I7][I9]
 
 ## 2. 数据与无泄漏评估协议
 
@@ -82,27 +82,30 @@ ReAct 的自主“思考—工具—观察”循环和 LLM 规划型 Plan-and-Ex
 | 主 Critic | 主假设 Critic 检查跨通道冲突与可证伪性；批次 Critic 检查候选资格、多样性、UQ/OOD 语义和提交条件 | 分离提出与审批权限，为假设和实验批次设置独立决策门禁 |
 | ReThink | 在标签揭示后对照假设、dry prediction 与 wet observation，记录支持、反驳和模型分歧 | 完成跨轮信用分配，使失败证据、验证结果和修订方向进入后续 KG 上下文 |
 
+结构与保守性通道为小样本推理提供互补先验。保守性 Provider 对预计算 A3M 进行序列一致性重加权，输出单点频率、野生型相对 log-odds、熵和有效样本量；当前 GB1 对齐的 Neff/L 约为 0.27，系统启用单点 profile 并关闭 pairwise coevolution。结构 Provider 从 1PGB chain A 提取接触、溶剂可及性和粗粒度主链环境，用于判断突变位点的局部堆积与暴露约束；该结构对应游离 GB1 单体，证据范围限定为折叠环境。两类证据分别进入 Sub-Scientist 与 Sub-Critic，原始分数的选择权重为零，缺失资源统一标记为 `unavailable`。[I14]
+
 单一 Agent 需要同时处理原始特征、外部文献、跨通道冲突、候选选择和自我审查，容易形成上下文拥塞与证据语义混用。分层 Multi-Agent 将科学解释、证据审查、全局综合和事后学习拆成可验证节点，使失败可定位、角色可替换、权限可限制。[I10] 当前实现已通过离线分层闭环测试；其 fitness 增益仍需在相同 fold、seed 和预算下与 single-Agent 路线比较。
 
 ### 3.3 预测模型与闭环
 
-预测层提供两类实现：轻量基线使用 one-hot、位点交互特征与 Ridge/ExtraTrees 集成；Kermut 将 ESM-2、ProteinMPNN 和结构信息组合到高斯过程核中，输出预测均值、后验不确定性、置信区间与 OOD 指标。[4][I6] 当前 KG–LLM 主路线先由 Scientist 生成结构化假设，再由 Agent-UQ 按假设靶向、证据/历史先验、覆盖探索和匹配对照选择候选；预测器随后执行 dry validation，结果进入 Critic、ReThink 和后续轮次知识。[I7]
+当前预测层采用 Kermut，将 ESM-2、ProteinMPNN 和结构信息组合到高斯过程核中，输出预测均值、后验不确定性、置信区间与 OOD 指标。[4][I6] KG–LLM 主路线先由 Scientist 生成结构化假设，再由 Agent-UQ 按假设靶向、证据/历史先验、覆盖探索和匹配对照选择候选；Kermut 随后执行 dry validation，结果进入 Critic、ReThink 和后续轮次知识。[I7]
+
+当前生产路线按用途区分四类数值不确定性：[13][I15]
+
+| 模块 | 估计量 | 作用位置 |
+|---|---|---|
+| Agent-UQ coverage GP | 基于 Hamming 距离的覆盖标准差 | 默认 `agent_uq` 路线的候选评分与探索配额；表示候选相对已观测序列的覆盖缺口 |
+| Kermut | Exact GP 的 fitness 后验标准差与高斯区间 | 默认路线的批次 dry validation；主动学习路线的 posterior 来源 |
+| `visible_holdout_ensemble` | 可见标签校准后的方差尺度与 conformal 半径 | `active_learning` 路线，在 `hybrid_batch` 采集前校准 predictor 输出 |
+| `visible_linear` | 知识通道线性校准的残差标准差 | KG evidence 的置信度与不确定性；当前用于达到最小样本量后的理化证据校准 |
+
+Agent-UQ 的兼容输出沿用 `fitness_std` 字段，其语义由 `selection_driver=agent_uq` 标记为覆盖不确定性。OOD 是基于序列距离的风险信号；`hybrid_batch` 和 Critic 负责消费这些数值，interval coverage 与 Gaussian NLL 负责评价校准质量。Sub-Scientist 输出的 `uncertainty` 为定性说明，不进入数值后验。
 
 ### 3.4 主动学习设计
 
-主动学习利用每轮新增的 wet fitness 更新代理模型，并把下一批实验分配到高预测值、高认知不确定性和知识支持区域。利用分支提高当前预算内发现高 fitness 变体的概率，探索分支补充模型信息缺口，知识分支保留 Scientist/KG 提出的机制方向；批次多样性减少近重复实验。[5][I12] 这条路径直接作用于 `best@budget`、AULC 和 regret，也可能通过更有信息量的标签改善最终模型覆盖。
+主动学习路线同时启用 `selection_driver: active_learning` 与 `active_learning.enabled: true`。每轮先用已揭示标签拟合并校准 Kermut posterior，再由 `hybrid_batch` 将 16 个实验名额分为 8 个利用候选、4 个不确定性探索候选和 4 个知识候选；OOD 惩罚与 Hamming 多样性约束贯穿三路选择。新揭示的 wet fitness 进入下一轮训练，形成“预测—选择—测量—更新”闭环。[5][13][I12]
 
-当前路线采用 `lightweight_calibrated_hybrid`，需要同时启用 `selection_driver: active_learning` 与 `active_learning.enabled: true`。实验设置为 3 轮、每轮 16 个候选，从 256 个候选中选择；`visible_holdout_ensemble` 只读取当轮开始前已揭示的 wet 标签，使用 20% 可见数据校准偏差、方差尺度和 90% conformal 区间，再用全部可见数据重拟合。[I12]
-
-| 层次 | 当前输入 | 是否拟合 fitness | 选择依据 |
-|---|---|---:|---|
-| 序列主效应 | 四个位点各 20 种氨基酸的 one-hot 特征 | 是 | 精确表示 GB1 离散突变身份，适合少量标签和快速逐轮更新 |
-| 位点交互 | 六个位点对的氨基酸组合特征 | 是 | 显式表达 GB1 强上位性和组合突变效应 |
-| Posterior 信号 | 均值、模型分歧标准差、置信区间与 OOD | 否，来自预测与校准 | 分别支持 fitness 利用、认知探索和风险控制 |
-| 知识信号 | KG evidence score 与历轮 validation prior | 否，作为 soft prior | 保留机制假设和已验证实验方向，不改变 fitness 标签语义 |
-| 批次结构 | 候选间 Hamming 距离 | 否，作为多样性惩罚 | 扩大单批序列覆盖，降低重复测量的信息浪费 |
-
-`hybrid_batch` 当前按 50% 利用、25%探索和25%知识分配配额，三路原始评分依次为 `μ+σ−0.25×OOD`、`σ−0.25×OOD` 和 `K+0.25μ−0.25×OOD`，再施加 `0.10` 多样性惩罚；预算 16 对应 8/4/4 个候选。当前 posterior 仅加载 one-hot/pairwise 基线，以较低计算成本隔离主动学习策略的效果；Kermut 保留在独立预测与验证路线，后续可在同折校准通过后加入 posterior 模型集合。[I12] Agent-UQ、主动学习、预测器直接选择和随机选择共享数据折、初始观测与总查询预算，用于配对比较。
+该路线以 `best@budget`、AULC 和 regret 衡量优化效率，并用 interval coverage、Gaussian NLL 及 No-UQ 消融检查不确定性是否带来决策收益。Agent-UQ、主动学习、predictor 和 random 路线共享数据折、初始观测与查询预算，支持配对比较。[I12]
 
 ### 3.5 双向 KG 与本地 RAG
 
@@ -146,6 +149,8 @@ Agentic RAG 与 Deep Research 涵盖的文献发现、反证搜索和引用核�
 
 [12] Shao, Y. et al. (2024). *Assisting in Writing Wikipedia-like Articles From Scratch with Large Language Models*. **NAACL 2024**. [论文](https://aclanthology.org/2024.naacl-long.347/)
 
+[13] Greenman, K. P., Amini, A. P., & Yang, K. K. (2025). *Benchmarking uncertainty quantification for protein engineering*. **PLOS Computational Biology, 21**(1), e1012639. [https://doi.org/10.1371/journal.pcbi.1012639](https://doi.org/10.1371/journal.pcbi.1012639)
+
 ## 实现依据
 
 [I1] [GB1 数据配置](../configs/data/splits/gb1.yaml)与[任务配置](../configs/task/gb1_binding_al96.yaml)。
@@ -158,7 +163,7 @@ Agentic RAG 与 Deep Research 涵盖的文献发现、反证搜索和引用核�
 
 [I5] [测试数据集的优化目标与任务选择策略](fitness-agents-测试数据集目标与任务选择.md)。
 
-[I6] [轻量基线配置](../configs/model/baseline.yaml)、[Kermut 配置](../configs/model/kermut.yaml)、[集成预测器](../src/fitness_agents/models/ensemble.py)与[Kermut 后端](../src/fitness_agents/models/backends/kermut.py)。
+[I6] [Kermut 配置](../configs/model/kermut.yaml)与[Kermut 后端](../src/fitness_agents/models/backends/kermut.py)。
 
 [I7] [KG–LLM 主路线配置](../configs/experiments/knowledge_agent_al96_rag.yaml)、[主动学习路线配置](../configs/experiments/knowledge_agent_active_learning.yaml)、[闭环编排器](../src/fitness_agents/loop/orchestrator.py)、[Agent-UQ 分臂选择](../src/fitness_agents/mutation/quota_acquisition.py)与[主动学习模块](../src/fitness_agents/active_learning/module.py)。
 
@@ -170,6 +175,10 @@ Agentic RAG 与 Deep Research 涵盖的文献发现、反证搜索和引用核�
 
 [I11] [原子 RAG–KG 生产架构](english-atomic-rag-kg-production-architecture.md)、[当前 RAG 执行审计](current-rag-execution-and-agentic-kg-entry-architecture-analysis.md)、[本地 RAG 配置](../configs/knowledge/gb1_local_rag.yaml)与[KnowledgeEngine](../src/fitness_agents/knowledge/engine.py)。
 
-[I12] [主动学习与强化学习优化策略](active-learning-and-reinforcement-learning-optimization-strategy.md)、[低计算开销模块与实现记录](low-compute-active-learning-rl-module-prioritization.md)、[主动学习实验配置](../configs/experiments/knowledge_agent_active_learning.yaml)、[可见标签 posterior](../src/fitness_agents/active_learning/posterior.py)、[Hybrid Batch 采集](../src/fitness_agents/active_learning/acquisition.py)与[GB1 one-hot/pairwise 特征](../src/fitness_agents/features/gb1.py)。
+[I12] [主动学习实验配置](../configs/experiments/knowledge_agent_active_learning.yaml)、[可见标签 posterior](../src/fitness_agents/active_learning/posterior.py)与[Hybrid Batch 采集](../src/fitness_agents/active_learning/acquisition.py)。
 
 [I13] [定向进化本地知识库说明](../resources/local_knowledge/directed_evolution/README.md)、[结合能力本地知识库说明](../resources/local_knowledge/binding/README.md)与本项目离线知识生产约定：GPT-5.6 Sol 调用学术检索、引文核验和结构化写作 Skills，输出经人工复核的版本化 Markdown。
+
+[I14] [KG 特征工具说明](kg_feature_tools.md)、[GB1 特征参数审计](gb1_feature_tool_parameter_literature_audit.md)、[三通道推理配置](../configs/knowledge/gb1_reasoning_routes.yaml)、[1PGB 资源与位点映射](../configs/task/gb1_binding_reasoning_routes.yaml)、[MSA Provider](../src/fitness_agents/protein_features/msa.py)与[结构 Provider](../src/fitness_agents/protein_features/structure.py)。
+
+[I15] [Agent-UQ 覆盖不确定性](../src/fitness_agents/mutation/uncertainty.py)、[Kermut 后验](../src/fitness_agents/models/backends/kermut.py)、[主动学习 posterior 校准](../src/fitness_agents/active_learning/posterior.py)、[知识证据校准](../src/fitness_agents/protein_features/calibration.py)与[HybridBatch 采集](../src/fitness_agents/active_learning/acquisition.py)。

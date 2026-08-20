@@ -10,7 +10,9 @@ parameter_set_id: gb1-reasoning-routes:v1
 evidence_heartbeat_interval: 256
 local_knowledge:
   enabled: true
-  index_path: artifacts/local_knowledge/gb1-reasoning-routes.sqlite
+  index_path: artifacts/local_knowledge/corpus/gb1-reasoning-routes-qwen-v4.sqlite
+  corpus_index_path: artifacts/local_knowledge/corpus/gb1-reasoning-routes-qwen-v4.sqlite
+  retrieval_overlay_path: artifacts/local_knowledge/overlays/gb1-reasoning-routes-qwen.sqlite
   allow_remote_context: true
   roots:
     - path: resources/local_knowledge/directed_evolution

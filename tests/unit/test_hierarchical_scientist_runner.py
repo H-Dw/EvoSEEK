@@ -34,6 +34,8 @@ def _passing_completion_manifest(*, expected_rounds: int = 3) -> dict:
         "expected_rounds": expected_rounds,
         "completed_rounds": expected_rounds,
         "aborted_rounds": 0,
+        "planned_batch_sizes": [16] * expected_rounds,
+        "actual_batch_sizes": [16] * expected_rounds,
         "required_node_failures": [],
         "fallback_nodes": [],
     }
@@ -94,6 +96,7 @@ def _write_campaign(
                 "llm_provider": "deepseek",
                 "rounds": rounds,
                 "budget_per_round": budget,
+                "candidate_limit": 64,
                 "hierarchical_hypothesis": {
                     "enabled": enabled,
                     "required_channels": ["physchem", "conservation", "structure"],
@@ -103,7 +106,7 @@ def _write_campaign(
                 },
                 "llm": {"max_tokens": 20000},
                 "critic": {"max_tokens": 20000},
-                "model": "onehot_heterogeneous_ensemble",
+                "model": "kermut",
                 "validation": {"enabled": True},
                 "knowledge_channels": {
                     "physchem": spec["channels"],
@@ -125,11 +128,14 @@ def _write_campaign(
                 },
                 "generation": {
                     "selection_driver": "active_learning" if spec["al"] else "agent_uq",
-                    "use_fitness_predictors": True,
-                    "predictor_models": ["onehot_heterogeneous_ensemble"],
+                    "use_fitness_predictors": False,
+                    "predictor_models": [],
                     "quota_allocation": {"enabled": not spec["al"]},
                 },
-                "active_learning": {"enabled": spec["al"]},
+                "active_learning": {
+                    "enabled": spec["al"],
+                    "posterior_models": ["kermut"],
+                },
             }
         ),
         encoding="utf-8",
@@ -142,6 +148,27 @@ def _write_campaign(
         for round_id in range(1, rounds + 1):
             round_dir = run_dir / f"round_{round_id:02d}"
             round_dir.mkdir()
+            selected_ids = [f"v{index}" for index in range(budget)]
+            (round_dir / "prediction_scope_receipt.json").write_text(
+                json.dumps(
+                    {
+                        "approved_batch_size": budget,
+                        "dry_validation_scope": "draft_selected_candidates_only",
+                        "dry_validation_calls": [
+                            {
+                                "candidate_ids": selected_ids,
+                                "candidate_count": budget,
+                            }
+                        ],
+                        "all_dry_validation_targets_were_draft_selected": True,
+                        "acquisition_prediction_scope": (
+                            "candidate_pool" if spec["al"] else "none"
+                        ),
+                        "oracle_measurement_scope": "approved_batch_only",
+                    }
+                ),
+                encoding="utf-8",
+            )
             (round_dir / "hypothesis_pipeline.json").write_text(
                 json.dumps(_passing_pipeline()),
                 encoding="utf-8",
@@ -159,7 +186,7 @@ def _write_campaign(
         "queries_used": budget * rounds,
         "rounds_aborted": 0,
         "placeholder_predictor": False,
-        "fitness_predictors_used_for_generation": True,
+        "fitness_predictors_used_for_generation": spec["al"],
         "data_source": {"fold_index": fold_index, "assignment_sha256": f"assign-fold-{fold_index}"},
     }
     return summary
@@ -173,14 +200,16 @@ def test_hierarchical_scientist_config_matches_formal_al96_protocol() -> None:
     assert config.task.split_root is not None
     assert config.llm.model == "deepseek-v4-flash"
     assert config.llm.api_key == "env:DEEPSEEK_API_KEY"
-    assert config.critic.review_controls is False
-    assert config.critic.review_diversity is False
+    assert config.critic.review_controls is True
+    assert config.critic.review_diversity is True
     assert config.knowledge.local_knowledge.enabled is False
-    assert config.generation.use_fitness_predictors is True
-    assert [item.name for item in config.generation.predictor_models] == [
-        "onehot_heterogeneous_ensemble"
+    assert config.model.name == "kermut"
+    assert config.generation.use_fitness_predictors is False
+    assert config.generation.predictor_models == ()
+    assert config.generation.predictor_weight == 0.0
+    assert [item.name for item in config.active_learning.posterior.predictor_models] == [
+        "kermut"
     ]
-    assert config.generation.predictor_weight == 1.0
     assert config.validation.enabled is True
     assert config.llm.max_tokens == 20000
     assert config.critic.max_tokens == 20000
@@ -194,7 +223,7 @@ def test_hierarchical_scientist_config_matches_formal_al96_protocol() -> None:
     assert hierarchy.child_max_parallel_batches == 2
     assert hierarchy.max_child_revision_attempts == 1
     assert hierarchy.max_main_revision_attempts == 2
-    assert config.kg_interaction.max_tool_calls == 15
+    assert config.kg_interaction.max_tool_calls == 18
     assert config.scientist_prompt_evidence_limit == 32
     assert hierarchy.main_max_input_chars == 160000
     assert hierarchy.child_max_input_chars == 120000
@@ -263,10 +292,12 @@ def test_dry_run_schedule_has_three_same_task_fold_jobs(tmp_path, monkeypatch, c
         encoding="utf-8",
     )
     base = load_experiment_config("configs/experiments/hierarchical_scientist.deepseek.yaml")
+    real_load = runner.load_experiment_config
 
     def fake_load(path, overrides=None):
-        del path, overrides
-        return replace(base, task=replace(base.task, split_root=split_root))
+        if Path(path).name == "hierarchical_scientist.deepseek.yaml":
+            return replace(base, task=replace(base.task, split_root=split_root))
+        return real_load(path, overrides=overrides)
 
     monkeypatch.setattr(runner, "load_experiment_config", fake_load)
     monkeypatch.setattr(
@@ -446,22 +477,36 @@ def test_apply_condition_configures_base_kg_modes_without_feature_tools(tmp_path
     assert not set(kg_base.kg_interaction.enabled_operators).intersection(runner.FEATURE_OPERATORS)
     assert rag.knowledge.local_knowledge.enabled is True
     assert rag.knowledge.local_knowledge.allow_remote_context is True
-    assert "kg_base_rag-f01.sqlite" in str(rag.knowledge.local_knowledge.index_path)
+    assert "gb1-reasoning-routes-qwen-v4.sqlite" in str(
+        rag.knowledge.local_knowledge.index_path
+    )
+    assert "kg_base_rag-f01-overlay.sqlite" in str(
+        rag.knowledge.local_knowledge.retrieval_overlay_path
+    )
     assert "query_local_knowledge" in rag.kg_interaction.enabled_operators
     assert rag.kg_interaction.feature_tool_strategy == "context_only"
     assert al.active_learning.enabled is True
     assert al.generation.selection_driver == "active_learning"
     assert al.generation.quota_allocation.enabled is False
     assert al.knowledge.local_knowledge.enabled is False
-    sqlite_paths = {
-        str(rag.knowledge.local_knowledge.index_path),
+    corpus_paths = {
+        str(rag.knowledge.local_knowledge.corpus_index_path),
         str(
             runner.apply_condition(
                 base, "kg_base_rag", fold=2, seed=11, output_root=output_root
-            ).knowledge.local_knowledge.index_path
+            ).knowledge.local_knowledge.corpus_index_path
         ),
     }
-    assert len(sqlite_paths) == 2
+    assert len(corpus_paths) == 1
+    overlay_paths = {
+        str(rag.knowledge.local_knowledge.retrieval_overlay_path),
+        str(
+            runner.apply_condition(
+                base, "kg_base_rag", fold=2, seed=11, output_root=output_root
+            ).knowledge.local_knowledge.retrieval_overlay_path
+        ),
+    }
+    assert len(overlay_paths) == 2
     features_rag = runner.apply_condition(
         base, "kg_3features_rag", fold=0, seed=11, output_root=output_root
     )
@@ -471,7 +516,7 @@ def test_apply_condition_configures_base_kg_modes_without_feature_tools(tmp_path
     assert "query_local_knowledge" in features_rag.kg_interaction.enabled_operators
     assert set(features_rag.kg_interaction.enabled_operators).intersection(runner.FEATURE_OPERATORS)
     assert features_rag.kg_interaction.required_tool_calls(include_rag=True) == 15
-    assert features_rag.kg_interaction.max_tool_calls == 15
+    assert features_rag.kg_interaction.max_tool_calls == 18
     with pytest.raises(ValueError, match="complete runtime plan"):
         replace(
             features_rag,
@@ -496,10 +541,12 @@ def test_default_matrix_is_twelve_jobs_in_three_waves_of_four(
         encoding="utf-8",
     )
     base = load_experiment_config("configs/experiments/hierarchical_scientist.deepseek.yaml")
+    real_load = runner.load_experiment_config
 
     def fake_load(path, overrides=None):
-        del path, overrides
-        return replace(base, task=replace(base.task, split_root=split_root))
+        if Path(path).name == "hierarchical_scientist.deepseek.yaml":
+            return replace(base, task=replace(base.task, split_root=split_root))
+        return real_load(path, overrides=overrides)
 
     monkeypatch.setattr(runner, "load_experiment_config", fake_load)
     monkeypatch.setattr(sys, "argv", ["run_hierarchical_scientist.py", "--dry-run"])
@@ -510,13 +557,25 @@ def test_default_matrix_is_twelve_jobs_in_three_waves_of_four(
     assert schedule["max_parallel"] == 4
     assert schedule["expected_waves"] == 3
     assert schedule["batch_review_scope"] == {
-        "controls": False,
-        "diversity": False,
+        "controls": True,
+        "diversity": True,
     }
     assert schedule["placeholder_predictor"] is False
     assert schedule["max_tokens"] == 20000
-    assert schedule["fitness_predictor"] == "onehot_heterogeneous_ensemble"
-    assert schedule["use_fitness_predictors"] is True
+    assert schedule["fitness_predictor"] == "kermut"
+    assert schedule["use_fitness_predictors"] is False
+    assert schedule["predictor_roles"] == {
+        "agent_uq_acquisition": "disabled",
+        "active_learning_acquisition": "kermut",
+        "post_selection_dry_validation": "kermut",
+        "oracle_measurement": "approved_batch_only",
+    }
+    assert schedule["rag_backend"]["embedding"] == "text-embedding-v4"
+    assert schedule["rag_backend"]["reranker"] == "qwen3-rerank"
+    assert schedule["kg_tool_call_budget"]["kg_3features_rag"] == {
+        "required": 15,
+        "configured": 18,
+    }
     jobs = schedule["jobs"]
     assert len(jobs) == 12
     assert [job["condition"] for job in jobs] == [
@@ -576,10 +635,12 @@ def test_batch_review_scope_flags_are_audited_and_forwarded(
     base = load_experiment_config(
         "configs/experiments/hierarchical_scientist.deepseek.yaml"
     )
+    real_load = runner.load_experiment_config
 
     def fake_load(path, overrides=None):
-        del path, overrides
-        return replace(base, task=replace(base.task, split_root=split_root))
+        if Path(path).name == "hierarchical_scientist.deepseek.yaml":
+            return replace(base, task=replace(base.task, split_root=split_root))
+        return real_load(path, overrides=overrides)
 
     monkeypatch.setattr(runner, "load_experiment_config", fake_load)
     monkeypatch.setattr(
@@ -696,24 +757,21 @@ def test_apply_token_budget_sets_all_role_limits() -> None:
         runner.apply_token_budget(base, 20001)
 
 
-def test_apply_real_fitness_predictors_enables_registered_model() -> None:
+def test_validate_formal_fitness_configuration_rejects_generation_predictor() -> None:
     runner = _load_runner()
     base = load_experiment_config("configs/experiments/hierarchical_scientist.deepseek.yaml")
-    disabled = replace(
+    assert runner.validate_formal_fitness_configuration(base) is base
+    invalid = replace(
         base,
         generation=replace(
             base.generation,
-            use_fitness_predictors=False,
-            predictor_models=(),
-            predictor_weight=0.0,
+            use_fitness_predictors=True,
+            predictor_models=(base.model,),
+            predictor_weight=1.0,
         ),
-        validation=replace(base.validation, enabled=False),
     )
-    updated = runner.apply_real_fitness_predictors(disabled)
-    assert updated.generation.use_fitness_predictors is True
-    assert updated.generation.predictor_models == (base.model,)
-    assert updated.generation.predictor_weight == 1.0
-    assert updated.validation.enabled is True
+    with pytest.raises(ValueError, match="must not mix fitness predictions"):
+        runner.validate_formal_fitness_configuration(invalid)
 
 
 def test_audit_rejects_placeholder_predictor(tmp_path) -> None:

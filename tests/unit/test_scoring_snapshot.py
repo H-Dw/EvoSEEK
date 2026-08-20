@@ -52,3 +52,27 @@ def test_snapshot_rejects_selection_outside_current_eligible_universe() -> None:
     with pytest.raises(StateCoverageError) as captured:
         snapshot.assert_selection_coverage(["v2"])
     assert captured.value.missing_by_field == {"eligible": ("v2",)}
+
+
+def test_snapshot_allows_pool_without_dry_predictions_until_selection() -> None:
+    variants = (_variant("v1"), _variant("v2"))
+    snapshot = RoundScoringSnapshot(
+        hypothesis_id="hyp:2",
+        version=4,
+        eligible=variants,
+        design_score_by_id={item.variant_id: _design(item.variant_id) for item in variants},
+        prediction_by_id={"v1": _prediction("v1")},
+        model_ranks={"v1": 1},
+        all_scores={"v1": 0.2, "v2": 0.1},
+        acquisition_ranks={"v1": 1, "v2": 2},
+        eligible_ranks={"v1": 1, "v2": 2},
+    )
+
+    snapshot.assert_eligible_coverage()
+    snapshot.assert_selection_coverage(["v1"])
+    with pytest.raises(StateCoverageError) as captured:
+        snapshot.assert_selection_coverage(["v2"])
+    assert captured.value.missing_by_field == {
+        "model_ranks": ("v2",),
+        "prediction_by_id": ("v2",),
+    }

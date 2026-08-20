@@ -50,7 +50,14 @@ class RoundScoringSnapshot:
         return frozenset(item.variant_id for item in self.eligible)
 
     def assert_eligible_coverage(self) -> None:
-        self._assert_coverage(self.eligible_ids)
+        """Require acquisition state for the pool, not dry predictions for the pool.
+
+        Dry validators are intentionally evaluated only for candidates that enter a
+        proposed batch.  Pool-wide prediction coverage is therefore not an invariant
+        for Agent-UQ/random routes.
+        """
+
+        self._assert_acquisition_coverage(self.eligible_ids)
 
     def assert_selection_coverage(self, selected_ids: Sequence[str]) -> None:
         selected = frozenset(selected_ids)
@@ -59,7 +66,7 @@ class RoundScoringSnapshot:
         if outside:
             missing["eligible"] = tuple(outside)
         try:
-            self._assert_coverage(selected)
+            self._assert_selection_coverage(selected)
         except StateCoverageError as error:
             missing.update(error.missing_by_field)
         if missing:
@@ -68,7 +75,16 @@ class RoundScoringSnapshot:
                 missing_by_field=missing,
             )
 
-    def _assert_coverage(self, ids: frozenset[str]) -> None:
+    def _assert_acquisition_coverage(self, ids: frozenset[str]) -> None:
+        maps = {
+            "design_score_by_id": self.design_score_by_id,
+            "all_scores": self.all_scores,
+            "acquisition_ranks": self.acquisition_ranks,
+            "eligible_ranks": self.eligible_ranks,
+        }
+        self._assert_map_coverage(ids, maps)
+
+    def _assert_selection_coverage(self, ids: frozenset[str]) -> None:
         maps = {
             "design_score_by_id": self.design_score_by_id,
             "prediction_by_id": self.prediction_by_id,
@@ -77,6 +93,13 @@ class RoundScoringSnapshot:
             "acquisition_ranks": self.acquisition_ranks,
             "eligible_ranks": self.eligible_ranks,
         }
+        self._assert_map_coverage(ids, maps)
+
+    def _assert_map_coverage(
+        self,
+        ids: frozenset[str],
+        maps: Mapping[str, Mapping[str, object]],
+    ) -> None:
         missing = {
             name: tuple(ids.difference(values.keys()))
             for name, values in maps.items()

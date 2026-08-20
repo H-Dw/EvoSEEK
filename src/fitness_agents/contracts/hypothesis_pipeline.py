@@ -92,6 +92,29 @@ MainRequiredAction = Literal[
 ]
 
 
+class DescriptorObservationFact(BaseModel):
+    """One sample-local descriptor delta with an explicit mutation identity."""
+
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    fact_id: str = Field(min_length=1, max_length=320)
+    evidence_id: str = Field(min_length=1, max_length=320)
+    sample_id: str = Field(min_length=1, max_length=320)
+    position: int = Field(gt=0)
+    from_residue: str = Field(
+        min_length=1,
+        max_length=1,
+        pattern=r"^[ACDEFGHIKLMNPQRSTVWY]$",
+    )
+    to_residue: str = Field(
+        min_length=1,
+        max_length=1,
+        pattern=r"^[ACDEFGHIKLMNPQRSTVWY]$",
+    )
+    descriptor: str = Field(min_length=1, max_length=120)
+    delta: float
+
+
 class ChildSampleCard(BaseModel):
     """Fitness-blind sample view supplied to one feature child."""
 
@@ -104,6 +127,9 @@ class ChildSampleCard(BaseModel):
     residues_by_position: dict[str, str]
     evidence_ids: tuple[str, ...] = Field(max_length=16)
     feature_values: dict[str, dict[str, Any]]
+    descriptor_facts: tuple[DescriptorObservationFact, ...] = Field(
+        default=(), max_length=64
+    )
 
 
 class ChannelEvidenceInput(BaseModel):
@@ -161,6 +187,19 @@ class ChannelEvidenceInput(BaseModel):
             interaction=interaction,
         ).ids
 
+    @property
+    def descriptor_fact_by_id(self) -> dict[str, DescriptorObservationFact]:
+        facts = {
+            fact.fact_id: fact
+            for sample in self.visible_observations
+            for fact in sample.descriptor_facts
+        }
+        if len(facts) != sum(
+            len(sample.descriptor_facts) for sample in self.visible_observations
+        ):
+            raise ValueError("descriptor fact IDs must be unique in one child context")
+        return facts
+
 
 class ChannelFinding(BaseModel):
     """One tool-grounded observation or bounded interpretation."""
@@ -171,6 +210,7 @@ class ChannelFinding(BaseModel):
     kind: Literal["OBSERVATION", "INTERPRETATION", "LIMITATION"]
     statement: str = Field(min_length=1, max_length=300)
     evidence_ids: list[str] = Field(max_length=8)
+    fact_ids: list[str] = Field(default_factory=list, max_length=8)
     confidence: Literal["low", "medium", "high"]
 
 
@@ -209,6 +249,7 @@ class ChannelAnalysisOutput(BaseModel):
         default_factory=list, max_length=4
     )
     evidence_ids: list[str] = Field(max_length=12)
+    fact_ids: list[str] = Field(default_factory=list, max_length=24)
     counterevidence: list[Annotated[str, Field(min_length=1, max_length=400)]] = Field(
         max_length=8
     )
@@ -228,6 +269,16 @@ class ChannelAnalysisOutput(BaseModel):
             )
         if self.evidence_ids != sorted(declared):
             raise ValueError("top-level evidence_ids must be sorted and unique")
+        declared_facts = set(self.fact_ids)
+        nested_facts = {
+            fact_id for finding in self.findings for fact_id in finding.fact_ids
+        }
+        if nested_facts != declared_facts:
+            raise ValueError(
+                "top-level fact_ids must exactly equal the sorted unique finding fact ID union"
+            )
+        if self.fact_ids != sorted(declared_facts):
+            raise ValueError("top-level fact_ids must be sorted and unique")
         return self
 
 
@@ -531,16 +582,39 @@ class CompletionManifest(BaseModel):
     expected_rounds: int = Field(ge=0)
     completed_rounds: int = Field(ge=0)
     aborted_rounds: int = Field(ge=0)
+    planned_batch_sizes: tuple[int, ...]
+    actual_batch_sizes: tuple[int, ...]
     required_node_failures: tuple[str, ...] = ()
     fallback_nodes: tuple[str, ...] = ()
 
-    @field_validator("required_node_failures", "fallback_nodes", mode="before")
+    @field_validator(
+        "planned_batch_sizes",
+        "actual_batch_sizes",
+        "required_node_failures",
+        "fallback_nodes",
+        mode="before",
+    )
     @classmethod
     def normalize_json_tuples(cls, value: Any) -> Any:
         return tuple(value) if isinstance(value, list) else value
 
     @model_validator(mode="after")
     def prevent_false_pass(self) -> CompletionManifest:
+        if len(self.planned_batch_sizes) != len(self.actual_batch_sizes):
+            raise ValueError("planned and actual batch-size receipts must align")
+        if len(self.planned_batch_sizes) != self.completed_rounds + self.aborted_rounds:
+            raise ValueError(
+                "batch-size receipts must cover every completed or aborted round"
+            )
+        if any(
+            planned < 0 or actual < 0 or actual > planned
+            for planned, actual in zip(
+                self.planned_batch_sizes,
+                self.actual_batch_sizes,
+                strict=True,
+            )
+        ):
+            raise ValueError("actual batch size must be between zero and planned size")
         complete = (
             self.artifact_finalized
             and self.run_status == "completed"
@@ -549,6 +623,7 @@ class CompletionManifest(BaseModel):
             and self.aborted_rounds == 0
             and not self.required_node_failures
             and not self.fallback_nodes
+            and self.actual_batch_sizes == self.planned_batch_sizes
         )
         if self.pass_eligible != complete:
             raise ValueError("pass_eligible does not match completion gate")

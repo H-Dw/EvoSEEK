@@ -1499,6 +1499,8 @@ class CampaignRunner:
             )
         round_metrics: list[dict[str, float]] = []
         rounds_aborted = 0
+        planned_batch_sizes: list[int] = []
+        actual_batch_sizes: list[int] = []
         self.writer.write_json("config.json", self._config_record())
         self.writer.write_json(
             "knowledge/manifest.json",
@@ -1888,11 +1890,13 @@ class CampaignRunner:
             )
             predict_targets = remaining if score_full_remaining else eligible
             expected_batch_size = min(self.config.budget_per_round, len(eligible))
+            planned_batch_sizes.append(expected_batch_size)
             knowledge_scores = (
                 self.knowledge.scores(evidence) if self.config.knowledge_enabled else {}
             )
             design_scores: list[DesignScore] = []
             generation_prediction_sets: list[list[Prediction]] = []
+            generation_predictions: list[Prediction] = []
             active_score_result = None
             active_knowledge_scores: dict[str, float] = {}
             active_calibration_status: str | None = None
@@ -2159,6 +2163,7 @@ class CampaignRunner:
 
             validation_prediction_sets: list[list[Prediction]] = []
             validation_predictors: list[Any] = []
+            validation_targets = [public_by_id[item] for item in selected_ids]
             validation_configs = (
                 (self.config.model, *self.config.validation.predictor_models)
                 if self.config.validation.enabled
@@ -2203,25 +2208,57 @@ class CampaignRunner:
                 )
                 self._progress(
                     "predict_started",
-                    f"round {round_id}/{self.config.rounds} validating {len(predict_targets)} candidates",
+                    f"round {round_id}/{self.config.rounds} validating {len(validation_targets)} selected candidates",
                     phase=CampaignPhase.PREDICTING,
-                    n_candidates=len(predict_targets),
+                    n_candidates=len(validation_targets),
                     model_count=len(validation_predictors),
+                    prediction_scope="selected_batch",
                 )
-                validation_prediction_sets = [
-                    validation_predictor.predict(predict_targets)
-                    for validation_predictor in validation_predictors
-                ]
+                validation_prediction_sets = []
+                for model_index, validation_predictor in enumerate(
+                    validation_predictors
+                ):
+                    if (
+                        model_index == 0
+                        and predictor is validation_predictor
+                        and generation_predictions
+                    ):
+                        acquisition_prediction_by_id = {
+                            item.variant_id: item for item in generation_predictions
+                        }
+                        validation_prediction_sets.append(
+                            [
+                                acquisition_prediction_by_id[item.variant_id]
+                                for item in validation_targets
+                            ]
+                        )
+                    else:
+                        validation_prediction_sets.append(
+                            validation_predictor.predict(validation_targets)
+                        )
                 self._progress(
                     "predict_completed",
                     f"round {round_id}/{self.config.rounds} dry validation predictions ready",
-                    n_candidates=len(predict_targets),
+                    n_candidates=len(validation_targets),
                     model_count=len(validation_predictors),
+                    prediction_scope="selected_batch",
                 )
             if validation_prediction_sets:
                 original_predictions = validation_prediction_sets[0]
             else:
-                original_predictions = [working_by_id[item.variant_id] for item in predict_targets]
+                original_predictions = [working_by_id[item] for item in selected_ids]
+            dry_validation_calls = (
+                [
+                    {
+                        "reason": "initial_draft",
+                        "candidate_ids": list(selected_ids),
+                        "candidate_count": len(selected_ids),
+                        "model_count": len(validation_predictors),
+                    }
+                ]
+                if validation_predictors
+                else []
+            )
             prediction_by_id = {item.variant_id: item for item in original_predictions}
             prediction_status_by_id = _prediction_review_cards(
                 selection_driver=selection_driver,
@@ -2258,11 +2295,11 @@ class CampaignRunner:
             )
             if self.config.knowledge_enabled:
                 self.knowledge.record_inference_context(
-                    predict_targets,
+                    validation_targets,
                     original_predictions,
                     {
                         item.variant_id: evidence.get(item.variant_id, [])
-                        for item in predict_targets
+                        for item in validation_targets
                     },
                     round_id=round_id,
                     intervention_tags=inference_interventions,
@@ -2287,7 +2324,124 @@ class CampaignRunner:
                 "evidence": evidence,
                 "hypothesis": hypothesis,
                 "rationale_claims": {item.variant_id: item.reason for item in design_scores},
+                "scoring_snapshot_version": scoring_snapshot_version,
+                "dry_validation_calls": dry_validation_calls,
+                "reviewed_draft_candidate_ids": set(),
+                "active_calibration_status": active_calibration_status,
             }
+
+            def ensure_dry_validation(
+                candidate_ids: Sequence[str],
+                *,
+                reason: str,
+                _context: dict[str, Any] = draft_context,
+                _validation_predictors: list[Any] = validation_predictors,
+                _validation_prediction_sets: list[list[Prediction]] = (
+                    validation_prediction_sets
+                ),
+                _original_predictions: list[Prediction] = original_predictions,
+                _round_id: int = round_id,
+                _inference_interventions: tuple[str, ...] = inference_interventions,
+                _generation_predictor: Any = predictor,
+                _generation_predictions: list[Prediction] = generation_predictions,
+            ) -> None:
+                missing_ids = [
+                    item for item in candidate_ids if item not in _context["prediction_by_id"]
+                ]
+                if not missing_ids:
+                    return
+                missing_variants = [public_by_id[item] for item in missing_ids]
+                if _validation_predictors:
+                    acquisition_prediction_by_id = {
+                        item.variant_id: item for item in _generation_predictions
+                    }
+                    incremental_sets = []
+                    for model_index, validator in enumerate(_validation_predictors):
+                        if (
+                            model_index == 0
+                            and validator is _generation_predictor
+                            and set(missing_ids).issubset(acquisition_prediction_by_id)
+                        ):
+                            incremental_sets.append(
+                                [
+                                    acquisition_prediction_by_id[item]
+                                    for item in missing_ids
+                                ]
+                            )
+                        else:
+                            incremental_sets.append(
+                                validator.predict(missing_variants)
+                            )
+                    for existing, incremental in zip(
+                        _validation_prediction_sets,
+                        incremental_sets,
+                        strict=True,
+                    ):
+                        existing.extend(incremental)
+                    primary_predictions = incremental_sets[0]
+                else:
+                    primary_predictions = [
+                        _context["working_by_id"][item] for item in missing_ids
+                    ]
+                _original_predictions.extend(primary_predictions)
+                _context["prediction_by_id"].update(
+                    {item.variant_id: item for item in primary_predictions}
+                )
+                _context["prediction_status_by_id"].update(
+                    _prediction_review_cards(
+                        selection_driver=selection_driver,
+                        hard_validation_by_id={
+                            item.variant_id: item for item in primary_predictions
+                        },
+                        working_by_id=_context["working_by_id"],
+                        active_calibration_status=_context[
+                            "active_calibration_status"
+                        ],
+                    )
+                )
+                _context["scoring_snapshot_version"] += 1
+                _context["scoring_snapshot"] = _round_scoring_snapshot(
+                    hypothesis=_context["hypothesis"],
+                    version=_context["scoring_snapshot_version"],
+                    eligible=_context["eligible"],
+                    design_score_by_id=_context["design_score_by_id"],
+                    prediction_by_id=_context["prediction_by_id"],
+                    all_scores=_context["all_scores"],
+                )
+                if _validation_predictors:
+                    _context["dry_validation_calls"].append(
+                        {
+                            "reason": reason,
+                            "candidate_ids": list(missing_ids),
+                            "candidate_count": len(missing_ids),
+                            "model_count": len(_validation_predictors),
+                        }
+                    )
+                if self.config.knowledge_enabled:
+                    self.knowledge.record_inference_context(
+                        missing_variants,
+                        primary_predictions,
+                        {
+                            item.variant_id: _context["evidence"].get(
+                                item.variant_id, []
+                            )
+                            for item in missing_variants
+                        },
+                        round_id=_round_id,
+                        intervention_tags=_inference_interventions,
+                    )
+                self.writer.event(
+                    "dry_validation_batch_scored",
+                    {
+                        "round_id": _round_id,
+                        "reason": reason,
+                        "prediction_scope": "selected_batch_incremental",
+                        "candidate_ids": missing_ids,
+                        "scored_candidate_count": len(
+                            _context["prediction_by_id"]
+                        ),
+                    },
+                )
 
             def draft_builder(
                 review_attempt: int,
@@ -2299,6 +2453,9 @@ class CampaignRunner:
                 _context["revision_constraints"] = constraints
                 if review_attempt == 0:
                     candidate_ids = list(_context["initial_selected_ids"])
+                    current_pool_ids = [
+                        item.variant_id for item in _context["eligible"]
+                    ]
                 else:
                     revised_eligible = [
                         item for item in _context["eligible"] if item.variant_id not in exclusions
@@ -2351,15 +2508,22 @@ class CampaignRunner:
                             min(_context["expected_batch_size"], len(revised_eligible)),
                             diversity,
                         )
+                    current_pool_ids = [
+                        item.variant_id for item in revised_eligible
+                    ]
                 previous_diversity = _context.get("last_diversity_receipt")
+                _context["reviewed_draft_candidate_ids"].update(candidate_ids)
+                ensure_dry_validation(
+                    candidate_ids,
+                    reason=("initial_draft" if review_attempt == 0 else "critic_revision"),
+                    _context=_context,
+                )
                 required_distance = self.config.critic.min_batch_distance
                 if constraints is not None and constraints.minimum_batch_distance is not None:
                     required_distance = constraints.minimum_batch_distance
                 diversity_receipt = batch_diversity_receipt(
                     selected_ids=candidate_ids,
-                    candidate_pool_ids=[
-                        item.variant_id for item in _context["eligible"]
-                    ],
+                    candidate_pool_ids=current_pool_ids,
                     variants_by_id=public_by_id,
                     required_minimum_batch_distance=required_distance,
                     hypothesis=_context["hypothesis"],
@@ -2746,30 +2910,6 @@ class CampaignRunner:
                     design_score_by_id = {
                         item.variant_id: item for item in design_scores
                     }
-                    revised_predictions = (
-                        validation_predictors[0].predict(eligible)
-                        if validation_predictors
-                        else [working_by_id[item.variant_id] for item in eligible]
-                    )
-                    original_predictions = list(revised_predictions)
-                    prediction_by_id = {
-                        item.variant_id: item for item in original_predictions
-                    }
-                    prediction_status_by_id = _prediction_review_cards(
-                        selection_driver=selection_driver,
-                        hard_validation_by_id=prediction_by_id,
-                        working_by_id=working_by_id,
-                        active_calibration_status=active_calibration_status,
-                    )
-                    scoring_snapshot_version += 1
-                    scoring_snapshot = _round_scoring_snapshot(
-                        hypothesis=hypothesis,
-                        version=scoring_snapshot_version,
-                        eligible=eligible,
-                        design_score_by_id=design_score_by_id,
-                        prediction_by_id=prediction_by_id,
-                        all_scores=all_scores,
-                    )
                     draft_context.update(
                         {
                             "hypothesis": hypothesis,
@@ -2778,17 +2918,29 @@ class CampaignRunner:
                             "all_scores": all_scores,
                             "active_score_result": active_score_result,
                             "active_knowledge_scores": active_knowledge_scores,
+                            "active_calibration_status": active_calibration_status,
                             "expected_batch_size": expected_batch_size,
                             "agent_quota_selection": agent_quota_selection,
                             "initial_selected_ids": tuple(selected_ids),
-                            "prediction_by_id": prediction_by_id,
-                            "prediction_status_by_id": prediction_status_by_id,
                             "design_score_by_id": design_score_by_id,
-                            "scoring_snapshot": scoring_snapshot,
                             "rationale_claims": {
                                 item.variant_id: item.reason for item in design_scores
                             },
                         }
+                    )
+                    draft_context["scoring_snapshot_version"] += 1
+                    draft_context["scoring_snapshot"] = _round_scoring_snapshot(
+                        hypothesis=hypothesis,
+                        version=draft_context["scoring_snapshot_version"],
+                        eligible=eligible,
+                        design_score_by_id=design_score_by_id,
+                        prediction_by_id=prediction_by_id,
+                        all_scores=all_scores,
+                    )
+                    ensure_dry_validation(
+                        selected_ids,
+                        reason="hypothesis_revision",
+                        _context=draft_context,
                     )
                     self.writer.event(
                         "hypothesis_regenerated",
@@ -2935,6 +3087,7 @@ class CampaignRunner:
                         terminal_policy = "abort_round"
                 if terminal_policy == "abort_round":
                     rounds_aborted += 1
+                    actual_batch_sizes.append(0)
                     self._progress(
                         None,
                         f"round {round_id} aborted",
@@ -2953,6 +3106,7 @@ class CampaignRunner:
 
             approved_batch = review_result.approved_batch
             selected_ids = list(approved_batch.candidate_ids)
+            actual_batch_sizes.append(len(selected_ids))
             final_agent_quota_selection = draft_context.get("agent_quota_selection")
             if final_agent_quota_selection is not None:
                 self.writer.write_json(
@@ -2977,6 +3131,57 @@ class CampaignRunner:
 
             final_snapshot: RoundScoringSnapshot = draft_context["scoring_snapshot"]
             final_snapshot.assert_selection_coverage(selected_ids)
+            pool_prediction_used = self._fitness_predictors_used_for_generation(
+                selection_driver
+            )
+            dry_validation_ids = sorted(
+                {
+                    prediction.variant_id
+                    for prediction_set in validation_prediction_sets
+                    for prediction in prediction_set
+                }
+            )
+            reviewed_draft_ids = sorted(
+                draft_context["reviewed_draft_candidate_ids"]
+            )
+            self.writer.write_json(
+                f"round_{round_id:02d}/prediction_scope_receipt.json",
+                {
+                    "schema_version": "prediction-scope-receipt:v1",
+                    "round_id": round_id,
+                    "selection_driver": selection_driver,
+                    "acquisition_prediction_scope": (
+                        "candidate_pool" if pool_prediction_used else "none"
+                    ),
+                    "acquisition_prediction_count": (
+                        len(working_by_id) if pool_prediction_used else 0
+                    ),
+                    "dry_validation_scope": (
+                        "draft_selected_candidates_only"
+                        if validation_predictors
+                        else "disabled"
+                    ),
+                    "dry_validation_candidate_ids": dry_validation_ids,
+                    "dry_validation_candidate_count": len(dry_validation_ids),
+                    "dry_validation_calls": draft_context[
+                        "dry_validation_calls"
+                    ],
+                    "max_dry_validation_call_size": max(
+                        (
+                            item["candidate_count"]
+                            for item in draft_context["dry_validation_calls"]
+                        ),
+                        default=0,
+                    ),
+                    "reviewed_draft_candidate_ids": reviewed_draft_ids,
+                    "all_dry_validation_targets_were_draft_selected": set(
+                        dry_validation_ids
+                    ).issubset(reviewed_draft_ids),
+                    "approved_candidate_ids": selected_ids,
+                    "approved_batch_size": len(selected_ids),
+                    "oracle_measurement_scope": "approved_batch_only",
+                },
+            )
             prediction_by_id = dict(final_snapshot.prediction_by_id)
             design_score_by_id = dict(final_snapshot.design_score_by_id)
             all_scores = dict(final_snapshot.all_scores)
@@ -3041,10 +3246,9 @@ class CampaignRunner:
                     "round_id": round_id,
                     "records": records,
                     "global_rank_definition": (
-                        "model_rank_all ranks predictor mean over scored candidates "
-                        "(the candidate pool when candidate_limit > 0, otherwise the full "
-                        "unobserved oracle pool); acquisition_rank_all ranks the active policy "
-                        "over that same scored set"
+                        "model_rank_all ranks dry-validator means only over candidates that "
+                        "entered a reviewed draft; acquisition_rank_all ranks the active "
+                        "policy over its acquisition-scored candidate set"
                     ),
                 },
             )
@@ -3399,6 +3603,8 @@ class CampaignRunner:
             expected_rounds=self.config.rounds,
             completed_rounds=completed_rounds,
             aborted_rounds=rounds_aborted,
+            planned_batch_sizes=tuple(planned_batch_sizes),
+            actual_batch_sizes=tuple(actual_batch_sizes),
             required_node_failures=required_node_failures,
             fallback_nodes=fallback_nodes,
         )
@@ -3427,6 +3633,8 @@ class CampaignRunner:
                 else None
             ),
             "rounds_aborted": rounds_aborted,
+            "planned_batch_sizes": planned_batch_sizes,
+            "actual_batch_sizes": actual_batch_sizes,
             "artifact_finalized": completion_manifest.artifact_finalized,
             "run_status": completion_manifest.run_status,
             "experiment_status": completion_manifest.experiment_status,

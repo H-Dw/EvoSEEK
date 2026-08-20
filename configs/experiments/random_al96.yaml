@@ -1,8 +1,10 @@
 mode: random
 seed: 11
 rounds: 3
-budget_per_round: 32
-candidate_limit: 0
+budget_per_round: 16
+# Match the formal KG matrix proposal budget. Random still samples uniformly;
+# Kermut dry validation is restricted to the selected batch.
+candidate_limit: 64
 acquisition: random
 ucb_beta: 1.5
 diversity_lambda: 0.10
