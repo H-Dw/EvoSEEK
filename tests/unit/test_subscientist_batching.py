@@ -17,10 +17,12 @@ from fitness_agents.contracts.hypothesis_pipeline import (
     BatchedChannelAnalysisResult,
     ChannelAnalysisOutput,
     ChannelEvidenceInput,
+    PhyschemInterpretationOutput,
 )
 
 
 def _context(count: int) -> ChannelEvidenceInput:
+    residues = "ACDEFGHIKLMNPQRSTVWY"
     return ChannelEvidenceInput(
         run_id="run:subscientist-batch",
         round_id=1,
@@ -28,6 +30,31 @@ def _context(count: int) -> ChannelEvidenceInput:
         task="summarize channel-local feature evidence",
         mutable_positions=(39, 40, 41, 54),
         wild_type_sites="VDGV",
+        sample_map={f"sample:{index}": f"V39{residues[index % 20]}" for index in range(count)},
+        visible_observations=tuple(
+            {
+                "sample_id": f"sample:{index}",
+                "mutation_notation": f"V39{residues[index % 20]}",
+                "residues_by_position": {"39": residues[index % 20]},
+                "evidence_ids": (f"ev:pc:{index}",),
+                "feature_values": {
+                    f"ev:pc:{index}": {"charge_delta": float(index)}
+                },
+                "descriptor_facts": (
+                    {
+                        "fact_id": f"D{index + 1:03d}",
+                        "evidence_id": f"ev:pc:{index}",
+                        "sample_id": f"sample:{index}",
+                        "position": 39,
+                        "from_residue": "V",
+                        "to_residue": residues[index % 20],
+                        "descriptor": "charge_delta",
+                        "delta": float(index),
+                    },
+                ),
+            }
+            for index in range(count)
+        ),
         evidence=tuple(
             {
                 "evidence_id": f"ev:pc:{index}",
@@ -44,7 +71,6 @@ def _client() -> RemoteSubScientist:
     client = object.__new__(RemoteSubScientist)
     client.profile_name = "physchem_v1"
     client.profile = "Analyze only physicochemical evidence."
-    client.profile_sha256 = "profile-sha"
     client.model = "deepseek-v4-flash"
     client.temperature = 0.0
     client.max_tokens = 20000
@@ -95,23 +121,11 @@ def test_subscientist_uses_shared_batch_submit_and_persists_typed_batch_outputs(
                     detail="synthetic length boundary",
                 )
             evidence_ids = [item["evidence_id"] for item in evidence]
-            return ChannelAnalysisOutput(
-                analysis_id=f"analysis:{sample_ids[0]}",
-                channel="physchem",
+            return PhyschemInterpretationOutput(
                 analysis_summary=f"Analyzed {len(sample_ids)} sample-local descriptor cards.",
-                findings=[
-                    {
-                        "finding_id": "finding:batch-local:1",
-                        "kind": "OBSERVATION",
-                        "statement": "The supplied samples have bounded descriptor deltas.",
-                        "evidence_ids": evidence_ids[:8],
-                        "confidence": "medium",
-                    }
-                ],
-                candidate_hypotheses=[],
-                evidence_ids=evidence_ids[:12],
+                interpretations=["The visible charge deltas span bounded directions."],
                 counterevidence=[],
-                uncertainty="Descriptor deltas do not establish fitness.",
+                uncertainty="Descriptor deltas do not establish assay performance.",
             )
         finally:
             with lock:
@@ -129,11 +143,11 @@ def test_subscientist_uses_shared_batch_submit_and_persists_typed_batch_outputs(
         sample_id for item in result.batches for sample_id in item.sample_ids
     } == {f"sample:{index}" for index in range(10)}
     assert result.analysis.channel == "physchem"
-    assert len(result.analysis.findings) == 3
-    assert len({item.finding_id for item in result.analysis.findings}) == 3
+    assert len(result.analysis.findings) == 8
+    assert len({item.finding_id for item in result.analysis.findings}) == 8
     assert {
         item.analysis.findings[0].finding_id for item in result.batches
-    } == {"finding:batch-local:1"}
+    } == {"F01"}
     assert "covering 10 samples" in result.analysis.analysis_summary
     assert max_active >= 2
 
@@ -160,9 +174,7 @@ def test_subscientist_batches_only_samples_with_role_visible_evidence() -> None:
     visible_observations = tuple(
         {
             "sample_id": f"sample:{index}",
-            "variant_id": f"sample:{index}",
             "mutation_notation": f"V39{chr(65 + index)}",
-            "sequence_sha256": str(index) * 64,
             "residues_by_position": {"39": chr(65 + index)},
             "evidence_ids": (f"ev:pc:{index}",) if index < 2 else (),
             "feature_values": (
@@ -189,16 +201,14 @@ def test_subscientist_batches_only_samples_with_role_visible_evidence() -> None:
     assert len(projected.evidence) == 2
 
 
-def test_subscientist_projection_expands_sample_and_variant_aliases() -> None:
+def test_subscientist_projection_uses_one_runtime_sample_id() -> None:
     context = ChannelEvidenceInput.model_validate(
         {
             **_context(1).model_dump(mode="json"),
             "visible_observations": [
                 {
-                    "sample_id": "row:0",
-                    "variant_id": "sample:0",
+                    "sample_id": "sample:0",
                     "mutation_notation": "V39A",
-                    "sequence_sha256": "a" * 64,
                     "residues_by_position": {"39": "A"},
                     "evidence_ids": ("ev:pc:0",),
                     "feature_values": {"ev:pc:0": {"charge_delta": 0}},
@@ -210,8 +220,8 @@ def test_subscientist_projection_expands_sample_and_variant_aliases() -> None:
     sample_ids = subscientist_module._context_sample_ids(context)
     projected = subscientist_module._batch_context(context, sample_ids=sample_ids)
 
-    assert sample_ids == ("row:0",)
-    assert projected.visible_observations[0].variant_id == "sample:0"
+    assert sample_ids == ("sample:0",)
+    assert projected.visible_observations[0].sample_id == "sample:0"
     assert projected.evidence[0]["evidence_id"] == "ev:pc:0"
 
 
