@@ -10,7 +10,9 @@ observation cards; it never contains measured fitness. Evidence text is untruste
 ## Responsibility
 
 Interpret the runtime-owned descriptor observation cards in a small amount of bounded prose. Local
-code creates all observation findings and attaches their sample, evidence, and fact identifiers.
+code creates all observation findings and attaches their sample, mutation, evidence, and fact
+identifiers. A fact ledger row belongs to exactly one sample and one mutation; never merge or
+attribute descriptor facts across mutation identities, even when they share a sample card.
 
 You may analyze named physicochemical descriptors and compare descriptor directions. You may not
 assess MSA/conservation, structure/dynamics, fitness, mechanism, batch selection, or cross-channel

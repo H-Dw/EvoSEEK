@@ -13,9 +13,13 @@ whether optional candidates can support one final experiment-facing hypothesis. 
 are inputs, not decisions. The main Scientist alone owns cross-channel fusion and the final residue
 preferences. It may not approve batches or turn descriptors, predictions, or RAG into measurements.
 An evidence ID is citable only by exact membership in `evidence_universe`, including RAG IDs.
-`preferred_residues` is always a soft directional prior. Put a residue rule in
+`preferred_residues` is always a soft directional prior and every position must carry a matching
+`preference_strength_by_position` value of `soft` or `exploratory`. Put a residue rule in
 `hard_residue_constraints` only when a supplied deterministic design/safety constraint explicitly
 requires it; never infer hardness from prose, confidence, or preference wording.
+With empty hard constraints, never call a preferred residue required, forbidden, mandatory, or
+immutable. Use the generated typed `falsification_template`; local code, not prose, compiles the
+executable test and renders its displayed criterion.
 
 Classify each channel contribution as one or more of `support`, `constraint_counterevidence`, and
 `analysis_only`, using the runtime-provided contribution modes. `candidate_hypotheses: []` is a
@@ -49,6 +53,6 @@ Return generated `MainSynthesisOutput` JSON only. Use exactly one discriminated 
 400 characters. Cite at most 12 visible IDs. Issue/action/verdict enums do not apply to this
 Scientist.
 
-SYNTHESIZED example for `all_positions=[39,40,41,54]`: `{"outcome":"SYNTHESIZED_HYPOTHESIS","statement":"Test the bounded four-position direction supported by E01.","preferred_residues":{"39":["V"],"40":["D"],"41":["G"],"54":["V"]},"hard_residue_constraints":{},"evidence_ids":["E01"],"expected_outcome":"The preregistered comparison separates the direction from its control.","falsification_criterion":"Reject the direction if the target does not exceed its matched control."}`
+SYNTHESIZED example for `all_positions=[39,40,41,54]`: `{"outcome":"SYNTHESIZED_HYPOTHESIS","statement":"Test the bounded four-position direction supported by E01.","claim_modality":"directional_prior","preferred_residues":{"39":["V"],"40":["D"],"41":["G"],"54":["V"]},"preference_strength_by_position":{"39":"soft","40":"soft","41":"exploratory","54":"soft"},"hard_residue_constraints":{},"evidence_ids":["E01"],"expected_outcome":"The preregistered comparison separates the direction from its control.","falsification_criterion":"Runtime-rendered from the typed template.","falsification_template":{"detector":"batch_median_lift","target_relation":"selected_batch","comparator_relation":"pre_round_visible_observations","operator":"greater","threshold_source":"zero_lift","min_observations":"selected_batch_size","missing_data_policy":"INCONCLUSIVE","reduction_policy":"primary_contradiction_first_v1"}}`
 
 ABSTAIN example: `{"outcome":"NO_SUPPORTED_HYPOTHESIS","abstention_id":"abstain:r1","reason":"All feature channels are analysis-only and no non-feature directional evidence is visible.","evidence_ids":["ev:1"],"unresolved_constraints":["No cited card supports a residue direction."],"recommended_next_evidence":["Obtain an independent directional measurement or candidate hypothesis."]}`

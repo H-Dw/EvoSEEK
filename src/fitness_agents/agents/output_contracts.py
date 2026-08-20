@@ -126,6 +126,27 @@ class HypothesisExplanationOutput(BaseModel):
     limitations: Annotated[list[HypothesisText], Field(min_length=1, max_length=8)]
 
 
+class FalsificationTemplateOutput(BaseModel):
+    """The currently supported deterministic hypothesis-test compiler input."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    detector: Literal["batch_median_lift"]
+    target_relation: Literal["selected_batch"]
+    comparator_relation: Literal["pre_round_visible_observations"]
+    operator: Literal["greater"]
+    threshold_source: Literal["zero_lift"]
+    min_observations: Literal["selected_batch_size"]
+    missing_data_policy: Literal["INCONCLUSIVE"]
+    reduction_policy: Literal["primary_contradiction_first_v1"]
+
+    def render_description(self) -> str:
+        return (
+            "The selected batch median must exceed the preregistered pre-round "
+            "visible-observation median; missing required observations yield INCONCLUSIVE."
+        )
+
+
 class HypothesisBodyOutput(BaseModel):
     """Compact model-facing hypothesis body.
 
@@ -143,20 +164,47 @@ class HypothesisBodyOutput(BaseModel):
 
         if not isinstance(value, dict):
             return value
-        return {
+        output = {
             key: item
             for key, item in value.items()
             if key not in {"hypothesis_id", "parent_hypothesis_id", "explanation"}
         }
+        preferred = output.get("preferred_residues", {})
+        output.setdefault("claim_modality", "directional_prior")
+        output.setdefault(
+            "preference_strength_by_position",
+            {str(position): "soft" for position in preferred},
+        )
+        output.setdefault(
+            "falsification_template",
+            {
+                "detector": "batch_median_lift",
+                "target_relation": "selected_batch",
+                "comparator_relation": "pre_round_visible_observations",
+                "operator": "greater",
+                "threshold_source": "zero_lift",
+                "min_observations": "selected_batch_size",
+                "missing_data_policy": "INCONCLUSIVE",
+                "reduction_policy": "primary_contradiction_first_v1",
+            },
+        )
+        return output
 
     statement: HypothesisText
+    claim_modality: Literal[
+        "directional_prior", "association", "mechanistic_hypothesis"
+    ]
     preferred_residues: dict[str, list[NonEmptyText]]
+    preference_strength_by_position: dict[
+        str, Literal["soft", "exploratory"]
+    ]
     evidence_ids: Annotated[list[NonEmptyText], Field(max_length=EVIDENCE_ID_MAX)]
     expected_outcome: HypothesisText
     falsification_criterion: HypothesisText
     hard_residue_constraints: dict[str, list[NonEmptyText]] = Field(
         default_factory=dict
     )
+    falsification_template: FalsificationTemplateOutput
 
     def to_hypothesis(
         self,
@@ -217,6 +265,20 @@ class HypothesisBodyOutput(BaseModel):
             raise ValueError(
                 f"preferred_residues exceeds max_positions={max_positions}"
             )
+        if set(self.preference_strength_by_position) != set(preferred):
+            raise ValueError(
+                "preference_strength_by_position must exactly cover preferred_residues"
+            )
+        if not hard_constraints:
+            hard_language = (
+                "must ", "required", "forbidden", "only residue", "必须", "禁止", "不可变"
+            )
+            prose = f"{self.statement} {self.expected_outcome}".casefold()
+            if any(marker in prose for marker in hard_language):
+                raise ValueError(
+                    "soft hypothesis prose cannot declare required or forbidden residues"
+                )
+        rendered_falsification = self.falsification_template.render_description()
         return Hypothesis(
             hypothesis_id=hypothesis_id,
             statement=self.statement,
@@ -225,12 +287,18 @@ class HypothesisBodyOutput(BaseModel):
             },
             evidence_ids=evidence_ids,
             expected_outcome=self.expected_outcome,
-            falsification_criterion=self.falsification_criterion,
+            falsification_criterion=rendered_falsification,
             parent_hypothesis_id=parent_hypothesis_id,
             hard_residue_constraints={
                 int(site): tuple(residues)
                 for site, residues in hard_constraints.items()
             },
+            claim_modality=self.claim_modality,
+            preference_strength_by_position={
+                int(site): strength
+                for site, strength in self.preference_strength_by_position.items()
+            },
+            falsification_template=self.falsification_template.model_dump(mode="json"),
         )
 
 
@@ -338,11 +406,28 @@ class ReThinkItemOutput(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     variant_id: NonEmptyText
-    verdict: Literal["support", "conflict", "mixed", "inconclusive"]
+    candidate_relation: Literal["support", "conflict", "mixed", "inconclusive"]
     summary: ReThinkText
     positive_findings: list[NonEmptyText]
     negative_findings: list[NonEmptyText]
     revised_reason: ReThinkText
+    next_round_advice: ReThinkText
+    next_round_action: Literal[
+        "retain_uncertainty_aware_exploration",
+        "downweight_rationale",
+        "test_matched_alternative",
+        "collect_missing_measurement",
+        "preserve_control",
+        "no_change",
+    ]
+
+
+class ReThinkBatchAssessmentOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    assessment_id: NonEmptyText | None
+    status: Literal["SUPPORTED", "CONTRADICTED", "INCONCLUSIVE", "NOT_APPLICABLE"]
+    commentary: ReThinkText
     next_round_advice: ReThinkText
 
 
@@ -350,6 +435,7 @@ class ReThinkOutput(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     reflections: list[ReThinkItemOutput]
+    batch_assessment: ReThinkBatchAssessmentOutput
 
     @model_validator(mode="after")
     def validate_unique_variants(self) -> ReThinkOutput:
@@ -369,13 +455,17 @@ class ReThinkOutput(BaseModel):
                     reflection_id=f"{id_prefix}{round_id:02d}-{index:02d}",
                     variant_id=item.variant_id,
                     round_id=round_id,
-                    verdict=item.verdict,
+                    verdict=item.candidate_relation,
                     summary=item.summary,
                     positive_findings=tuple(item.positive_findings),
                     negative_findings=tuple(item.negative_findings),
                     revised_reason=item.revised_reason,
                     next_round_advice=item.next_round_advice,
+                    next_round_action=item.next_round_action,
                     provider=provider,
+                    assessment_id=self.batch_assessment.assessment_id,
+                    assessment_status=self.batch_assessment.status,
+                    assessment_commentary=self.batch_assessment.commentary,
                 )
             )
         return tuple(output)
@@ -423,7 +513,11 @@ def validate_hypothesis_payload(
 
 
 def validate_rethink_payload(
-    payload: dict[str, Any], *, expected_variant_ids: frozenset[str] | None = None
+    payload: dict[str, Any],
+    *,
+    expected_variant_ids: frozenset[str] | None = None,
+    expected_assessment_id: str | None | object = _UNSET,
+    expected_assessment_status: str | None = None,
 ) -> dict[str, Any]:
     model = ReThinkOutput.model_validate(payload)
     if expected_variant_ids is not None:
@@ -434,4 +528,12 @@ def validate_rethink_payload(
             raise ValueError(
                 f"ReThink variant coverage mismatch; missing={missing}, unexpected={unexpected}"
             )
+    if expected_assessment_id is not _UNSET:
+        if model.batch_assessment.assessment_id != expected_assessment_id:
+            raise ValueError("ReThink batch assessment ID does not match runtime assessment")
+        if (
+            expected_assessment_status is not None
+            and model.batch_assessment.status != expected_assessment_status
+        ):
+            raise ValueError("ReThink batch assessment status contradicts runtime assessment")
     return model.model_dump(mode="json")

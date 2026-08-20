@@ -512,6 +512,10 @@ class ChildReviewAttemptArtifact(BaseModel):
     error_code: str | None = None
     input_chars: int | None = Field(default=None, ge=0)
     request_started: bool = False
+    failure_stage: str | None = None
+    failed_batch_id: str | None = None
+    failed_sample_ids: tuple[str, ...] = ()
+    validation_paths: tuple[str, ...] = ()
 
 
 class CrossChannelConflict(BaseModel):
@@ -583,6 +587,11 @@ class BranchReceipt(BaseModel):
     input_chars: int | None = Field(default=None, ge=0)
     failure_category: str | None = None
     request_started: bool = False
+    failure_stage: str | None = None
+    batch_id: str | None = None
+    sample_ids: tuple[str, ...] = ()
+    validation_paths: tuple[str, ...] = ()
+    completed_artifacts: tuple[ChannelAnalysisBatchArtifact, ...] = ()
     review_attempts: tuple[ChildReviewAttemptArtifact, ...] = ()
     approved: ApprovedChannelAnalysis | None = None
 

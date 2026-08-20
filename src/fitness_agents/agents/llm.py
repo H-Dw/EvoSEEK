@@ -1183,10 +1183,24 @@ class MockScientistLLMClient:
             evidence_ids=evidence_ids,
             expected_outcome="The proposed batch should enrich high-fitness variants relative to random selection.",
             falsification_criterion=(
-                "Reject or revise if the revealed batch median fails to exceed the pre-round observed "
-                "median, or if preferred-residue variants underperform matched alternatives."
+                "The selected batch median must exceed the preregistered pre-round "
+                "visible-observation median; missing required observations yield INCONCLUSIVE."
             ),
             parent_hypothesis_id=parent,
+            claim_modality="directional_prior",
+            preference_strength_by_position={
+                position: "soft" for position in preferred
+            },
+            falsification_template={
+                "detector": "batch_median_lift",
+                "target_relation": "selected_batch",
+                "comparator_relation": "pre_round_visible_observations",
+                "operator": "greater",
+                "threshold_source": "zero_lift",
+                "min_observations": "selected_batch_size",
+                "missing_data_policy": "INCONCLUSIVE",
+                "reduction_policy": "primary_contradiction_first_v1",
+            },
         )
 
 
@@ -1235,6 +1249,7 @@ class NativeScientistClient:
         self.profile_name = profile
         role_profile = load_role_profile("scientist", profile)
         self.profile = role_profile.instructions
+        self.profile_version = role_profile.metadata.get("version")
         self.client = create_openai_client(
             api_key=api_key,
             base_url=base_url,
@@ -1346,6 +1361,7 @@ class NativeScientistClient:
             trace_context={
                 **(trace_context or {}),
                 "profile": getattr(self, "profile_name", "scientific_v1"),
+                "profile_version": getattr(self, "profile_version", None),
                 "schema_name": output_type.__name__,
             },
         )

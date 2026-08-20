@@ -112,9 +112,14 @@ When `context.critic_revision` is present:
 
 ## 6. Output contract
 
-Return one compact JSON object containing exactly: `statement`, `preferred_residues`,
-`hard_residue_constraints`, `evidence_ids`, `expected_outcome`, and
-`falsification_criterion`. Local runtime code owns hypothesis IDs and parent links. The Critic owns
+Return one compact JSON object containing exactly: `statement`, `claim_modality`,
+`preferred_residues`, `preference_strength_by_position`, `hard_residue_constraints`,
+`evidence_ids`, `expected_outcome`, `falsification_criterion`, and `falsification_template`.
+Use `directional_prior`, `association`, or `mechanistic_hypothesis` as `claim_modality`. Mark every
+preferred position as `soft` or `exploratory`. The currently supported falsification template is
+the runtime-defined `batch_median_lift` template in the generated schema; copy its enum values
+exactly. The runtime renders the executable criterion text and compilation receipt from this
+template. Local runtime code owns hypothesis IDs and parent links. The Critic owns
 the corresponding explanation; do not output IDs, parent IDs, or an explanation.
 
 - Keep `statement`, `expected_outcome`, and `falsification_criterion` at or under 400 characters.
@@ -128,6 +133,8 @@ the corresponding explanation; do not output IDs, parent IDs, or an explanation.
 - Treat `preferred_residues` as soft priors. Return `hard_residue_constraints: {}` unless the
   supplied deterministic design/safety contract explicitly requires a residue set; never infer
   hardness from prose or confidence.
+- With empty hard constraints, describe residues as prioritized for testing or exploratory; never
+  say a residue is required, forbidden, mandatory, or immutable.
 - When `approved_channel_analyses` is present, treat each item as an approved channel analysis card:
   preserve its observation/interpretation/limitation distinctions, consider optional
   `candidate_hypotheses` without copying them blindly. The main Scientist alone proposes the final

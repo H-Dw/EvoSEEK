@@ -54,6 +54,11 @@ def _failure_fields(
         "request_started": bool(
             getattr(error, "request_started", completion.get("request_started", False))
         ),
+        "failure_stage": getattr(error, "failure_stage", None),
+        "batch_id": getattr(error, "batch_id", None),
+        "sample_ids": tuple(getattr(error, "sample_ids", ())),
+        "validation_paths": tuple(getattr(error, "validation_paths", ())),
+        "completed_artifacts": tuple(getattr(error, "completed_artifacts", ())),
     }
 
 
@@ -214,10 +219,16 @@ class HypothesisReviewGraph:
                         evidence_universe=branch_evidence_universe,
                         output_receipt_id=output_receipt_id,
                         analysis=hypothesis,
-                        analysis_batches=analysis_batches,
+                        analysis_batches=(
+                            analysis_batches or failure["completed_artifacts"]
+                        ),
                         error_code=failure["error_code"],
                         input_chars=failure["input_chars"],
                         request_started=failure["request_started"],
+                        failure_stage=failure["failure_stage"],
+                        failed_batch_id=failure["batch_id"],
+                        failed_sample_ids=failure["sample_ids"],
+                        validation_paths=failure["validation_paths"],
                     )
                 )
                 return BranchReceipt(

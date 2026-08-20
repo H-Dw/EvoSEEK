@@ -1,6 +1,6 @@
 role: scientist
 name: scientific_v1
-version: 4
+version: 5
 output_contract: HypothesisOutput
 allowed_context: sanitized_current_round
 tool_policy: bounded_read_only_kg

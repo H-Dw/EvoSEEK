@@ -59,12 +59,14 @@ def _record_completion_receipt(
     input_chars: int,
     request_started: bool,
     failure_category: str | None,
+    **metadata: Any,
 ) -> None:
     _completion_receipt.set(
         {
             "input_chars": input_chars,
             "failure_category": failure_category,
             "request_started": request_started,
+            **metadata,
         }
     )
 
@@ -583,6 +585,7 @@ def complete_json(
     request_attempt = 0
     request_started_any = False
     input_chars = 0
+    response_model: str | None = None
     max_external_attempts = 1 + transport_retry_limit + sum(budgets.as_dict().values())
     while request_attempt < max_external_attempts:
         input_chars = sum(len(str(item.get("content", ""))) for item in current_messages)
@@ -678,6 +681,7 @@ def complete_json(
                     else client.chat.completions.create(**kwargs)
                 )
             choice = response.choices[0]
+            response_model = str(getattr(response, "model", "") or "") or None
             finish_reason = getattr(choice, "finish_reason", None)
             usage = _usage_payload(response)
             content = _message_content(choice.message)
@@ -727,6 +731,19 @@ def complete_json(
                 input_chars=input_chars,
                 request_started=True,
                 failure_category=None,
+                requested_model=model,
+                response_model=response_model,
+                finish_reason=finish_reason,
+                thinking=policy.thinking,
+                reasoning_effort=policy.effort,
+                max_tokens=policy.budget,
+                retry_counts={
+                    "transport": transport_retries_used,
+                    **output_retries_used,
+                },
+                usage=usage,
+                profile=trace_fields.get("profile"),
+                profile_version=trace_fields.get("profile_version"),
             )
             return payload
         except Exception as error:  # noqa: BLE001 - retry JSON/thinking failures
@@ -856,5 +873,18 @@ def complete_json(
         input_chars=terminal.input_chars,
         request_started=terminal.request_started,
         failure_category=terminal.failure_category,
+        requested_model=model,
+        response_model=response_model,
+        finish_reason=(
+            getattr(last_failure, "finish_reason", None)
+            if last_failure is not None
+            else None
+        ),
+        thinking=policy.thinking,
+        reasoning_effort=policy.effort,
+        max_tokens=policy.budget,
+        retry_counts={"transport": transport_retries_used, **output_retries_used},
+        profile=trace_fields.get("profile"),
+        profile_version=trace_fields.get("profile_version"),
     )
     raise terminal from last_error

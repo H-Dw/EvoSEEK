@@ -548,7 +548,7 @@ class OpenDesignRunner:
                 revision_feedback=revision_feedback,
             )
             falsification_spec = preregister_batch_median_test(
-                hypothesis_id=hypothesis.hypothesis_id,
+                hypothesis=hypothesis,
                 round_id=1,
                 target_variant_ids=candidate_ids,
                 visible_observations=self.observations,

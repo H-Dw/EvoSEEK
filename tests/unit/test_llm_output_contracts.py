@@ -775,20 +775,37 @@ def test_mock_scientist_uses_critic_revision_parent_and_new_id() -> None:
 def _reflection(variant_id: str) -> dict:
     return {
         "variant_id": variant_id,
-        "verdict": "support",
+        "candidate_relation": "support",
         "summary": "Wet evidence supports the round-specific reason.",
         "positive_findings": ["Wet validation exceeded the baseline."],
         "negative_findings": [],
         "revised_reason": "Keep the reason bounded to this round.",
         "next_round_advice": "Test matched alternatives.",
+        "next_round_action": "test_matched_alternative",
     }
 
 
 def test_rethink_coverage_mismatch_retries_inside_structured_boundary() -> None:
     remote = _SequenceClient(
         [
-            {"reflections": [_reflection("S01")]},
-            {"reflections": [_reflection("S01"), _reflection("S02")]},
+            {
+                "reflections": [_reflection("S01")],
+                "batch_assessment": {
+                    "assessment_id": None,
+                    "status": "NOT_APPLICABLE",
+                    "commentary": "No assessment applies.",
+                    "next_round_advice": "Keep levels separate.",
+                },
+            },
+            {
+                "reflections": [_reflection("S01"), _reflection("S02")],
+                "batch_assessment": {
+                    "assessment_id": None,
+                    "status": "NOT_APPLICABLE",
+                    "commentary": "No assessment applies.",
+                    "next_round_advice": "Keep levels separate.",
+                },
+            },
         ]
     )
     client = NativeReThinkClient.__new__(NativeReThinkClient)
@@ -806,7 +823,36 @@ def test_rethink_coverage_mismatch_retries_inside_structured_boundary() -> None:
             "run_id": "run",
             "round_id": 1,
             "visible_baseline": 0.0,
-            "candidates": [{"variant_id": "v1"}, {"variant_id": "v2"}],
+            "baseline_receipt": {
+                "value": 0.0,
+                "statistic": "pre_round_visible_median",
+                "source": "revealed_observations_before_current_round",
+            },
+            "measurement_contract": {
+                "assay_id": "assay:test",
+                "fitness_scale": "raw_assay",
+                "optimization_direction": "higher_is_better",
+            },
+            "final_critic_decision": {
+                "decision_id": "D01-00",
+                "verdict": "APPROVE",
+                "summary": "approved",
+                "cited_evidence_ids": [],
+            },
+            "candidates": [
+                {
+                    "variant_id": item,
+                    "mutation_notation": "V39A",
+                    "agent_reason": "bounded",
+                    "evidence_ids": [],
+                    "wet_value": 0.1,
+                    "dry_validations": [],
+                    "intent_arm": "coverage_exploration",
+                    "allow_hypothesis_mismatch": False,
+                    "falsification_role": "not_in_primary_criterion",
+                }
+                for item in ("v1", "v2")
+            ],
         }
     )
 

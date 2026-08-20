@@ -7,6 +7,10 @@ import time
 import pytest
 
 from fitness_agents.agents import subscientist as subscientist_module
+from fitness_agents.agents.adaptive_batch import (
+    AdaptiveBatchExecutionError,
+    adaptive_batch_submit,
+)
 from fitness_agents.agents.output_guards import SemanticOutputValidationError
 from fitness_agents.agents.remote_llm import RemoteLLMCompletionError
 from fitness_agents.agents.subscientist import (
@@ -292,3 +296,72 @@ def test_non_limitation_finding_requires_a_visible_evidence_link() -> None:
         "findings.0.kind",
         "findings.0.evidence_ids",
     )
+
+
+def test_physchem_materialization_keeps_multi_mutation_facts_separate() -> None:
+    raw = _context(1).model_dump(mode="python")
+    raw["visible_observations"][0]["mutation_notation"] = "V39A;D40Y"
+    raw["visible_observations"][0]["descriptor_facts"] = (
+        {
+            "fact_id": "D001",
+            "evidence_id": "ev:pc:0",
+            "sample_id": "sample:0",
+            "position": 39,
+            "from_residue": "V",
+            "to_residue": "A",
+            "descriptor": "charge_delta",
+            "delta": 1.0,
+        },
+        {
+            "fact_id": "D002",
+            "evidence_id": "ev:pc:0",
+            "sample_id": "sample:0",
+            "position": 40,
+            "from_residue": "D",
+            "to_residue": "Y",
+            "descriptor": "mass_delta",
+            "delta": 2.0,
+        },
+    )
+    context = ChannelEvidenceInput.model_validate(raw)
+    output = subscientist_module._materialize_physchem_analysis(
+        context=context,
+        explanation=PhyschemInterpretationOutput(
+            analysis_summary="Two mutation-scoped descriptor cards are visible.",
+            interpretations=[],
+            counterevidence=[],
+            uncertainty="Descriptor changes do not establish assay performance.",
+        ),
+        batch_id="b000",
+    )
+
+    observations = [item for item in output.findings if item.kind == "OBSERVATION"]
+    assert len(observations) == 2
+    assert observations[0].fact_ids == ["D001"]
+    assert "V39A" in observations[0].statement
+    assert observations[1].fact_ids == ["D002"]
+    assert "D40Y" in observations[1].statement
+
+
+def test_adaptive_batch_failure_preserves_completed_sibling_results() -> None:
+    def submit(work):
+        if work.item_ids == ("failed",):
+            time.sleep(0.01)
+            raise ValueError("synthetic local failure")
+        time.sleep(0.02)
+        return work.item_ids[0]
+
+    with pytest.raises(AdaptiveBatchExecutionError) as captured:
+        adaptive_batch_submit(
+            ("failed", "succeeded"),
+            item_id=str,
+            submit_batch=submit,
+            initial_batch_size=1,
+            max_parallel_batches=2,
+            should_split_failure=lambda _error: False,
+            role="test",
+            event_reporter=lambda *_args, **_kwargs: None,
+            preserve_completed_on_failure=True,
+        )
+
+    assert [item.output for item in captured.value.completed] == ["succeeded"]

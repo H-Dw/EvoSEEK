@@ -35,6 +35,32 @@ class AdaptiveBatchResult(Generic[OutputT]):
     output: OutputT
 
 
+class AdaptiveBatchExecutionError(RuntimeError):
+    """Terminal batch failure carrying every sibling result completed so far."""
+
+    def __init__(
+        self,
+        cause: Exception,
+        *,
+        completed: Sequence[AdaptiveBatchResult[Any]],
+    ) -> None:
+        super().__init__(str(cause))
+        self.cause = cause
+        self.completed = tuple(completed)
+        for name in (
+            "error_code",
+            "failure_category",
+            "failure_stage",
+            "batch_id",
+            "sample_ids",
+            "validation_paths",
+            "input_chars",
+            "request_started",
+        ):
+            if hasattr(cause, name):
+                setattr(self, name, getattr(cause, name))
+
+
 def _split_work(
     work: AdaptiveBatchWork[ItemT],
 ) -> tuple[AdaptiveBatchWork[ItemT], AdaptiveBatchWork[ItemT]]:
@@ -71,6 +97,7 @@ def adaptive_batch_submit(
     role: str,
     round_id: int | None = None,
     event_reporter: Callable[..., Any] = report_event,
+    preserve_completed_on_failure: bool = False,
 ) -> tuple[AdaptiveBatchResult[OutputT], ...]:
     """Submit bounded batches in parallel and halve only terminal size failures.
 
@@ -106,6 +133,7 @@ def adaptive_batch_submit(
     completed: list[AdaptiveBatchResult[OutputT]] = []
     while frontier:
         next_frontier: list[AdaptiveBatchWork[ItemT]] = []
+        terminal_failures: list[Exception] = []
         worker_count = min(max_parallel_batches, len(frontier))
         with ThreadPoolExecutor(
             max_workers=worker_count,
@@ -150,6 +178,9 @@ def adaptive_batch_submit(
                             ),
                             retry_disposition="propagate",
                         )
+                        if preserve_completed_on_failure:
+                            terminal_failures.append(error)
+                            continue
                         raise
                     children = _split_work(work)
                     event_reporter(
@@ -188,6 +219,10 @@ def adaptive_batch_submit(
                     split_depth=work.split_depth,
                     retry_disposition="completed",
                 )
+        if terminal_failures:
+            raise AdaptiveBatchExecutionError(
+                terminal_failures[0], completed=completed
+            ) from terminal_failures[0]
         frontier = next_frontier
     covered_ids = tuple(value for item in completed for value in item.item_ids)
     missing = sorted(set(item_ids).difference(covered_ids))

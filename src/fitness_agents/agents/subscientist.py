@@ -17,7 +17,11 @@ from fitness_agents.contracts.hypothesis_pipeline import (
 )
 from fitness_agents.utils.progress import report_event
 
-from .adaptive_batch import AdaptiveBatchWork, adaptive_batch_submit
+from .adaptive_batch import (
+    AdaptiveBatchExecutionError,
+    AdaptiveBatchWork,
+    adaptive_batch_submit,
+)
 from .output_guards import SemanticOutputValidationError, UnknownEvidenceIdsError
 from .profile_loader import load_role_profile
 from .remote_llm import (
@@ -385,6 +389,29 @@ class _BatchCompletion:
     artifact: ChannelAnalysisBatchArtifact
 
 
+class SubScientistPostprocessError(RuntimeError):
+    """Preserve remote-call receipts when local materialization/validation fails."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        cause: Exception,
+        batch_id: str,
+        sample_ids: tuple[str, ...],
+        receipt: dict[str, Any],
+    ) -> None:
+        super().__init__(message)
+        self.error_code = "LOCAL_POSTPROCESS_INVALID"
+        self.failure_category = "local_validation"
+        self.failure_stage = "post_model_materialization"
+        self.batch_id = batch_id
+        self.sample_ids = sample_ids
+        self.validation_paths = tuple(getattr(cause, "paths", ()))
+        self.input_chars = receipt.get("input_chars")
+        self.request_started = bool(receipt.get("request_started", False))
+
+
 def validate_channel_hypothesis(
     payload: dict[str, Any], *, context: ChannelEvidenceInput
 ) -> dict[str, Any]:
@@ -544,14 +571,20 @@ def _materialize_physchem_analysis(
 ) -> ChannelAnalysisOutput:
     """Attach runtime-owned descriptor cards and citation unions to bounded prose."""
 
-    facts_by_sample: dict[str, list[Any]] = {}
+    facts_by_mutation: dict[tuple[str, int, str, str], list[Any]] = {}
     for sample in context.visible_observations:
         for fact in sample.descriptor_facts:
-            facts_by_sample.setdefault(sample.sample_id, []).append(fact)
-    selected_groups: list[tuple[str, list[Any]]] = []
+            key = (
+                sample.sample_id,
+                fact.position,
+                fact.from_residue,
+                fact.to_residue,
+            )
+            facts_by_mutation.setdefault(key, []).append(fact)
+    selected_groups: list[tuple[tuple[str, int, str, str], list[Any]]] = []
     fact_count = 0
     evidence_ids: list[str] = []
-    for sample_id, facts in facts_by_sample.items():
+    for mutation_key, facts in facts_by_mutation.items():
         allowed: list[Any] = []
         for fact in facts:
             if fact_count >= 24 or len(allowed) >= 8:
@@ -563,13 +596,14 @@ def _materialize_physchem_analysis(
             if fact.evidence_id not in evidence_ids:
                 evidence_ids.append(fact.evidence_id)
         if allowed:
-            selected_groups.append((sample_id, allowed))
+            selected_groups.append((mutation_key, allowed))
         if len(selected_groups) >= 6 or fact_count >= 24:
             break
 
     findings: list[dict[str, Any]] = []
-    for sample_id, facts in selected_groups:
-        mutation = f"{facts[0].from_residue}{facts[0].position}{facts[0].to_residue}"
+    for mutation_key, facts in selected_groups:
+        sample_id, position, from_residue, to_residue = mutation_key
+        mutation = f"{from_residue}{position}{to_residue}"
         descriptor_text = ", ".join(
             f"{item.descriptor} delta {item.delta:g}" for item in facts
         )
@@ -903,26 +937,35 @@ class RemoteSubScientist:
                 "subscientist_split_depth": split_depth,
             },
         )
-        output = (
-            _materialize_physchem_analysis(
-                context=context,
-                explanation=PhyschemInterpretationOutput.model_validate(model_output),
-                batch_id=batch_id,
-            )
-            if physchem
-            else ChannelAnalysisOutput.model_validate(
-                rewrite_exact_ids(
-                    ChannelAnalysisOutput.model_validate(model_output).model_dump(
-                        mode="json"
-                    ),
-                    evidence_ids,
-                    decode=True,
+        receipt = completion_receipt_snapshot()
+        try:
+            output = (
+                _materialize_physchem_analysis(
+                    context=context,
+                    explanation=PhyschemInterpretationOutput.model_validate(model_output),
+                    batch_id=batch_id,
+                )
+                if physchem
+                else ChannelAnalysisOutput.model_validate(
+                    rewrite_exact_ids(
+                        ChannelAnalysisOutput.model_validate(model_output).model_dump(
+                            mode="json"
+                        ),
+                        evidence_ids,
+                        decode=True,
+                    )
                 )
             )
-        )
-        if not physchem:
-            validate_channel_hypothesis(output.model_dump(mode="json"), context=context)
-        receipt = completion_receipt_snapshot()
+            if not physchem:
+                validate_channel_hypothesis(output.model_dump(mode="json"), context=context)
+        except Exception as error:
+            raise SubScientistPostprocessError(
+                f"local post-model materialization failed: {error}",
+                cause=error,
+                batch_id=batch_id,
+                sample_ids=sample_ids,
+                receipt=receipt,
+            ) from error
         artifact = ChannelAnalysisBatchArtifact(
             batch_id=batch_id,
             split_depth=split_depth,
@@ -966,20 +1009,29 @@ class RemoteSubScientist:
                 split_depth=0,
                 sample_ids=(f"context:{context.channel}",),
             ).analysis
-        results = adaptive_batch_submit(
-            sample_ids,
-            item_id=str,
-            submit_batch=lambda work: self._submit_batch_work(
-                context=context,
-                work=work,
-            ),
-            initial_batch_size=self.sample_batch_size,
-            max_parallel_batches=self.max_parallel_batches,
-            should_split_failure=self._is_batch_size_failure,
-            role=f"subscientist:{context.channel}",
-            round_id=context.round_id,
-            event_reporter=report_event,
-        )
+        try:
+            results = adaptive_batch_submit(
+                sample_ids,
+                item_id=str,
+                submit_batch=lambda work: self._submit_batch_work(
+                    context=context,
+                    work=work,
+                ),
+                initial_batch_size=self.sample_batch_size,
+                max_parallel_batches=self.max_parallel_batches,
+                should_split_failure=self._is_batch_size_failure,
+                role=f"subscientist:{context.channel}",
+                round_id=context.round_id,
+                event_reporter=report_event,
+                preserve_completed_on_failure=True,
+            )
+        except AdaptiveBatchExecutionError as error:
+            error.completed_artifacts = tuple(
+                item.output.artifact
+                for item in error.completed
+                if isinstance(item.output, _BatchCompletion)
+            )
+            raise
         artifacts = tuple(item.output.artifact for item in results)
         aggregate = _aggregate_batch_analyses(context=context, batches=artifacts)
         return BatchedChannelAnalysisResult(analysis=aggregate, batches=artifacts)

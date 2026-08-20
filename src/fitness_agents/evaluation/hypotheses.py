@@ -7,6 +7,7 @@ from fitness_agents.contracts.schemas import (
     FalsificationCriterion,
     FalsificationSpec,
     FitnessObservation,
+    Hypothesis,
     HypothesisAssessment,
     HypothesisStatus,
 )
@@ -16,11 +17,27 @@ from .signals import SignalDetectorRegistry
 
 def preregister_batch_median_test(
     *,
-    hypothesis_id: str,
+    hypothesis: Hypothesis,
     round_id: int,
     target_variant_ids: Sequence[str],
     visible_observations: Sequence[FitnessObservation],
 ) -> FalsificationSpec:
+    hypothesis_id = hypothesis.hypothesis_id
+    template = dict(hypothesis.falsification_template)
+    expected_template = {
+        "detector": "batch_median_lift",
+        "target_relation": "selected_batch",
+        "comparator_relation": "pre_round_visible_observations",
+        "operator": "greater",
+        "threshold_source": "zero_lift",
+        "min_observations": "selected_batch_size",
+        "missing_data_policy": "INCONCLUSIVE",
+        "reduction_policy": "primary_contradiction_first_v1",
+    }
+    if template != expected_template:
+        raise ValueError("UNCOMPILABLE_FALSIFICATION_SPEC")
+    if not target_variant_ids:
+        raise ValueError("UNCOMPILABLE_FALSIFICATION_SPEC: target set is empty")
     comparator_ids = tuple(item.variant_id for item in visible_observations)
     criterion = FalsificationCriterion(
         criterion_id=f"criterion:{hypothesis_id}:batch_median",
@@ -43,15 +60,47 @@ def preregister_batch_median_test(
         registered_at_round=round_id,
         criteria=(criterion,),
         reduction_policy="primary_contradiction_first_v1",
-        human_readable_description=(
-            "The selected batch median must exceed the preregistered visible-observation median."
-        ),
+        human_readable_description=hypothesis.falsification_criterion,
+        compilation_receipt={
+            "compiler_version": "falsification_template_compiler.v1",
+            "template_detector": template["detector"],
+            "compiled_detector": criterion.detector_name,
+            "detector_version": criterion.detector_version,
+            "target_relation": template["target_relation"],
+            "target_variant_ids": list(criterion.target_variant_ids),
+            "comparator_variant_ids": list(criterion.comparator_variant_ids),
+            "support_threshold": criterion.support_threshold,
+            "contradiction_threshold": criterion.contradiction_threshold,
+            "min_observations": criterion.min_observations,
+            "missing_data_policy": criterion.missing_data_policy,
+            "target_intersection_count": len(target_variant_ids),
+            "text_rendered_by_runtime": True,
+            "equivalent": True,
+        },
     )
 
 
 def verify_falsification_spec(spec: FalsificationSpec) -> None:
     if not spec.hypothesis_id or not spec.criteria:
         raise PermissionError("FalsificationSpec is incomplete")
+    if not spec.compilation_receipt or spec.compilation_receipt.get("equivalent") is not True:
+        raise PermissionError("FalsificationSpec lacks a verified compilation receipt")
+    primary = tuple(item for item in spec.criteria if item.primary)
+    if len(primary) != 1:
+        raise PermissionError("FalsificationSpec must contain exactly one compiled primary criterion")
+    criterion = primary[0]
+    expected = {
+        "compiled_detector": criterion.detector_name,
+        "detector_version": criterion.detector_version,
+        "target_variant_ids": list(criterion.target_variant_ids),
+        "comparator_variant_ids": list(criterion.comparator_variant_ids),
+        "support_threshold": criterion.support_threshold,
+        "contradiction_threshold": criterion.contradiction_threshold,
+        "min_observations": criterion.min_observations,
+        "missing_data_policy": criterion.missing_data_policy,
+    }
+    if any(spec.compilation_receipt.get(key) != value for key, value in expected.items()):
+        raise PermissionError("FalsificationSpec no longer matches its compilation receipt")
 
 
 class DeterministicHypothesisEvaluator:
