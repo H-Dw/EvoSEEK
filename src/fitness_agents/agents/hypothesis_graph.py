@@ -156,6 +156,7 @@ class HypothesisReviewGraph:
         )
         input_receipt_id = f"IN-{channel[:2].upper()}-R{immutable_context.round_id:02d}"
         retry_control = None
+        critic_history: list[dict[str, Any]] = []
         last_code = "CHILD_REVIEW_EXHAUSTED"
         last_completion: dict[str, Any] = {}
         attempt_artifacts: list[ChildReviewAttemptArtifact] = []
@@ -280,6 +281,14 @@ class HypothesisReviewGraph:
                 last_code = "CHILD_CRITIC_REJECTED"
                 break
             last_code = "CHILD_CRITIC_REVISION_EXHAUSTED"
+            critic_history.append(
+                {
+                    "decision_id": review.decision_id,
+                    "rating": review.rating.model_dump(mode="json"),
+                    "required_changes": list(review.required_changes),
+                    "summary": review.summary,
+                }
+            )
             retry_control = {
                 "schema": "critic_retry_control.v1",
                 "priority": "highest",
@@ -290,6 +299,7 @@ class HypothesisReviewGraph:
                 "issue_codes": [item.code for item in review.issues],
                 "required_changes": list(review.required_changes),
                 "critic_summary": review.summary,
+                "critic_history": list(critic_history),
             }
         return BranchReceipt(
             channel=channel,
@@ -384,6 +394,7 @@ class HypothesisReviewGraph:
         last_hypothesis: Hypothesis | None = None
         last_review = None
         revision = None
+        main_critic_history: list[dict[str, Any]] = []
         for attempt in range(self.max_main_revision_attempts + 1):
             hypothesis = None
             review = None
@@ -510,6 +521,14 @@ class HypothesisReviewGraph:
                 )
             if review.verdict == "REJECT":
                 break
+            main_critic_history.append(
+                {
+                    "decision_id": review.decision_id,
+                    "rating": review.rating.model_dump(mode="json"),
+                    "required_changes": list(review.required_changes),
+                    "explanation": review.explanation,
+                }
+            )
             revision = {
                 "schema": "critic_retry_control.v1",
                 "priority": "highest",
@@ -523,6 +542,7 @@ class HypothesisReviewGraph:
                 "issue_codes": [item.code for item in review.issues],
                 "required_changes": list(review.required_changes),
                 "explanation": review.explanation,
+                "critic_history": list(main_critic_history),
             }
         return HypothesisPipelineResult(
             status="FAILED",

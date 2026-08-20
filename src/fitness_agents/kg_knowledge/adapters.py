@@ -1848,6 +1848,7 @@ class ValidationKnowledgeAdapter:
                     "quality_status": reflection.quality_status,
                     "advisory_only": reflection.advisory_only,
                     "selection_eligible": reflection.selection_eligible,
+                    "dimension_assessments": reflection.dimension_assessments,
                 },
                 (f"agent:{reflection.provider}",),
                 "rethink_agent",

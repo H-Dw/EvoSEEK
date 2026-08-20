@@ -560,6 +560,12 @@ class _ReviseOnceCritic(RuleBasedSubCritic):
                 review_scope="physchem",
                 decision_id="revise:1",
                 verdict="REVISE",
+                rating={
+                    "score": 3,
+                    "rationale": "The scope defect is repairable.",
+                    "suggestions": ["Narrow the channel-local claim."],
+                    "text_errors": [],
+                },
                 issues=[
                     PhyschemReviewIssue(
                         code="ANALYSIS_SCOPE_OVERREACH",
@@ -585,6 +591,12 @@ class _ReviseMainOnceCritic(RuleBasedMainHypothesisCritic):
                 review_scope="main",
                 decision_id="main:revise:1",
                 verdict="REVISE",
+                rating={
+                    "score": 3,
+                    "rationale": "The confidence defect is repairable.",
+                    "suggestions": ["Lower confidence to match visible uncertainty."],
+                    "text_errors": [],
+                },
                 issues=[
                     MainReviewIssue(
                         code="OVERCONFIDENT",
