@@ -168,8 +168,18 @@ class Hypothesis:
     expected_outcome: str
     falsification_criterion: str
     parent_hypothesis_id: str | None = None
-    explanation: dict[str, Any] | None = None
     hard_residue_constraints: dict[int, tuple[str, ...]] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class HypothesisCriticExplanation:
+    explanation_id: str
+    hypothesis_id: str
+    round_id: int
+    critic_role: str
+    decision_id: str
+    verdict: str
+    explanation: str
 
 
 @dataclass(frozen=True)
@@ -254,7 +264,7 @@ class ConflictReport:
     round_id: int
     conflicts: tuple[MutationConflict, ...]
     validator_version: str
-    input_hash: str
+    draft_batch_id: str
 
     @property
     def hard_conflicts(self) -> tuple[MutationConflict, ...]:
@@ -287,7 +297,6 @@ class FalsificationSpec:
     criteria: tuple[FalsificationCriterion, ...]
     reduction_policy: str
     human_readable_description: str
-    pre_registration_hash: str
 
 
 @dataclass(frozen=True)
@@ -303,7 +312,6 @@ class DraftBatch:
     acquisition_snapshot_id: str
     design_rationales: tuple[DesignRationale, ...]
     falsification_spec: FalsificationSpec | None
-    batch_hash: str
 
 
 @dataclass(frozen=True)
@@ -386,11 +394,10 @@ class ApprovedBatch:
     draft_batch_id: str
     round_id: int
     candidate_ids: tuple[str, ...]
-    batch_hash: str
     hard_validation_report_id: str
     critique_decision_id: str
     approval_policy_version: str
-    approval_receipt_hash: str
+    approval_id: str
 
 
 @dataclass(frozen=True)
@@ -419,7 +426,6 @@ class HypothesisAssessment:
     decisive_criterion_ids: tuple[str, ...]
     unresolved_criterion_ids: tuple[str, ...]
     evaluator_version: str
-    assessment_hash: str
 
 
 @dataclass(frozen=True)
@@ -455,6 +461,7 @@ class CampaignState:
     phase: CampaignPhase = CampaignPhase.INITIALIZED
     observed: list[FitnessObservation] = field(default_factory=list)
     hypotheses: list[Hypothesis] = field(default_factory=list)
+    hypothesis_explanations: list[HypothesisCriticExplanation] = field(default_factory=list)
     selections: list[SelectionRecord] = field(default_factory=list)
     critique_decisions: list[CritiqueDecision] = field(default_factory=list)
     hypothesis_assessments: list[HypothesisAssessment] = field(default_factory=list)

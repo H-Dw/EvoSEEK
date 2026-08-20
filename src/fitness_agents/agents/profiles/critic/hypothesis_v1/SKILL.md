@@ -1,10 +1,5 @@
 # Main Hypothesis Critic
 
-## Contract fingerprints
-
-- schema_sha256: 2a1dc8d6d2ddf34b43e14616c77b2073fbff9bd627c53aec7307a669a6f67aba
-- skill_sha256: 0c123f08c14118e60793703d90408d78d382f7d01d72be36f4cdfb526aa51cdb
-
 ## Inputs
 
 Read only `hypothesis`, approved channel analysis cards in `approved_channel_analyses`,
@@ -17,7 +12,7 @@ never by an ID prefix.
 ## Authority
 
 Assess whether the main hypothesis faithfully distinguishes child observations from optional child
-hypotheses, cross-channel conflict resolution, explanation, counterevidence, uncertainty
+hypotheses, cross-channel conflict resolution, counterevidence, uncertainty
 calibration, and falsifiability. `CROSS_CHANNEL_CONFLICT` belongs only here. Do not read
 raw feature packs, rejected child drafts, batch details, predictions, or outcomes. Do not diagnose
 JSON format, citation IDs, positions, residues, or channel isolation; deterministic code owns those
@@ -40,13 +35,15 @@ may be approved despite uncertainty when it names the uncertainty and relevant c
 
 ## Output limits
 
-Return generated `MainReviewBody` JSON only. `review_scope` is `main`; at most 12 issues, 12 changes,
-and 16 cited IDs; messages and summary are at most 400 characters. Do not output a decision ID.
+The Scientist owns the hypothesis and does not write its review explanation. You own the
+corresponding `explanation`: explain why the exact Scientist hypothesis is or is not reasonable,
+without restating or replacing it. Return generated `MainReviewBody` JSON only. `review_scope` is
+`main`; at most 12 issues, 12 changes, and 16 cited IDs. Do not output a decision ID or hypothesis.
 
 ## Examples
 
-APPROVE: `{"review_scope":"main","verdict":"APPROVE","issues":[],"required_changes":[],"cited_evidence_ids":["ev:1"],"summary":"The synthesis resolves visible conflicts and remains falsifiable."}`
+APPROVE: `{"review_scope":"main","verdict":"APPROVE","issues":[],"required_changes":[],"cited_evidence_ids":["E01"],"explanation":"The residue direction is a soft prior supported by the visible card and remains prospective."}`
 
-REVISE: `{"review_scope":"main","verdict":"REVISE","issues":[{"code":"CROSS_CHANNEL_CONFLICT","severity":"blocker","message":"The synthesis does not resolve the visible residue disagreement.","evidence_ids":["ev:1"]}],"required_changes":["RESOLVE_CHANNEL_CONFLICT"],"cited_evidence_ids":["ev:1"],"summary":"Resolve the recorded cross-channel conflict."}`
+REVISE: `{"review_scope":"main","verdict":"REVISE","issues":[{"code":"CROSS_CHANNEL_CONFLICT","severity":"blocker","message":"The synthesis does not resolve the visible residue disagreement.","evidence_ids":["E01"]}],"required_changes":["RESOLVE_CHANNEL_CONFLICT"],"cited_evidence_ids":["E01"],"explanation":"The hypothesis is testable, but it currently treats conflicting channel directions as agreement."}`
 
-REJECT: `{"review_scope":"main","verdict":"REJECT","issues":[{"code":"UNSUPPORTED_SYNTHESIS","severity":"blocker","message":"The central synthesis is absent from all approved channel claims.","evidence_ids":[]}],"required_changes":[],"cited_evidence_ids":[],"summary":"The central synthesis is unsupported."}`
+REJECT: `{"review_scope":"main","verdict":"REJECT","issues":[{"code":"UNSUPPORTED_SYNTHESIS","severity":"blocker","message":"The central synthesis is absent from all approved channel claims.","evidence_ids":[]}],"required_changes":[],"cited_evidence_ids":[],"explanation":"No visible card supports the proposed residue direction."}`

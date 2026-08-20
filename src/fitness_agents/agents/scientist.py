@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 from collections.abc import Sequence
 from dataclasses import asdict
 from typing import Any
@@ -159,7 +158,7 @@ class ScientistAgent:
             "run_id": state.run_id,
             "mode": state.mode,
             "round_id": state.round_id,
-            "expected_hypothesis_id": f"hyp:{state.run_id}:r{state.round_id}",
+            "expected_hypothesis_id": f"H{state.round_id:02d}-00",
             "task": (
                 f"{self.objective} assay fitness for protein {self.task_context.protein_id}; "
                 f"allowed mutation positions are {allowed_text}"
@@ -199,9 +198,6 @@ class ScientistAgent:
                         for position in self.allowed_mutation_positions
                     },
                     "mutation_notation": variant_map[observation.variant_id].mutation_notation,
-                    "sequence_sha256": hashlib.sha256(
-                        variant_map[observation.variant_id].sequence.encode()
-                    ).hexdigest(),
                     "measured_fitness": observation.fitness,
                     "round_revealed": observation.round_revealed,
                 }
@@ -245,7 +241,7 @@ class ScientistAgent:
         context = self.sanitized_context(state, observed_variants, observations)
         if hypothesis_attempt > 0:
             context["expected_hypothesis_id"] = (
-                f"hyp:{state.run_id}:r{state.round_id}:a{hypothesis_attempt}"
+                f"H{state.round_id:02d}-{hypothesis_attempt:02d}"
             )
         if approved_subhypotheses:
             approved_payload = list(approved_subhypotheses)

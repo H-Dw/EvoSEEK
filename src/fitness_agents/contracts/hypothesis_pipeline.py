@@ -121,9 +121,7 @@ class ChildSampleCard(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
     sample_id: str = Field(min_length=1, max_length=320)
-    variant_id: str = Field(min_length=1, max_length=320)
     mutation_notation: str = Field(min_length=1, max_length=240)
-    sequence_sha256: str = Field(min_length=64, max_length=64)
     residues_by_position: dict[str, str]
     evidence_ids: tuple[str, ...] = Field(max_length=16)
     feature_values: dict[str, dict[str, Any]]
@@ -143,6 +141,7 @@ class ChannelEvidenceInput(BaseModel):
     task: str
     mutable_positions: tuple[int, ...]
     wild_type_sites: str
+    sample_map: dict[str, str] = Field(default_factory=dict)
     visible_observations: tuple[ChildSampleCard, ...] = ()
     evidence: tuple[dict[str, Any], ...] = ()
     kg_packs: tuple[dict[str, Any], ...] = ()
@@ -212,6 +211,21 @@ class ChannelFinding(BaseModel):
     evidence_ids: list[str] = Field(max_length=8)
     fact_ids: list[str] = Field(default_factory=list, max_length=8)
     confidence: Literal["low", "medium", "high"]
+
+
+class PhyschemInterpretationOutput(BaseModel):
+    """Small prose-only response; descriptor cards and citations stay runtime-owned."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    analysis_summary: str = Field(min_length=1, max_length=300)
+    interpretations: list[Annotated[str, Field(min_length=1, max_length=240)]] = Field(
+        default_factory=list, max_length=8
+    )
+    counterevidence: list[Annotated[str, Field(min_length=1, max_length=240)]] = Field(
+        default_factory=list, max_length=4
+    )
+    uncertainty: str = Field(min_length=1, max_length=300)
 
 
 class ChannelCandidateHypothesis(BaseModel):
@@ -290,8 +304,8 @@ class ChannelAnalysisBatchArtifact(BaseModel):
     batch_id: str = Field(min_length=1, max_length=160)
     split_depth: int = Field(ge=0)
     sample_ids: tuple[str, ...] = Field(min_length=1)
-    input_sha256: str = Field(min_length=64, max_length=64)
-    output_sha256: str = Field(min_length=64, max_length=64)
+    input_receipt_id: str = Field(min_length=1, max_length=160)
+    output_receipt_id: str = Field(min_length=1, max_length=160)
     evidence_universe: RoleVisibleEvidenceUniverse
     analysis: ChannelAnalysisOutput
     input_chars: int | None = Field(default=None, ge=0)
@@ -385,10 +399,30 @@ class StructureReviewBody(_ReviewBodyBase):
     required_changes: list[StructureRequiredAction] = Field(max_length=12)
 
 
-class MainReviewBody(_ReviewBodyBase):
+class MainReviewBody(BaseModel):
+    """Main Critic decision plus its explanation; it never returns a hypothesis."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
     review_scope: Literal["main"] = "main"
+    verdict: ReviewVerdictName
     issues: list[MainReviewIssue] = Field(max_length=12)
     required_changes: list[MainRequiredAction] = Field(max_length=12)
+    cited_evidence_ids: list[str] = Field(max_length=16)
+    explanation: str = Field(
+        min_length=1,
+        max_length=600,
+        validation_alias=AliasChoices("explanation", "summary"),
+    )
+
+    @model_validator(mode="after")
+    def consistent_verdict(self) -> MainReviewBody:
+        blockers = [item for item in self.issues if item.severity == "blocker"]
+        if self.verdict == "APPROVE" and (blockers or self.required_changes):
+            raise ValueError("APPROVE cannot contain blockers or required changes")
+        if self.verdict == "REVISE" and not self.required_changes:
+            raise ValueError("REVISE requires at least one allow-listed change")
+        return self
 
 
 class PhyschemReviewOutput(PhyschemReviewBody):
@@ -442,8 +476,8 @@ class ApprovedChannelAnalysis(BaseModel):
     )
     review: ChannelReviewOutput
     attempt: int = Field(ge=0)
-    input_sha256: str
-    output_sha256: str
+    input_receipt_id: str
+    output_receipt_id: str
 
     @model_validator(mode="after")
     def must_be_approved(self) -> ApprovedChannelAnalysis:
@@ -469,9 +503,9 @@ class ChildReviewAttemptArtifact(BaseModel):
     channel: ChannelName
     attempt: int = Field(ge=0)
     disposition: Literal["APPROVED", "REVISE", "REJECTED", "FAILED"]
-    input_sha256: str
+    input_receipt_id: str
     evidence_universe: RoleVisibleEvidenceUniverse
-    output_sha256: str | None = None
+    output_receipt_id: str | None = None
     analysis: ChannelAnalysisOutput | None = None
     analysis_batches: tuple[ChannelAnalysisBatchArtifact, ...] = ()
     review: ChannelReviewOutput | None = None
@@ -529,9 +563,9 @@ class MainReviewAttemptArtifact(BaseModel):
     disposition: Literal[
         "APPROVED", "REVISE", "REJECTED", "FAILED", "ABSTAINED"
     ]
-    input_sha256: str = Field(min_length=64, max_length=64)
-    output_sha256: str | None = Field(default=None, min_length=64, max_length=64)
-    evidence_universe_sha256: str = Field(min_length=64, max_length=64)
+    input_receipt_id: str = Field(min_length=1, max_length=160)
+    output_receipt_id: str | None = Field(default=None, min_length=1, max_length=160)
+    evidence_universe_id: str = Field(min_length=1, max_length=160)
     evidence_cards: tuple[MainSynthesisEvidenceCard, ...] = Field(max_length=12)
     hypothesis: dict[str, Any] | None = None
     abstention: SynthesisAbstention | None = None

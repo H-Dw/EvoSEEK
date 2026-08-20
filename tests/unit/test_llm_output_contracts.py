@@ -50,7 +50,6 @@ class _SequenceClient:
 
 def _valid_payload() -> dict:
     return {
-        "hypothesis_id": "hyp:run:r1",
         "statement": "Visible evidence supports a bounded four-site hypothesis.",
         "preferred_residues": {
             "39": ["W"],
@@ -61,7 +60,7 @@ def _valid_payload() -> dict:
         "evidence_ids": [],
         "expected_outcome": "Enrichment relative to random selection.",
         "falsification_criterion": "Revise if the wet batch median does not improve.",
-        "parent_hypothesis_id": None,
+        "hard_residue_constraints": {},
     }
 
 
@@ -95,10 +94,8 @@ def _context() -> dict:
     }
 
 
-def test_missing_hypothesis_id_retries_inside_json_boundary() -> None:
-    missing_id = _valid_payload()
-    del missing_id["hypothesis_id"]
-    remote = _SequenceClient([missing_id, _valid_payload()])
+def test_runtime_owned_hypothesis_id_never_enters_model_contract() -> None:
+    remote = _SequenceClient([_valid_payload()])
 
     hypothesis = _client(remote).generate_hypothesis(
         sanitized_context=_context(),
@@ -106,7 +103,7 @@ def test_missing_hypothesis_id_retries_inside_json_boundary() -> None:
         output_schema=HYPOTHESIS_SCHEMA,
     )
 
-    assert remote.calls == 2
+    assert remote.calls == 1
     assert hypothesis.hypothesis_id == "hyp:run:r1"
 
 
@@ -130,9 +127,9 @@ def test_main_synthesis_partial_all_positions_can_repair_to_abstention() -> None
 
 
 def test_exhausted_missing_key_is_validation_error_not_key_error() -> None:
-    missing_id = _valid_payload()
-    del missing_id["hypothesis_id"]
-    remote = _SequenceClient([missing_id])
+    missing_statement = _valid_payload()
+    del missing_statement["statement"]
+    remote = _SequenceClient([missing_statement])
 
     with pytest.raises(RuntimeError) as captured:
         _client(remote).generate_hypothesis(
@@ -172,10 +169,11 @@ def test_unknown_evidence_ids_fail_after_bounded_repair() -> None:
     assert remote.calls == 3
 
 
-def test_campaign_owned_ids_are_coerced_without_retry() -> None:
+def test_legacy_scientist_owned_fields_are_discarded_without_render_retry() -> None:
     payload = _valid_payload()
-    payload["hypothesis_id"] = "hyp:invented-by-model"
-    payload["parent_hypothesis_id"] = None
+    payload["hypothesis_id"] = "model-owned-id-is-ignored"
+    payload["parent_hypothesis_id"] = "model-owned-parent-is-ignored"
+    payload["explanation"] = {"summary": "Scientist explanations are ignored."}
     context = {**_context(), "previous_hypothesis_id": "hyp:run:r0"}
     remote = _SequenceClient([payload])
 
@@ -185,16 +183,14 @@ def test_campaign_owned_ids_are_coerced_without_retry() -> None:
         output_schema=HYPOTHESIS_SCHEMA,
     )
 
-    # Campaign-owned IDs are normalized after the separate reasoning/render calls.
-    assert remote.calls == 2
+    # A valid compact reasoning draft is accepted directly; IDs are attached locally.
+    assert remote.calls == 1
     assert hypothesis.hypothesis_id == "hyp:run:r1"
     assert hypothesis.parent_hypothesis_id == "hyp:run:r0"
 
 
 def test_native_scientist_revision_block_sets_parent_and_attempt_id() -> None:
     payload = _valid_payload()
-    payload["hypothesis_id"] = "hyp:wrong"
-    payload["parent_hypothesis_id"] = None
     payload["statement"] = "Revised residue map after critic asked for a new hypothesis."
     context = {
         **_context(),
@@ -235,11 +231,11 @@ def test_hypothesis_output_schema_accepts_task_scoped_dynamic_site_keys() -> Non
 def test_scientist_profile_defines_output_and_authority_boundaries() -> None:
     profile = load_scientist_profile("scientific_v1")
 
-    assert "expected_hypothesis_id" in profile
+    assert "expected_hypothesis_id" not in profile
     assert "oracle" in profile
     assert "final-test" in profile
     assert "batch submission" in profile
-    assert "sha256:" in profile
+    assert "sha256" not in profile.casefold()
     assert "critic_revision" in profile
     assert "400" in profile
     assert "visible_observations" in profile
@@ -256,35 +252,19 @@ def test_scientist_profile_defines_output_and_authority_boundaries() -> None:
     assert "JSON object" in profile
 
 
-def test_variant_hash_evidence_ids_are_dropped_unknown_evidence_still_fails() -> None:
+def test_unknown_evidence_ids_are_never_special_cased_by_string_shape() -> None:
     payload = _valid_payload()
-    payload["evidence_ids"] = [
-        "ev:1",
-        "sha256:06f55338c6fc1a65a6ca3d486e6641f52abfaabb0c3353743f1afc323443f61b",
-    ]
-    cleaned = validate_hypothesis_payload(
-        payload,
-        allowed_evidence_ids=frozenset({"ev:1"}),
-        expected_positions=(39, 40, 41, 54),
-    )
-    assert cleaned["evidence_ids"] == ["ev:1"]
-
-    empty = validate_hypothesis_payload(
-        {**payload, "evidence_ids": ["sha256:deadbeef"]},
-        allowed_evidence_ids=frozenset(),
-        expected_positions=(39, 40, 41, 54),
-    )
-    assert empty["evidence_ids"] == []
-
     with pytest.raises(UnknownEvidenceIdsError, match="not visible to the role"):
         validate_hypothesis_payload(
             {**payload, "evidence_ids": ["ev:missing"]},
+            expected_hypothesis_id="H01",
             allowed_evidence_ids=frozenset({"ev:1"}),
             expected_positions=(39, 40, 41, 54),
         )
 
     stripped = validate_hypothesis_payload(
         {**payload, "evidence_ids": ["ev:missing", "ev:1"]},
+        expected_hypothesis_id="H01",
         allowed_evidence_ids=frozenset({"ev:1"}),
         expected_positions=(39, 40, 41, 54),
         on_unknown_evidence="strip",
@@ -461,7 +441,8 @@ def test_scientist_prompt_emits_one_full_rag_claim_card_and_relation_only_packs(
     assert len(payload["rag_claims"]) == 1
     claim = payload["rag_claims"][0]
     assert claim["claim_id"] == "claim:epistasis"
-    assert claim["evidence_ids"] == ["ev:1"]
+    assert claim["evidence_ids"] == ["E01"]
+    assert payload["context"]["evidence_map"] == {"E01": "doi:10.1000/example"}
     assert claim["statement"] == atomic_statement
     assert claim["applicability"] == applicability
     assert claim["polarity"] == "support"
@@ -484,14 +465,14 @@ def test_scientist_prompt_emits_one_full_rag_claim_card_and_relation_only_packs(
         {
             "claim_id": "claim:epistasis",
             "relation_type": "retrieved_as_evidence",
-            "evidence_ids": ["ev:1"],
+            "evidence_ids": ["E01"],
         }
     ]
     assert packs[1]["claim_relations"] == [
         {
             "claim_id": "claim:epistasis",
             "relation_type": "supported_by",
-            "evidence_ids": ["ev:1"],
+            "evidence_ids": ["E01"],
             "relation_ids": ["rel:1"],
         }
     ]
@@ -754,7 +735,7 @@ def test_scientist_prompt_bounds_pack_fields_and_deduplicates_top_level_evidence
     payload = json.loads(messages[1]["content"])
     pack = payload["context"]["kg_interaction"]["packs"][0]
     assert payload["rag_claims"] == []
-    assert payload["evidence"][0]["evidence_id"] == "ev:duplicate"
+    assert payload["evidence"][0]["evidence_id"] == "E01"
     assert pack["evidence"] == []
     assert all(item.get("claim_id") != "claim:duplicate" for item in pack["facts"])
     assert len(pack["facts"]) <= 12
@@ -806,8 +787,8 @@ def _reflection(variant_id: str) -> dict:
 def test_rethink_coverage_mismatch_retries_inside_structured_boundary() -> None:
     remote = _SequenceClient(
         [
-            {"reflections": [_reflection("v1")]},
-            {"reflections": [_reflection("v1"), _reflection("v2")]},
+            {"reflections": [_reflection("S01")]},
+            {"reflections": [_reflection("S01"), _reflection("S02")]},
         ]
     )
     client = NativeReThinkClient.__new__(NativeReThinkClient)
@@ -818,7 +799,6 @@ def test_rethink_coverage_mismatch_retries_inside_structured_boundary() -> None:
     client.thinking = None
     client.profile_name = "scientific_v1"
     client.profile = "Return exact candidate coverage."
-    client.profile_sha256 = "test-profile"
     client.client = remote
     client.transport = OpenAICompatibleChatTransport(remote)
     context = ReThinkContextInput.model_validate(

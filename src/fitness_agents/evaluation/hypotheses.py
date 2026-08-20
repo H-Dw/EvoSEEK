@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import uuid
 from collections.abc import Sequence
 
 from fitness_agents.contracts.schemas import (
@@ -11,7 +10,6 @@ from fitness_agents.contracts.schemas import (
     HypothesisAssessment,
     HypothesisStatus,
 )
-from fitness_agents.validation.batch import content_hash
 
 from .signals import SignalDetectorRegistry
 
@@ -38,16 +36,6 @@ def preregister_batch_median_test(
         min_replicates=1,
         primary=True,
     )
-    payload = {
-        "hypothesis_id": hypothesis_id,
-        "round_id": round_id,
-        "version": "1.0.0",
-        "criteria": (criterion,),
-        "reduction_policy": "primary_contradiction_first_v1",
-        "description": (
-            "The selected batch median must exceed the preregistered visible-observation median."
-        ),
-    }
     return FalsificationSpec(
         spec_id=f"falsification:{hypothesis_id}:v1",
         hypothesis_id=hypothesis_id,
@@ -56,23 +44,14 @@ def preregister_batch_median_test(
         criteria=(criterion,),
         reduction_policy="primary_contradiction_first_v1",
         human_readable_description=(
-            payload["description"]
+            "The selected batch median must exceed the preregistered visible-observation median."
         ),
-        pre_registration_hash=content_hash(payload),
     )
 
 
 def verify_falsification_spec(spec: FalsificationSpec) -> None:
-    payload = {
-        "hypothesis_id": spec.hypothesis_id,
-        "round_id": spec.registered_at_round,
-        "version": spec.version,
-        "criteria": spec.criteria,
-        "reduction_policy": spec.reduction_policy,
-        "description": spec.human_readable_description,
-    }
-    if content_hash(payload) != spec.pre_registration_hash:
-        raise PermissionError("FalsificationSpec changed after preregistration")
+    if not spec.hypothesis_id or not spec.criteria:
+        raise PermissionError("FalsificationSpec is incomplete")
 
 
 class DeterministicHypothesisEvaluator:
@@ -115,15 +94,8 @@ class DeterministicHypothesisEvaluator:
         observation_ids = tuple(dict.fromkeys(
             observation_id for result in results for observation_id in result.observation_ids
         ))
-        payload = {
-            "hypothesis_id": spec.hypothesis_id,
-            "spec_id": spec.spec_id,
-            "round_id": round_id,
-            "status": status,
-            "results": results,
-        }
         return HypothesisAssessment(
-            assessment_id=f"assessment:{uuid.uuid4().hex}",
+            assessment_id=f"AS{round_id:02d}",
             hypothesis_id=spec.hypothesis_id,
             falsification_spec_id=spec.spec_id,
             round_id=round_id,
@@ -133,5 +105,4 @@ class DeterministicHypothesisEvaluator:
             decisive_criterion_ids=decisive,
             unresolved_criterion_ids=unresolved,
             evaluator_version=self.version,
-            assessment_hash=content_hash(payload),
         )

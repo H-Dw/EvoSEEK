@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 from collections.abc import Sequence
 from typing import Annotated, Any, Literal
 
@@ -45,7 +44,6 @@ ReThinkText = Annotated[
 ]
 CANONICAL_RESIDUES = frozenset("ACDEFGHIKLMNPQRSTVWY")
 _UNSET = object()
-_VARIANT_ID_PREFIX = "sha256:"
 
 
 def visible_evidence_ids(
@@ -54,12 +52,7 @@ def visible_evidence_ids(
     *,
     on_unknown: Literal["error", "strip"] = "error",
 ) -> tuple[str, ...]:
-    """Keep cited evidence IDs that the role can see; drop variant hashes.
-
-    Remote scientists often copy observation `sha256:` identifiers into
-    `evidence_ids`. Those are variant IDs, not evidence IDs, and must not fail
-    the whole hypothesis when the rest of the contract is valid.
-    """
+    """Keep cited evidence IDs that the role can see."""
 
     if allowed_evidence_ids is None:
         return tuple(evidence_ids)
@@ -68,8 +61,6 @@ def visible_evidence_ids(
     for item in evidence_ids:
         if item in allowed_evidence_ids:
             kept.append(item)
-        elif str(item).startswith(_VARIANT_ID_PREFIX):
-            continue
         else:
             unknown.append(item)
     if unknown and on_unknown == "error":
@@ -135,28 +126,37 @@ class HypothesisExplanationOutput(BaseModel):
     limitations: Annotated[list[HypothesisText], Field(min_length=1, max_length=8)]
 
 
-class HypothesisOutput(BaseModel):
-    """Strict model-facing contract converted to the existing Hypothesis dataclass."""
+class HypothesisBodyOutput(BaseModel):
+    """Compact model-facing hypothesis body.
+
+    Hypothesis and parent identifiers are runtime-owned.  Scientific
+    explanations are produced by the Critic, so neither belongs in the
+    Scientist's generative contract.
+    """
 
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    hypothesis_id: NonEmptyText
+    @model_validator(mode="before")
+    @classmethod
+    def discard_legacy_runtime_fields(cls, value: Any) -> Any:
+        """Ignore fields that older prompts incorrectly assigned to the Scientist."""
+
+        if not isinstance(value, dict):
+            return value
+        return {
+            key: item
+            for key, item in value.items()
+            if key not in {"hypothesis_id", "parent_hypothesis_id", "explanation"}
+        }
+
     statement: HypothesisText
     preferred_residues: dict[str, list[NonEmptyText]]
     evidence_ids: Annotated[list[NonEmptyText], Field(max_length=EVIDENCE_ID_MAX)]
     expected_outcome: HypothesisText
     falsification_criterion: HypothesisText
-    parent_hypothesis_id: NonEmptyText | None
-    explanation: HypothesisExplanationOutput | None = None
     hard_residue_constraints: dict[str, list[NonEmptyText]] = Field(
         default_factory=dict
     )
-
-    @model_validator(mode="after")
-    def validate_identifier_relationships(self) -> HypothesisOutput:
-        if self.parent_hypothesis_id == self.hypothesis_id:
-            raise ValueError("parent_hypothesis_id must differ from hypothesis_id")
-        return self
 
     def to_hypothesis(
         self,
@@ -169,13 +169,14 @@ class HypothesisOutput(BaseModel):
         max_positions: int | None = None,
         on_unknown_evidence: Literal["error", "strip"] = "error",
     ) -> Hypothesis:
-        hypothesis_id = self.hypothesis_id
-        if expected_hypothesis_id is not None:
-            # CampaignRunner owns this identifier; do not fail the round on a copy error.
-            hypothesis_id = expected_hypothesis_id
-        parent_hypothesis_id = self.parent_hypothesis_id
-        if expected_parent_hypothesis_id is not _UNSET:
-            parent_hypothesis_id = expected_parent_hypothesis_id
+        if expected_hypothesis_id is None:
+            raise ValueError("runtime must provide expected_hypothesis_id")
+        hypothesis_id = expected_hypothesis_id
+        parent_hypothesis_id = (
+            None
+            if expected_parent_hypothesis_id is _UNSET
+            else expected_parent_hypothesis_id
+        )
         if parent_hypothesis_id == hypothesis_id:
             raise ValueError("parent_hypothesis_id must differ from hypothesis_id")
         evidence_ids = visible_evidence_ids(
@@ -226,11 +227,6 @@ class HypothesisOutput(BaseModel):
             expected_outcome=self.expected_outcome,
             falsification_criterion=self.falsification_criterion,
             parent_hypothesis_id=parent_hypothesis_id,
-            explanation=(
-                self.explanation.model_dump(mode="json")
-                if self.explanation is not None
-                else None
-            ),
             hard_residue_constraints={
                 int(site): tuple(residues)
                 for site, residues in hard_constraints.items()
@@ -238,7 +234,25 @@ class HypothesisOutput(BaseModel):
         )
 
 
-class SynthesizedHypothesisOutput(HypothesisOutput):
+class HypothesisOutput(HypothesisBodyOutput):
+    """Backward-compatible runtime envelope; not sent to remote models."""
+
+    hypothesis_id: NonEmptyText
+    parent_hypothesis_id: NonEmptyText | None
+
+    @model_validator(mode="after")
+    def validate_identifier_relationships(self) -> HypothesisOutput:
+        if self.parent_hypothesis_id == self.hypothesis_id:
+            raise ValueError("parent_hypothesis_id must differ from hypothesis_id")
+        return self
+
+    def to_hypothesis(self, **kwargs: Any) -> Hypothesis:
+        kwargs.setdefault("expected_hypothesis_id", self.hypothesis_id)
+        kwargs.setdefault("expected_parent_hypothesis_id", self.parent_hypothesis_id)
+        return super().to_hypothesis(**kwargs)
+
+
+class SynthesizedHypothesisOutput(HypothesisBodyOutput):
     outcome: Literal["SYNTHESIZED_HYPOTHESIS"] = "SYNTHESIZED_HYPOTHESIS"
 
 
@@ -316,8 +330,6 @@ def validate_main_synthesis_payload(
             paths=("outcome", "preferred_residues"),
         ) from error
     dumped = output.model_dump(mode="json")
-    dumped["hypothesis_id"] = hypothesis.hypothesis_id
-    dumped["parent_hypothesis_id"] = hypothesis.parent_hypothesis_id
     dumped["evidence_ids"] = list(hypothesis.evidence_ids)
     return dumped
 
@@ -347,16 +359,14 @@ class ReThinkOutput(BaseModel):
         return self
 
     def to_reflections(
-        self, *, run_id: str, round_id: int, provider: str
+        self, *, run_id: str, round_id: int, provider: str, id_prefix: str = "R"
     ) -> tuple[ReThinkReflection, ...]:
+        del run_id
         output: list[ReThinkReflection] = []
-        for item in self.reflections:
-            digest = hashlib.sha256(
-                f"{run_id}|{round_id}|{item.variant_id}".encode()
-            ).hexdigest()[:16]
+        for index, item in enumerate(self.reflections, start=1):
             output.append(
                 ReThinkReflection(
-                    reflection_id=f"rethink:{digest}",
+                    reflection_id=f"{id_prefix}{round_id:02d}-{index:02d}",
                     variant_id=item.variant_id,
                     round_id=round_id,
                     verdict=item.verdict,
@@ -382,7 +392,7 @@ def validate_hypothesis_payload(
     max_positions: int | None = None,
     on_unknown_evidence: Literal["error", "strip"] = "error",
 ) -> dict[str, Any]:
-    model = HypothesisOutput.model_validate(payload)
+    model = HypothesisBodyOutput.model_validate(payload)
     try:
         hypothesis = model.to_hypothesis(
             expected_hypothesis_id=expected_hypothesis_id,
@@ -404,14 +414,10 @@ def validate_hypothesis_payload(
             on_unknown_evidence="strip",
         )
         dumped = model.model_dump(mode="json", by_alias=True)
-        dumped["hypothesis_id"] = stripped.hypothesis_id
-        dumped["parent_hypothesis_id"] = stripped.parent_hypothesis_id
         dumped["evidence_ids"] = list(stripped.evidence_ids)
         error.stripped_payload = dumped
         raise
     dumped = model.model_dump(mode="json", by_alias=True)
-    dumped["hypothesis_id"] = hypothesis.hypothesis_id
-    dumped["parent_hypothesis_id"] = hypothesis.parent_hypothesis_id
     dumped["evidence_ids"] = list(hypothesis.evidence_ids)
     return dumped
 

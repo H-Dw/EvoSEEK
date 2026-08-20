@@ -42,6 +42,7 @@ from fitness_agents.contracts.batch_review import (
     RevisionQuotaShortfallReceipt,
     batch_diversity_receipt,
     prediction_review_card,
+    soft_prior_mismatch_ids,
 )
 from fitness_agents.contracts.hypothesis_pipeline import CompletionManifest
 from fitness_agents.contracts.schemas import (
@@ -49,6 +50,7 @@ from fitness_agents.contracts.schemas import (
     CampaignState,
     DesignScore,
     Hypothesis,
+    HypothesisCriticExplanation,
     Prediction,
     SelectionRecord,
     ValidationRecord,
@@ -100,7 +102,6 @@ from fitness_agents.validation.batch import (
     ApprovalGateway,
     BatchHardValidator,
     build_draft_batch,
-    content_hash,
 )
 
 from .backends import ApprovalEnforcingBackend, CsvOracleBackend
@@ -294,17 +295,6 @@ def _shuffle_prediction_scores(
         replace(prediction, fitness_mean=float(shuffled[index]))
         for index, prediction in enumerate(predictions)
     ]
-
-
-def _validation_record_id(
-    run_id: str,
-    round_id: int,
-    variant_id: str,
-    validation_type: str,
-    source_id: str,
-) -> str:
-    payload = f"{run_id}|{round_id}|{variant_id}|{validation_type}|{source_id}"
-    return f"validation:{hashlib.sha256(payload.encode()).hexdigest()[:20]}"
 
 
 class CampaignRunner:
@@ -1199,7 +1189,6 @@ class CampaignRunner:
                 "provider": self.config.llm.provider,
                 "runtime": "native_chat_completions",
                 "profile": self.config.llm.profile,
-                "profile_sha256": getattr(self.agent.client, "profile_sha256", None),
                 "model": self.config.llm.model,
                 "base_url": self.config.llm.base_url,
                 "temperature": self.config.llm.temperature,
@@ -1425,6 +1414,13 @@ class CampaignRunner:
         local_evidence: Sequence[Any],
         interaction_result: Any | None,
     ) -> Any:
+        self._record_hypothesis_explanation(
+            hypothesis=rejected,
+            decision_id=decision.decision_id,
+            verdict=decision.verdict.value,
+            explanation=decision.summary,
+            critic_role="batch_critic",
+        )
         revision = critic_revision_payload(decision=decision, rejected_hypothesis=rejected)
         evidence_list = [
             *(local_evidence if self._scientist_local_context_allowed else ()),
@@ -1479,6 +1475,37 @@ class CampaignRunner:
         )
         self.writer.event("hypothesis_proposed", hypothesis.__dict__)
         return hypothesis
+
+    def _record_hypothesis_explanation(
+        self,
+        *,
+        hypothesis: Hypothesis,
+        decision_id: str,
+        verdict: str,
+        explanation: str,
+        critic_role: str,
+    ) -> None:
+        """Persist one readable Critic explanation for each Scientist hypothesis."""
+
+        if any(
+            item.hypothesis_id == hypothesis.hypothesis_id
+            for item in self.state.hypothesis_explanations
+        ):
+            return
+        self.state.hypothesis_explanations.append(
+            HypothesisCriticExplanation(
+                explanation_id=(
+                    f"HX{self.state.round_id:02d}-"
+                    f"{len(self.state.hypothesis_explanations) + 1:02d}"
+                ),
+                hypothesis_id=hypothesis.hypothesis_id,
+                round_id=self.state.round_id,
+                critic_role=critic_role,
+                decision_id=decision_id,
+                verdict=verdict,
+                explanation=explanation,
+            )
+        )
 
     def _progress(
         self,
@@ -1873,6 +1900,8 @@ class CampaignRunner:
                         failure = pipeline_result.failure_code or "HYPOTHESIS_PIPELINE_FAILED"
                         self._required_node_failures.append(f"round_{round_id}:{failure}")
                         rounds_aborted += 1
+                        planned_batch_sizes.append(self.config.budget_per_round)
+                        actual_batch_sizes.append(0)
                         self._progress(
                             None,
                             f"round {round_id} aborted by hypothesis review graph",
@@ -1885,6 +1914,14 @@ class CampaignRunner:
                         )
                         break
                     hypothesis = Hypothesis(**(pipeline_result.main_hypothesis or {}))
+                    if pipeline_result.main_review is not None:
+                        self._record_hypothesis_explanation(
+                            hypothesis=hypothesis,
+                            decision_id=pipeline_result.main_review.decision_id,
+                            verdict=pipeline_result.main_review.verdict,
+                            explanation=pipeline_result.main_review.explanation,
+                            critic_role="main_hypothesis_critic",
+                        )
                 else:
                     hypothesis = self.agent.propose_hypothesis(
                         self.state,
@@ -1934,9 +1971,6 @@ class CampaignRunner:
                 raise AssertionError("Round candidate set exceeded candidate_limit")
             round_candidate_ids = tuple(item.variant_id for item in eligible)
             round_candidate_id_set = set(round_candidate_ids)
-            round_candidate_ids_sha256 = hashlib.sha256(
-                "\n".join(sorted(round_candidate_ids)).encode("utf-8")
-            ).hexdigest()
             self.writer.write_json(
                 f"round_{round_id:02d}/candidate_pool_receipt.json",
                 {
@@ -1952,7 +1986,6 @@ class CampaignRunner:
                     "hard_constraint_valid_count": len(constraint_valid_remaining),
                     "planned_candidate_count": self.config.candidate_limit,
                     "actual_candidate_count": len(eligible),
-                    "candidate_ids_sha256": round_candidate_ids_sha256,
                     "candidate_ids": round_candidate_ids,
                     "candidate_scoring_hard_limit": self.config.candidate_limit,
                     "selection_budget": self.config.budget_per_round,
@@ -1970,17 +2003,7 @@ class CampaignRunner:
                         "batch_total": self.config.budget_per_round - len(eligible)
                     },
                     excluded_candidate_count=len(remaining) - len(eligible),
-                    constraints_sha256=content_hash(
-                        {
-                            "hard_residue_constraints": (
-                                hypothesis.hard_residue_constraints
-                                if hypothesis is not None
-                                else {}
-                            ),
-                            "candidate_limit": self.config.candidate_limit,
-                            "budget_per_round": self.config.budget_per_round,
-                        }
-                    ),
+                    constraints_id=f"RC{round_id:02d}-00",
                 )
                 self.writer.write_json(
                     f"round_{round_id:02d}/revision_constraint_infeasible.json",
@@ -2766,9 +2789,7 @@ class CampaignRunner:
                                         )
                                     )
                                 ),
-                                constraints_sha256=content_hash(
-                                    (constraints or RevisionConstraints()).prompt_payload()
-                                ),
+                                constraints_id=f"RC{round_id:02d}-{review_attempt:02d}",
                             )
                         )
                 previous_diversity = _context.get("last_diversity_receipt")
@@ -2798,6 +2819,12 @@ class CampaignRunner:
                     },
                     candidate_intent_by_id=_candidate_intent_cards(
                         candidate_ids, quota_selection
+                    ),
+                    soft_prior_mismatch_ids=soft_prior_mismatch_ids(
+                        candidate_ids=candidate_ids,
+                        variants_by_id=public_by_id,
+                        hypothesis=_context["hypothesis"],
+                        position_to_index=self.task_context.position_to_variant_index,
                     ),
                     review_controls=self.config.critic.review_controls,
                     review_diversity=self.config.critic.review_diversity,
@@ -2867,7 +2894,6 @@ class CampaignRunner:
                     phase=CampaignPhase.HARD_VALIDATED,
                     attempt=draft.review_attempt,
                     draft_batch_id=draft.draft_batch_id,
-                    batch_hash=draft.batch_hash,
                     hard_conflicts=len(report.hard_conflicts),
                     conflict_count=len(report.conflicts),
                     max_attempts=self.config.critic.max_revision_attempts,
@@ -2878,7 +2904,6 @@ class CampaignRunner:
                         "round_id": _round_id,
                         "attempt": draft.review_attempt,
                         "draft_batch_id": draft.draft_batch_id,
-                        "batch_hash": draft.batch_hash,
                     },
                 )
                 self.writer.event(
@@ -2898,9 +2923,6 @@ class CampaignRunner:
                             "round_id": _round_id,
                             "attempt": draft.review_attempt,
                             "spec_id": draft.falsification_spec.spec_id,
-                            "pre_registration_hash": (
-                                draft.falsification_spec.pre_registration_hash
-                            ),
                         },
                     )
                 self.writer.write_json(
@@ -2933,7 +2955,6 @@ class CampaignRunner:
                         "round_id": _round_id,
                         "attempt": draft.review_attempt,
                         "draft_batch_id": draft.draft_batch_id,
-                        "batch_hash": draft.batch_hash,
                         "hard_conflicts": len(report.hard_conflicts),
                         "decision": decision,
                         "critic_provider": self.critic_agent.client.provider_name,
@@ -3029,9 +3050,7 @@ class CampaignRunner:
                                 excluded_candidate_count=(
                                     len(round_candidate_ids) - len(eligible)
                                 ),
-                                constraints_sha256=content_hash(
-                                    hypothesis.hard_residue_constraints
-                                ),
+                                constraints_id=f"RC{round_id:02d}-HYP",
                             ),
                             decisions=requested.decisions,
                         )
@@ -3312,6 +3331,7 @@ class CampaignRunner:
                         ),
                     )[:expected_batch_size]
                     fallback_ids = tuple(item.variant_id for item in safest)
+                    ensure_dry_validation(fallback_ids, reason="safe_fallback")
                     fallback_context = {
                         "hypothesis": hypothesis,
                         "round_id": round_id,
@@ -3418,6 +3438,14 @@ class CampaignRunner:
                     break
 
             approved_batch = review_result.approved_batch
+            if hypothesis is not None:
+                self._record_hypothesis_explanation(
+                    hypothesis=hypothesis,
+                    decision_id=review_result.decision.decision_id,
+                    verdict=review_result.decision.verdict.value,
+                    explanation=review_result.decision.summary,
+                    critic_role="batch_critic",
+                )
             selected_ids = list(approved_batch.candidate_ids)
             actual_batch_sizes.append(len(selected_ids))
             final_agent_quota_selection = draft_context.get("agent_quota_selection")
@@ -3478,7 +3506,7 @@ class CampaignRunner:
                     ),
                     "planned_candidate_count": self.config.candidate_limit,
                     "round_candidate_count": len(round_candidate_ids),
-                    "round_candidate_ids_sha256": round_candidate_ids_sha256,
+                    "round_candidate_ids": round_candidate_ids,
                     "candidate_scoring_hard_limit": self.config.candidate_limit,
                     "acquisition_prediction_scope": (
                         "candidate_pool" if pool_prediction_used else "none"
@@ -3596,7 +3624,10 @@ class CampaignRunner:
                 allowed_ids=round_candidate_id_set,
                 expected_batch_size=expected_batch_size,
             )
-            if final_report.hard_conflicts or final_report.input_hash != approved_batch.batch_hash:
+            if (
+                final_report.hard_conflicts
+                or final_report.draft_batch_id != approved_batch.draft_batch_id
+            ):
                 raise PermissionError("Final validation no longer matches the approved batch")
             experiment_run_id = self.backend.submit(approved_batch)
             self._progress(
@@ -3641,7 +3672,6 @@ class CampaignRunner:
                             "expected_outcome": hypothesis.expected_outcome,
                             "falsification_criterion": hypothesis.falsification_criterion,
                             "evidence_ids": list(hypothesis.evidence_ids),
-                            "explanation": hypothesis.explanation,
                         }
                         if hypothesis is not None
                         else None
@@ -3701,9 +3731,7 @@ class CampaignRunner:
                 wet_source = f"wet:{wet_observation.source}"
                 current_validation_records.append(
                     ValidationRecord(
-                        record_id=_validation_record_id(
-                            self.run_id, round_id, variant_id, "wet", wet_source
-                        ),
+                        record_id=f"VR{round_id:02d}-{len(current_validation_records) + 1:03d}",
                         variant_id=variant_id,
                         round_id=round_id,
                         validation_type="wet",
@@ -3734,13 +3762,7 @@ class CampaignRunner:
                     dry_source = f"dry:{prediction.model_version}"
                     current_validation_records.append(
                         ValidationRecord(
-                            record_id=_validation_record_id(
-                                self.run_id,
-                                round_id,
-                                variant_id,
-                                "dry",
-                                dry_source,
-                            ),
+                            record_id=f"VR{round_id:02d}-{len(current_validation_records) + 1:03d}",
                             variant_id=variant_id,
                             round_id=round_id,
                             validation_type="dry",

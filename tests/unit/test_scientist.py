@@ -97,7 +97,7 @@ def test_scientist_repropose_after_critic_uses_attempt_id_and_parent(experiment_
         },
         hypothesis_attempt=1,
     )
-    assert first.hypothesis_id == "hyp:test:r1"
-    assert revised.hypothesis_id == "hyp:test:r1:a1"
+    assert first.hypothesis_id == "H01-00"
+    assert revised.hypothesis_id == "H01-01"
     assert revised.parent_hypothesis_id == first.hypothesis_id
     assert "Revised after critic" in revised.statement

@@ -105,21 +105,21 @@ that were not supplied in the current inputs.
 
 When `context.critic_revision` is present:
 
-1. copy `parent_hypothesis_id` from `rejected_hypothesis_id`;
-2. address only supplied `required_changes`;
-3. change the statement or residue map so the result is not a restatement;
-4. do not repeat the rejected batch's residue map;
-5. rerun the activation routing and full hierarchy with the same visibility limits.
+1. address only supplied `required_changes` and retain their structured parameters, evidence, and priority;
+2. change the statement or residue map so the result is not a restatement;
+3. do not repeat the rejected batch's residue map;
+4. rerun the activation routing and full hierarchy with the same visibility limits.
 
 ## 6. Output contract
 
-Copy `context.expected_hypothesis_id` exactly. Return one JSON object containing exactly:
-`hypothesis_id`, `statement`, `preferred_residues`, `hard_residue_constraints`, `evidence_ids`, `expected_outcome`,
-`falsification_criterion`, `parent_hypothesis_id`, and `explanation`.
+Return one compact JSON object containing exactly: `statement`, `preferred_residues`,
+`hard_residue_constraints`, `evidence_ids`, `expected_outcome`, and
+`falsification_criterion`. Local runtime code owns hypothesis IDs and parent links. The Critic owns
+the corresponding explanation; do not output IDs, parent IDs, or an explanation.
 
 - Keep `statement`, `expected_outcome`, and `falsification_criterion` at or under 400 characters.
 - Cite at most 12 identifiers that occur in the supplied evidence or visible KG packs.
-- Never place variant identifiers such as `sha256:...` in `evidence_ids`.
+- Use only request-local evidence labels supplied in the evidence universe.
 - Return an empty `evidence_ids` array when no eligible identifier is visible.
 - In `all_positions` mode, use exactly the decimal-string keys in `mutable_positions`.
 - In `sparse_subset` mode, use a non-empty subset of those keys no larger than
@@ -128,13 +128,10 @@ Copy `context.expected_hypothesis_id` exactly. Return one JSON object containing
 - Treat `preferred_residues` as soft priors. Return `hard_residue_constraints: {}` unless the
   supplied deterministic design/safety contract explicitly requires a residue set; never infer
   hardness from prose or confidence.
-- Copy the supplied parent identifier or use null.
 - When `approved_channel_analyses` is present, treat each item as an approved channel analysis card:
   preserve its observation/interpretation/limitation distinctions, consider optional
-  `candidate_hypotheses` without copying them blindly, and use `explanation` to record each
-  `analysis_id`, `analysis_summary`, evidence IDs, uncertainty, candidate hypothesis IDs, unresolved
-  conflicts, and limitations. The main Scientist alone proposes the final cross-channel mutation
-  hypothesis. Otherwise return null.
+  `candidate_hypotheses` without copying them blindly. The main Scientist alone proposes the final
+  cross-channel mutation hypothesis; the Main Critic explains its scientific reasonableness.
 - Return JSON only, without Markdown fences or hidden reasoning.
 
 ## 7. Prohibited behavior
