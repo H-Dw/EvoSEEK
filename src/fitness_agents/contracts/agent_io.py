@@ -251,6 +251,9 @@ class ReThinkCandidateCard(BaseModel):
     variant_id: str = Field(min_length=1)
     mutation_notation: str = Field(min_length=1)
     agent_reason: str
+    feature_analysis: str = ""
+    critic_explanation: str = ""
+    critic_suggestions: tuple[str, ...] = ()
     evidence_ids: tuple[str, ...] = ()
     wet_value: float
     dry_validations: tuple[ReThinkDryValidationCard, ...] = ()
@@ -265,7 +268,9 @@ class ReThinkCandidateCard(BaseModel):
     allow_hypothesis_mismatch: bool = False
     falsification_role: Literal["target", "comparator", "not_in_primary_criterion"]
 
-    @field_validator("evidence_ids", "dry_validations", mode="before")
+    @field_validator(
+        "evidence_ids", "dry_validations", "critic_suggestions", mode="before"
+    )
     @classmethod
     def normalize_arrays(cls, value: Any) -> Any:
         return tuple(value) if isinstance(value, list) else value

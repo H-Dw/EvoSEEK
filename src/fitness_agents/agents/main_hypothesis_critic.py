@@ -17,11 +17,17 @@ from fitness_agents.contracts.hypothesis_pipeline import (
     MainSynthesisEvidenceCard,
 )
 from fitness_agents.contracts.schemas import Hypothesis
+from fitness_agents.utils.progress import report_llm_id_bridge
 
 from .context_projection import main_context_payload
 from .profile_loader import load_role_profile
 from .remote_llm import create_openai_client, resolve_model
-from .short_ids import ShortIdMap, rewrite_exact_ids
+from .short_ids import (
+    FieldIdPolicy,
+    RequestScopedIdBridge,
+    ShortIdMap,
+    rewrite_exact_ids,
+)
 from .structured_completion import complete_structured
 from .transports import OpenAICompatibleChatTransport
 
@@ -168,6 +174,17 @@ class RemoteMainHypothesisCritic:
             raise UnknownEvidenceIdsError(unknown, visible)
         approved_payload, conflict_payload = main_context_payload(approved, conflicts)
         evidence_ids = ShortIdMap.build(tuple(sorted(visible)), prefix="E")
+        bridge = RequestScopedIdBridge(
+            scope_id=f"MC-{hypothesis.hypothesis_id}",
+            role="main_hypothesis_critic",
+            schema_name="MainReviewBody",
+            namespaces={"E": evidence_ids},
+            field_policies={
+                "cited_evidence_ids[]": FieldIdPolicy("E", "normalize"),
+                "issues[].evidence_ids[]": FieldIdPolicy("E", "normalize"),
+            },
+        )
+        report_llm_id_bridge(round_id=0, **bridge.audit_payload())
         model_hypothesis = replace(
             hypothesis,
             evidence_ids=tuple(
@@ -224,10 +241,10 @@ class RemoteMainHypothesisCritic:
             ],
             output_type=MainReviewBody,
             contextual_validator=lambda value: validate_main_review(
-                value,
-                hypothesis=model_hypothesis,
+                bridge.decode_and_validate(value),
+                hypothesis=hypothesis,
                 approved=approved,
-                evidence_universe=model_universe,
+                evidence_universe=evidence_universe,
             ),
             temperature=self.temperature,
             max_tokens=self.max_tokens,
@@ -251,15 +268,17 @@ class RemoteMainHypothesisCritic:
             trace_context={
                 "role": "main_hypothesis_critic",
                 "profile": self.profile_name,
+                "id_bridge_scope": bridge.scope_id,
             },
         )
-        decoded = rewrite_exact_ids(body.model_dump(mode="json"), evidence_ids, decode=True)
+        decoded = body.model_dump(mode="json")
         validate_main_review(
             decoded,
             hypothesis=hypothesis,
             approved=approved,
             evidence_universe=evidence_universe,
         )
+        report_llm_id_bridge(round_id=0, **bridge.audit_payload())
         return MainReviewOutput(
             **decoded,
             decision_id=f"MC-{hypothesis.hypothesis_id}",

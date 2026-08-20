@@ -5,7 +5,7 @@ from collections.abc import Callable
 
 from .contracts import DocumentChunk, ParsedDocument
 
-CHUNKER_VERSION = "markdown-token-atomic-v2"
+CHUNKER_VERSION = "markdown-token-atomic-v3-full-document-id"
 TokenCounter = Callable[[str], int]
 
 
@@ -83,10 +83,11 @@ def _overlap_start(
 
 def _chunk_id(document: ParsedDocument, start: int, end: int, text: str) -> str:
     del text
-    document_label = re.sub(
-        r"[^A-Za-z0-9]+", "-", document.document_id.rsplit(":", 1)[-1]
-    ).strip("-")[:18]
-    return f"chunk:CHK-{document_label}-{start:06X}-{end - start:05X}"
+    revision = document.file_hash[:12].upper()
+    return (
+        f"chunk:{document.document_id}:REV-{revision}:"
+        f"{start:08X}:{end - start:08X}"
+    )
 
 
 def chunk_document(

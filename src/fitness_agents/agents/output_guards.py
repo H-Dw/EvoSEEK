@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 TRUNCATION_FINISH_REASONS = frozenset({"length", "max_tokens", "max_output_tokens"})
-MAX_OUTPUT_TOKENS = 20000
+MAX_OUTPUT_TOKENS = 131072
 ALLOWED_EVIDENCE_RETRY_CAP = 24
 FAILURE_KINDS = (
     "truncated",

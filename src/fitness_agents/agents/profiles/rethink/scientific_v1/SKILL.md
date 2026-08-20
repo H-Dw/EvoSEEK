@@ -82,12 +82,17 @@ candidate and no other variant. Each reflection must contain
 eight `dimension_assessments`, one for each required dimension. The runtime owns and injects the
 batch-level assessment; do not return or reinterpret it.
 
-- Keep `summary`, `revised_reason`, and `next_round_advice` at or under 400 characters.
+- Target 300-900 characters for `summary`, `revised_reason`, and `next_round_advice`; the
+  generated schema permits up to 2000 characters. For dimension-group calls, target 250-800
+  characters for each `finding` and `implication` and no more than 2400 characters for
+  `group_advice`. Prefer complete, sample-specific statements over repeated background.
 - Use only `support`, `conflict`, `mixed`, or `inconclusive` as `candidate_relation`.
 - Never change, reinterpret, or vote against the supplied batch assessment status.
 - Advice must select one allow-listed `next_round_action`; prose cannot create a new threshold,
   hard constraint, or mutation requirement.
-- Preserve the supplied candidate identifiers exactly.
+- For every dimension, also return a `relation_to_sample_rationale`, a concise `finding_code`,
+  and `quality_status=model`; do not infer a positive or negative relation when evidence is absent.
+- Preserve the supplied request-local candidate and evidence identifiers exactly.
 - Return JSON only, without Markdown fences or hidden reasoning.
 
 ## 6. Prohibited behavior

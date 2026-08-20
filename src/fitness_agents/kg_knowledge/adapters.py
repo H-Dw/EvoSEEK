@@ -1498,10 +1498,8 @@ class LocalRAGKnowledgeAdapter:
 
     @staticmethod
     def _chunk_source_id(document_id: str, chunk_id: str) -> str:
-        normalized_document = (
-            document_id if document_id.startswith("localdoc:") else f"localdoc:{document_id}"
-        )
-        return f"{normalized_document}:{chunk_id}"
+        del document_id
+        return f"source:local_rag:{chunk_id}"
 
     def extract(self, context: BuildContext) -> KnowledgeBatch:
         results = tuple(context.resources.get("local_retrieval_results", ()))
@@ -1646,7 +1644,11 @@ class LocalRAGKnowledgeAdapter:
                     confidence=claim.confidence,
                     valid_from_round=result.round_id,
                 )
-                evidence_id = f"ev:local_rag:{supporting_chunks[0].chunk_id.split(':', 1)[-1]}"
+                evidence_id = stable_record_id(
+                    "local-rag-evidence",
+                    claim.claim_id,
+                    supporting_chunks[0].chunk_id,
+                )
                 evidence_entity_id = f"evidence:{evidence_id}"
                 entities[evidence_entity_id] = EntityRecord(
                     entity_id=evidence_entity_id,
@@ -1849,6 +1851,7 @@ class ValidationKnowledgeAdapter:
                     "advisory_only": reflection.advisory_only,
                     "selection_eligible": reflection.selection_eligible,
                     "dimension_assessments": reflection.dimension_assessments,
+                    "dimension_group_advice": reflection.dimension_group_advice,
                 },
                 (f"agent:{reflection.provider}",),
                 "rethink_agent",

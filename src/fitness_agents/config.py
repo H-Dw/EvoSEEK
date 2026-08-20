@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any
@@ -176,6 +177,7 @@ class KnowledgeProviderConfig:
 @dataclass(frozen=True)
 class LocalKnowledgeRootConfig:
     path: Path
+    root_id: str | None = None
     include: tuple[str, ...] = (
         "**/*.md",
         "**/*.txt",
@@ -195,6 +197,13 @@ class LocalKnowledgeRootConfig:
         if "://" in raw_path or raw_path.casefold().startswith(("http:", "https:")):
             raise ValueError("Local knowledge roots must be filesystem paths, not URLs")
         object.__setattr__(self, "path", Path(self.path))
+        if self.root_id is not None:
+            normalized_root_id = str(self.root_id).strip().upper()
+            if not re.fullmatch(r"[A-Z][A-Z0-9_-]{0,63}", normalized_root_id):
+                raise ValueError(
+                    "Local knowledge root_id must be an uppercase short identifier"
+                )
+            object.__setattr__(self, "root_id", normalized_root_id)
         object.__setattr__(self, "include", tuple(str(item) for item in self.include))
         object.__setattr__(self, "exclude", tuple(str(item) for item in self.exclude))
         if not self.include:
@@ -581,6 +590,7 @@ class LocalKnowledgeConfig:
     )
     leakage_guard: LeakageGuardConfig | dict[str, Any] = field(default_factory=LeakageGuardConfig)
     allow_remote_context: bool = False
+    corpus_mode: str = "build_or_refresh"
 
     def __post_init__(self) -> None:
         for name in ("index_path", "corpus_index_path", "retrieval_overlay_path"):
@@ -608,6 +618,10 @@ class LocalKnowledgeConfig:
             self.leakage_guard = LeakageGuardConfig(**dict(self.leakage_guard))
         if self.enabled and not self.roots:
             raise ValueError("Enabled local knowledge requires at least one configured root")
+        if self.corpus_mode not in {"build_or_refresh", "read_only_prebuilt"}:
+            raise ValueError(
+                "local knowledge corpus_mode must be build_or_refresh or read_only_prebuilt"
+            )
 
 
 @dataclass
@@ -1206,8 +1220,8 @@ class CriticConfig:
             raise ValueError("critic.request_timeout_seconds must be positive")
         if self.max_input_chars < 4096:
             raise ValueError("critic.max_input_chars must be at least 4096")
-        if self.max_tokens is not None and not 1 <= self.max_tokens <= 20000:
-            raise ValueError("critic.max_tokens must be between 1 and 20000")
+        if self.max_tokens is not None and not 1 <= self.max_tokens <= 131072:
+            raise ValueError("critic.max_tokens must be between 1 and 131072")
         if self.min_batch_distance < 0:
             raise ValueError("critic.min_batch_distance must be non-negative")
         if self.on_reject not in {"abort_round", "safe_fallback"}:
@@ -1237,11 +1251,14 @@ class LLMConfig:
     request_timeout_seconds: float = 120.0
     allow_unknown_evidence_stripping: bool = False
     max_input_chars: int = 80000
-    rethink_max_tokens: int = 20000
+    rethink_max_tokens: int = 49152
+    rethink_render_max_tokens: int = 32768
+    rethink_reasoning_effort: str | None = None
+    rethink_thinking: str = "disabled"
     rethink_reasoning_batch_size: int = 1
     rethink_max_parallel_batches: int = 8
-    rethink_max_calls_per_round: int = 160
-    rethink_call_reserve: int = 80
+    rethink_max_calls_per_round: int = 256
+    rethink_call_reserve: int = 96
     rethink_dimension_parallel: bool = True
 
     def __post_init__(self) -> None:
@@ -1262,10 +1279,14 @@ class LLMConfig:
             raise ValueError("llm.request_timeout_seconds must be positive")
         if self.max_input_chars < 4096:
             raise ValueError("llm.max_input_chars must be at least 4096")
-        if self.max_tokens is not None and not 1 <= self.max_tokens <= 20000:
-            raise ValueError("llm.max_tokens must be between 1 and 20000")
-        if not 1 <= self.rethink_max_tokens <= 20000:
-            raise ValueError("llm.rethink_max_tokens must be between 1 and 20000")
+        if self.max_tokens is not None and not 1 <= self.max_tokens <= 131072:
+            raise ValueError("llm.max_tokens must be between 1 and 131072")
+        if not 1 <= self.rethink_max_tokens <= 131072:
+            raise ValueError("llm.rethink_max_tokens must be between 1 and 131072")
+        if not 1 <= self.rethink_render_max_tokens <= 131072:
+            raise ValueError("llm.rethink_render_max_tokens must be between 1 and 131072")
+        if self.rethink_thinking not in {"enabled", "disabled"}:
+            raise ValueError("llm.rethink_thinking must be enabled or disabled")
         if not 1 <= self.rethink_reasoning_batch_size <= 8:
             raise ValueError("llm.rethink_reasoning_batch_size must be between 1 and 8")
         if not 1 <= self.rethink_max_parallel_batches <= 16:
@@ -1303,9 +1324,9 @@ class HierarchicalHypothesisConfig:
     )
     main_scientist_profile: str = "synthesis_v1"
     main_critic_profile: str = "hypothesis_v1"
-    child_max_tokens: int = 20000
-    child_critic_max_tokens: int = 20000
-    main_critic_max_tokens: int = 20000
+    child_max_tokens: int = 32768
+    child_critic_max_tokens: int = 32768
+    main_critic_max_tokens: int = 32768
     main_max_input_chars: int | None = None
     child_max_input_chars: int | None = None
     critic_max_input_chars: int | None = None
@@ -1345,8 +1366,8 @@ class HierarchicalHypothesisConfig:
             self.child_max_tokens,
             self.child_critic_max_tokens,
             self.main_critic_max_tokens,
-        ) > 20000:
-            raise ValueError("hierarchical role token budgets cannot exceed 20000")
+        ) > 131072:
+            raise ValueError("hierarchical role token budgets cannot exceed 131072")
         input_budgets = (
             self.main_max_input_chars,
             self.child_max_input_chars,

@@ -529,6 +529,8 @@ def complete_json(
     repair_hints: dict[str, tuple[str, ...] | list[str]] | None = None,
     trace_context: dict[str, Any] | None = None,
     preserve_thinking_on_retry: bool = False,
+    attempt_guard: Callable[[dict[str, Any]], None] | None = None,
+    attempt_release: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Request one typed object with separate transport/repair retry budgets."""
 
@@ -539,7 +541,7 @@ def complete_json(
     # rewrites identifier-bearing payloads after validation.
     del allow_unknown_evidence_stripping
     load_project_env()
-    token_budget = max_tokens or int(os.environ.get("FITNESS_AGENTS_LLM_MAX_TOKENS", "20000"))
+    token_budget = max_tokens or int(os.environ.get("FITNESS_AGENTS_LLM_MAX_TOKENS", "32768"))
     if not 1 <= token_budget <= MAX_OUTPUT_TOKENS:
         raise ValueError(
             f"max_tokens must be between 1 and {MAX_OUTPUT_TOKENS}; got {token_budget}"
@@ -673,6 +675,14 @@ def complete_json(
             extra_body["thinking"] = {"type": policy.thinking}
         if extra_body:
             kwargs["extra_body"] = extra_body
+        attempt_metadata = {
+            "model": model,
+            "attempt": request_attempt,
+            "completion_stage": trace_fields.get("completion_stage", "single"),
+            "request_id": trace_fields.get("request_id"),
+        }
+        if attempt_guard is not None:
+            attempt_guard(attempt_metadata)
         report_event(
             "llm_request_started",
             message=(
@@ -698,6 +708,7 @@ def complete_json(
         content = ""
         reasoning_content = ""
         usage: dict[str, Any] = {}
+        attempt_outcome = "failed"
         try:
             request_started_any = True
             with TimedHeartbeat(f"LLM {model} attempt {request_attempt + 1}"):
@@ -786,8 +797,11 @@ def complete_json(
                 profile=trace_fields.get("profile"),
                 profile_version=trace_fields.get("profile_version"),
             )
+            attempt_outcome = "accepted"
             return payload
         except Exception as error:  # noqa: BLE001 - retry JSON/thinking failures
+            if type(error).__name__ in {"CancelledError", "Cancelled"}:
+                attempt_outcome = "cancelled"
             last_error = error
             disposition = classify_request_failure(error)
             failure = classify_output_failure(
@@ -903,6 +917,12 @@ def complete_json(
                 current_messages = retry_messages
             request_attempt += 1
             continue
+        finally:
+            attempt_metadata["usage"] = dict(usage)
+            attempt_metadata["finish_reason"] = finish_reason
+            attempt_metadata["outcome"] = attempt_outcome
+            if attempt_release is not None:
+                attempt_release(attempt_metadata)
         request_attempt += 1
     report_event(
         "llm_request_failed",

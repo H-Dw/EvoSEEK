@@ -5,6 +5,7 @@ import threading
 import time
 
 from fitness_agents.agents import rethink as rethink_module
+from fitness_agents.agents.output_contracts import ReThinkDimensionGroupOutput
 from fitness_agents.agents.rethink import NativeReThinkClient
 from fitness_agents.contracts.agent_io import ReThinkContextInput
 
@@ -209,10 +210,12 @@ def test_rethink_deepseek_defaults_use_bounded_output_and_batch_size(monkeypatch
     monkeypatch.setattr(rethink_module, "create_openai_client", lambda **_kwargs: object())
     client = NativeReThinkClient(model="deepseek-chat", provider="deepseek")
 
-    assert client.max_tokens == 20000
+    assert client.max_tokens == 32768
+    assert client.render_max_tokens == 32768
     assert client.reasoning_batch_size == 1
     assert client.max_parallel_batches == 8
     assert client.dimension_parallel is True
+    assert client.thinking == "disabled"
 
 
 def test_rethink_parallel_dimension_groups_cover_every_sample(monkeypatch) -> None:
@@ -245,3 +248,111 @@ def test_rethink_parallel_dimension_groups_cover_every_sample(monkeypatch) -> No
     assert [item.variant_id for item in output] == ["V00", "V01"]
     assert all(len(item.dimension_assessments) == 8 for item in output)
     assert all(call["max_tokens"] == 20000 for call in transport_client.calls)
+
+
+def test_rethink_dimension_text_has_headroom_beyond_legacy_400_chars() -> None:
+    long_finding = "F" * 1200
+    long_implication = "I" * 1200
+    output = ReThinkDimensionGroupOutput.model_validate(
+        {
+            "variant_id": "S01",
+            "dimension_assessments": [
+                {
+                    "dimension": dimension,
+                    "evidence_status": "context",
+                    "relation_to_sample_rationale": "mixed",
+                    "finding_code": "bounded_long_form",
+                    "finding": long_finding,
+                    "implication": long_implication,
+                }
+                for dimension in ("measured_function", "edit_level_direction")
+            ],
+            "group_advice": "A" * 2000,
+        }
+    )
+
+    assert len(output.dimension_assessments[0].finding) == 1200
+    assert len(output.group_advice) == 2000
+
+
+def test_one_rethink_dimension_group_failure_degrades_only_that_group(monkeypatch) -> None:
+    transport_client = _DimensionClient()
+    monkeypatch.setattr(
+        rethink_module,
+        "create_openai_client",
+        lambda **_kwargs: transport_client,
+    )
+    client = NativeReThinkClient(
+        model="deepseek-v4-flash",
+        provider="deepseek",
+        thinking="disabled",
+        max_tokens=20000,
+        max_transport_retries=0,
+        max_truncation_retries=0,
+        max_syntax_retries=0,
+        max_schema_retries=0,
+        max_semantic_retries=0,
+        max_unknown_evidence_retries=0,
+        max_parallel_batches=4,
+        dimension_parallel=True,
+    )
+    original = client._reflect_dimension_group
+
+    def one_failure(**kwargs):
+        if kwargs["group_name"] == "sequence_and_physchem":
+            raise ValueError("synthetic group failure")
+        return original(**kwargs)
+
+    monkeypatch.setattr(client, "_reflect_dimension_group", one_failure)
+    output = client.reflect_round(context=_context(1))
+
+    assert len(output) == 1
+    assert len(output[0].dimension_assessments) == 8
+    degraded = [
+        item
+        for item in output[0].dimension_assessments
+        if item["quality_status"] == "deterministic_fallback"
+    ]
+    assert {item["dimension"] for item in degraded} == {
+        "sequence_interaction_context",
+        "physicochemical_context",
+    }
+    assert output[0].quality_status == "deterministic_fallback"
+
+
+def test_attempt_budget_aggregates_outcomes_and_provider_usage() -> None:
+    budget = rethink_module.LLMAttemptBudget(
+        limit=4,
+        reserve=1,
+        concurrency_limit=2,
+        provider="unit-test-provider",
+    )
+    accepted = {"completion_stage": "single"}
+    budget.consume(accepted)
+    accepted.update(
+        {
+            "outcome": "accepted",
+            "usage": {
+                "prompt_tokens": 11,
+                "completion_tokens": 7,
+                "total_tokens": 18,
+            },
+        }
+    )
+    budget.release(accepted)
+    failed = {"completion_stage": "repair"}
+    budget.consume(failed)
+    failed.update({"outcome": "failed", "usage": {}})
+    budget.release(failed)
+
+    snapshot = budget.snapshot()
+    assert snapshot["consumed"] == 2
+    assert snapshot["accepted"] == 1
+    assert snapshot["failed"] == 1
+    assert snapshot["cancelled"] == 0
+    assert snapshot["tokens"] == {
+        "prompt_tokens": 11,
+        "completion_tokens": 7,
+        "total_tokens": 18,
+    }
+    assert snapshot["by_stage"] == {"single": 1, "repair": 1}

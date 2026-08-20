@@ -72,6 +72,7 @@ def complete_structured(
     contextual_validator: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
     temperature: float = 0.0,
     max_tokens: int | None = None,
+    render_max_tokens: int | None = None,
     reasoning_effort: str | None = None,
     thinking: str | None = None,
     retries: int = 2,
@@ -90,6 +91,8 @@ def complete_structured(
     trace_context: dict[str, Any] | None = None,
     reasoning_truncation_retries: int | None = None,
     preserve_reasoning_on_retry: bool = True,
+    attempt_guard: Callable[[dict[str, Any]], None] | None = None,
+    attempt_release: Callable[[dict[str, Any]], None] | None = None,
 ) -> OutputT:
     """Parse, validate and context-check inside one bounded retry boundary."""
 
@@ -138,6 +141,8 @@ def complete_structured(
             max_input_chars=max_input_chars,
             trace_context={**(trace_context or {}), "completion_stage": "reasoning_draft"},
             preserve_thinking_on_retry=preserve_reasoning_on_retry,
+            attempt_guard=attempt_guard,
+            attempt_release=attempt_release,
         )
         try:
             normalized_draft = validate(draft)
@@ -175,7 +180,7 @@ def complete_structured(
         messages=effective_messages,
         schema=generated_schema,
         temperature=temperature,
-        max_tokens=max_tokens,
+        max_tokens=render_max_tokens or max_tokens,
         reasoning_effort=effective_effort,
         thinking=effective_thinking,
         retries=retries,
@@ -195,5 +200,7 @@ def complete_structured(
             **(trace_context or {}),
             "completion_stage": "json_render" if reasoning_then_render else "single",
         },
+        attempt_guard=attempt_guard,
+        attempt_release=attempt_release,
     )
     return output_type.model_validate(payload)

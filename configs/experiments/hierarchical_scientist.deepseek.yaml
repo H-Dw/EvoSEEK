@@ -101,9 +101,9 @@ hierarchical_hypothesis:
     structure: structure_v1
   main_scientist_profile: synthesis_v1
   main_critic_profile: hypothesis_v1
-  child_max_tokens: 20000
-  child_critic_max_tokens: 20000
-  main_critic_max_tokens: 20000
+  child_max_tokens: 32768
+  child_critic_max_tokens: 32768
+  main_critic_max_tokens: 32768
   main_max_input_chars: 160000
   child_max_input_chars: 120000
   critic_max_input_chars: 120000

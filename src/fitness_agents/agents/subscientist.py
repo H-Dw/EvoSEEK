@@ -15,7 +15,7 @@ from fitness_agents.contracts.hypothesis_pipeline import (
     ChannelEvidenceInput,
     PhyschemInterpretationOutput,
 )
-from fitness_agents.utils.progress import report_event
+from fitness_agents.utils.progress import report_event, report_llm_id_bridge
 
 from .adaptive_batch import (
     AdaptiveBatchExecutionError,
@@ -31,7 +31,12 @@ from .remote_llm import (
     reset_completion_receipt,
     resolve_model,
 )
-from .short_ids import ShortIdMap, rewrite_exact_ids
+from .short_ids import (
+    FieldIdPolicy,
+    RequestScopedIdBridge,
+    ShortIdMap,
+    rewrite_exact_ids,
+)
 from .structured_completion import complete_structured
 from .transports import OpenAICompatibleChatTransport
 
@@ -790,6 +795,27 @@ class RemoteSubScientist:
         fact_id_map = ShortIdMap.build(
             tuple(sorted(context.descriptor_fact_by_id)), prefix="F"
         )
+        bridge = RequestScopedIdBridge(
+            scope_id=f"SS-{context.channel}-{batch_id}",
+            role=f"subscientist:{context.channel}",
+            schema_name=(
+                "PhyschemInterpretationOutput"
+                if context.channel == "physchem"
+                else "ChannelAnalysisOutput"
+            ),
+            namespaces={"S": sample_id_map, "E": evidence_ids, "F": fact_id_map},
+            field_policies={
+                "sample_ids[]": FieldIdPolicy("S", "unique_near"),
+                "evidence_ids[]": FieldIdPolicy("E", "normalize"),
+                "fact_ids[]": FieldIdPolicy("F", "normalize"),
+                "findings[].evidence_ids[]": FieldIdPolicy("E", "normalize"),
+                "findings[].fact_ids[]": FieldIdPolicy("F", "normalize"),
+                "candidate_hypotheses[].evidence_ids[]": FieldIdPolicy(
+                    "E", "normalize"
+                ),
+            },
+        )
+        report_llm_id_bridge(round_id=context.round_id, **bridge.audit_payload())
         model_context = ChannelEvidenceInput.model_validate(
             rewrite_exact_ids(
                 context.model_dump(mode="python"), evidence_ids, sample_id_map, fact_id_map
@@ -858,11 +884,15 @@ class RemoteSubScientist:
             ],
             output_type=output_type,
             contextual_validator=(
-                (lambda value: validate_physchem_interpretation(value, context=context))
+                (
+                    lambda value: validate_physchem_interpretation(
+                        bridge.decode_and_validate(value), context=context
+                    )
+                )
                 if physchem
                 else (
                     lambda value: validate_channel_hypothesis(
-                        value, context=model_context
+                        bridge.decode_and_validate(value), context=context
                     )
                 )
             ),
@@ -907,6 +937,7 @@ class RemoteSubScientist:
                 "subscientist_batch_id": batch_id,
                 "subscientist_batch_size": len(sample_ids),
                 "subscientist_split_depth": split_depth,
+                "id_bridge_scope": bridge.scope_id,
             },
         )
         receipt = completion_receipt_snapshot()
@@ -915,33 +946,18 @@ class RemoteSubScientist:
                 _materialize_physchem_analysis(
                     context=context,
                     explanation=PhyschemInterpretationOutput.model_validate(
-                        rewrite_exact_ids(
-                            PhyschemInterpretationOutput.model_validate(model_output).model_dump(
-                                mode="json"
-                            ),
-                            evidence_ids,
-                            sample_id_map,
-                            fact_id_map,
-                            decode=True,
-                        )
+                        model_output
                     ),
                     batch_id=batch_id,
                 )
                 if physchem
                 else ChannelAnalysisOutput.model_validate(
-                    rewrite_exact_ids(
-                        ChannelAnalysisOutput.model_validate(model_output).model_dump(
-                            mode="json"
-                        ),
-                        evidence_ids,
-                        sample_id_map,
-                        fact_id_map,
-                        decode=True,
-                    )
+                    model_output
                 )
             )
             if not physchem:
                 validate_channel_hypothesis(output.model_dump(mode="json"), context=context)
+            report_llm_id_bridge(round_id=context.round_id, **bridge.audit_payload())
         except Exception as error:
             raise SubScientistPostprocessError(
                 f"local post-model materialization failed: {error}",

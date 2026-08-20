@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import json
 import re
-import threading
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
+from urllib.parse import quote
 
 
 class KnowledgeLayer(str, Enum):
@@ -33,38 +34,38 @@ class Modality(str, Enum):
     ONTOLOGY = "ontology"
 
 
-_SEMANTIC_ID_LOCK = threading.RLock()
-_SEMANTIC_ID_COLLISIONS: dict[str, dict[str, str]] = {}
-
-
 def stable_record_id(prefix: str, *parts: Any) -> str:
-    """Return a deterministic readable ID without a content-hash contract."""
+    """Return a process-order-independent semantic ID without a hash registry."""
 
-    def token(value: Any) -> str:
-        if isinstance(value, (list, tuple, set)):
-            raw = "-".join(token(item) for item in value)
-        elif isinstance(value, dict):
-            raw = "-".join(
-                f"{token(key)}-{token(item)}" for key, item in sorted(value.items())
+    def canonicalize(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                str(key): canonicalize(item)
+                for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+            }
+        if isinstance(value, (set, frozenset)):
+            normalized = [canonicalize(item) for item in value]
+            return sorted(
+                normalized,
+                key=lambda item: json.dumps(
+                    item, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+                ),
             )
-        else:
-            raw = str(value)
-        cleaned = re.sub(r"[^A-Za-z0-9]+", "-", raw).strip("-").upper() or "ITEM"
-        if len(cleaned) <= 18:
-            return cleaned
-        return f"{cleaned[:7]}-{cleaned[-7:]}-L{len(cleaned):03d}"
+        if isinstance(value, (list, tuple)):
+            return [canonicalize(item) for item in value]
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return value
+        return str(value)
 
-    label = token(prefix)[:12]
-    semantic_parts = "-".join(token(item) for item in parts)
-    base = f"{label}:{semantic_parts or 'ITEM'}"
-    canonical = repr(parts)
-    with _SEMANTIC_ID_LOCK:
-        bucket = _SEMANTIC_ID_COLLISIONS.setdefault(base, {})
-        if canonical in bucket:
-            return bucket[canonical]
-        identifier = base if not bucket else f"{base}-N{len(bucket) + 1:02d}"
-        bucket[canonical] = identifier
-        return identifier
+    label = re.sub(r"[^A-Za-z0-9_-]+", "-", str(prefix)).strip("-").upper()
+    label = label or "RECORD"
+    canonical = json.dumps(
+        canonicalize(parts),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return f"{label}:{quote(canonical, safe='-._~')}"
 
 
 @dataclass(frozen=True)

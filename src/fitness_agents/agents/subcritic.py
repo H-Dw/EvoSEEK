@@ -14,10 +14,16 @@ from fitness_agents.contracts.hypothesis_pipeline import (
     review_body_type,
     review_output_type,
 )
+from fitness_agents.utils.progress import report_llm_id_bridge
 
 from .profile_loader import load_role_profile
 from .remote_llm import create_openai_client, resolve_model
-from .short_ids import ShortIdMap, rewrite_exact_ids
+from .short_ids import (
+    FieldIdPolicy,
+    RequestScopedIdBridge,
+    ShortIdMap,
+    rewrite_exact_ids,
+)
 from .structured_completion import complete_structured
 from .subscientist import validate_channel_hypothesis
 from .transports import OpenAICompatibleChatTransport
@@ -189,6 +195,19 @@ class RemoteSubCritic:
         sample_ids = ShortIdMap.build(
             tuple(item.sample_id for item in context.visible_observations), prefix="S"
         )
+        attempt = int((context.retry_control or {}).get("attempt", 0))
+        bridge = RequestScopedIdBridge(
+            scope_id=f"SC-{context.channel}-R{context.round_id:02d}-A{attempt:02d}",
+            role=f"subcritic:{context.channel}",
+            schema_name=body_type.__name__,
+            namespaces={"S": sample_ids, "E": evidence_ids},
+            field_policies={
+                "sample_reviews[].sample_id": FieldIdPolicy("S", "unique_near"),
+                "cited_evidence_ids[]": FieldIdPolicy("E", "normalize"),
+                "issues[].evidence_ids[]": FieldIdPolicy("E", "normalize"),
+            },
+        )
+        report_llm_id_bridge(round_id=context.round_id, **bridge.audit_payload())
         model_context = ChannelEvidenceInput.model_validate(
             rewrite_exact_ids(context.model_dump(mode="python"), evidence_ids, sample_ids)
         )
@@ -235,7 +254,9 @@ class RemoteSubCritic:
             ],
             output_type=body_type,
             contextual_validator=lambda value: validate_subcritic_review(
-                value, context=model_context, hypothesis=model_hypothesis
+                bridge.decode_and_validate(value),
+                context=context,
+                hypothesis=hypothesis,
             ),
             temperature=self.temperature,
             max_tokens=self.max_tokens,
@@ -261,13 +282,12 @@ class RemoteSubCritic:
                 "round_id": context.round_id,
                 "role": f"subcritic:{context.channel}",
                 "profile": self.profile_name,
+                "id_bridge_scope": bridge.scope_id,
             },
         )
-        attempt = int((context.retry_control or {}).get("attempt", 0))
-        decoded = rewrite_exact_ids(
-            body.model_dump(mode="json"), evidence_ids, sample_ids, decode=True
-        )
+        decoded = body.model_dump(mode="json")
         validate_subcritic_review(decoded, context=context, hypothesis=hypothesis)
+        report_llm_id_bridge(round_id=context.round_id, **bridge.audit_payload())
         return output_type(
             **decoded,
             decision_id=f"SC-{context.channel[:2].upper()}-A{attempt:02d}",

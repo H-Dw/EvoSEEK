@@ -42,6 +42,8 @@ class ProgressTarget(Protocol):
 
     def record_llm_conversation(self, payload: Mapping[str, Any]) -> None: ...
 
+    def record_llm_id_bridge(self, payload: Mapping[str, Any]) -> None: ...
+
 
 _current: ContextVar[ProgressTarget | None] = ContextVar("fitness_agents_progress", default=None)
 
@@ -150,6 +152,17 @@ def report_llm_conversation(**payload: Any) -> None:
     if target is None:
         return
     recorder = getattr(target, "record_llm_conversation", None)
+    if callable(recorder):
+        recorder(payload)
+
+
+def report_llm_id_bridge(**payload: Any) -> None:
+    """Persist one request-local alias map and its resolution receipts."""
+
+    target = _current.get()
+    if target is None:
+        return
+    recorder = getattr(target, "record_llm_id_bridge", None)
     if callable(recorder):
         recorder(payload)
 

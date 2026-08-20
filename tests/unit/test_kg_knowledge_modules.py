@@ -22,6 +22,7 @@ from fitness_agents.kg_knowledge import (
     RelationRecord,
     SiteFeatureKnowledgeAdapter,
     StaticKnowledgeAdapter,
+    stable_record_id,
 )
 from fitness_agents.plugin_registry import PluginRegistry
 
@@ -419,3 +420,13 @@ def test_effect_estimates_require_visible_matched_backgrounds():
         "MutationInteraction",
         "EffectEstimate",
     }.intersection(item.entity_type for item in batch.entities)
+
+
+def test_semantic_record_ids_are_order_independent_and_collision_free():
+    first = stable_record_id("relation", "ABCDEFGH-one-tail", {"b", "a"})
+    second = stable_record_id("relation", "ABCDEFGH-one-tail", {"a", "b"})
+    colliding_old_slug = stable_record_id("relation", "ABCDEFGH-two-tail", {"a", "b"})
+
+    assert first == second
+    assert first != colliding_old_slug
+    assert "N02" not in first

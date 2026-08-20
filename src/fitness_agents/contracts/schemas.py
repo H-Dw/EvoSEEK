@@ -228,6 +228,7 @@ class ReThinkReflection:
     selection_eligible: bool = False
     next_round_action: str = "no_change"
     dimension_assessments: tuple[dict[str, Any], ...] = ()
+    dimension_group_advice: tuple[dict[str, str], ...] = ()
 
 
 @dataclass(frozen=True)

@@ -29,8 +29,10 @@ shown in `id_maps`; local code resolves canonical records and citation closure.
 ## Output
 
 Return generated `PhyschemInterpretationOutput` JSON only: `analysis_summary`, zero to eight short
-`interpretations`, zero to four `counterevidence` statements, and `uncertainty`. The runtime will
-materialize the final `ChannelAnalysisOutput` by joining this bounded prose with its typed
-descriptor observation cards.
+`interpretations`, zero to four `counterevidence` statements, `uncertainty`, and the exact
+request-local `sample_ids`, `evidence_ids`, and `fact_ids` actually referenced by the analysis.
+These ID arrays may be empty when no corresponding reference is needed. The runtime will
+materialize the final `ChannelAnalysisOutput` by resolving these labels and joining the bounded
+prose with typed descriptor observation cards.
 
-Example: `{"analysis_summary":"The visible cards show bounded descriptor shifts.","interpretations":["The charge and hydropathy shifts point in different physicochemical directions."],"counterevidence":[],"uncertainty":"Descriptor direction alone does not establish assay performance or mechanism."}`
+Example: `{"analysis_summary":"The visible cards show bounded descriptor shifts.","interpretations":["The charge and hydropathy shifts point in different physicochemical directions."],"counterevidence":[],"uncertainty":"Descriptor direction alone does not establish assay performance or mechanism.","sample_ids":["S01"],"evidence_ids":["E01"],"fact_ids":["F01","F02"]}`

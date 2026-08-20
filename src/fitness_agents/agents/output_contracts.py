@@ -22,7 +22,9 @@ from fitness_agents.contracts.hypothesis_pipeline import SynthesisAbstention
 from fitness_agents.contracts.schemas import Hypothesis, ReThinkReflection
 
 HYPOTHESIS_TEXT_MAX = 400
-RETHINK_TEXT_MAX = 400
+RETHINK_TEXT_MAX = 2000
+RETHINK_DIMENSION_TEXT_MAX = 1600
+RETHINK_GROUP_ADVICE_MAX = 2400
 EVIDENCE_ID_MAX = 12
 
 
@@ -355,6 +357,22 @@ MainSynthesisResult = Annotated[
     SynthesizedHypothesisOutput | NoSupportedHypothesisOutput,
     Field(discriminator="outcome"),
 ]
+ReThinkDimensionText = Annotated[
+    str,
+    StringConstraints(
+        strip_whitespace=True,
+        min_length=1,
+        max_length=RETHINK_DIMENSION_TEXT_MAX,
+    ),
+]
+ReThinkGroupAdviceText = Annotated[
+    str,
+    StringConstraints(
+        strip_whitespace=True,
+        min_length=1,
+        max_length=RETHINK_GROUP_ADVICE_MAX,
+    ),
+]
 
 
 class MainSynthesisOutput(RootModel[MainSynthesisResult]):
@@ -439,8 +457,13 @@ class ReThinkDimensionAssessmentOutput(BaseModel):
         "uncertainty_domain_shift",
     ]
     evidence_status: Literal["measured", "dry", "context", "mixed", "missing"]
-    finding: ReThinkText
-    implication: ReThinkText
+    relation_to_sample_rationale: Literal[
+        "positive", "negative", "mixed", "unresolved"
+    ] = "unresolved"
+    finding_code: str = Field(default="unresolved", min_length=1, max_length=80)
+    finding: ReThinkDimensionText
+    implication: ReThinkDimensionText
+    quality_status: Literal["model", "deterministic_fallback"] = "model"
 
 
 class ReThinkItemsOutput(BaseModel):
@@ -479,7 +502,7 @@ class ReThinkDimensionGroupOutput(BaseModel):
     dimension_assessments: list[ReThinkDimensionAssessmentOutput] = Field(
         min_length=2, max_length=2
     )
-    group_advice: ReThinkText
+    group_advice: ReThinkGroupAdviceText
 
 
 class ReThinkBatchAssessmentOutput(BaseModel):

@@ -14,6 +14,7 @@ from fitness_agents.contracts.agent_io import ScientistContextInput
 from fitness_agents.contracts.evidence_universe import RoleVisibleEvidenceUniverse
 from fitness_agents.contracts.hypothesis_pipeline import SynthesisAbstention
 from fitness_agents.contracts.schemas import Evidence, Hypothesis
+from fitness_agents.utils.progress import report_llm_id_bridge
 
 from .output_contracts import (
     HypothesisBodyOutput,
@@ -23,7 +24,12 @@ from .output_contracts import (
     validate_main_synthesis_payload,
 )
 from .profile_loader import load_role_profile
-from .short_ids import ShortIdMap, rewrite_exact_ids
+from .short_ids import (
+    FieldIdPolicy,
+    RequestScopedIdBridge,
+    ShortIdMap,
+    rewrite_exact_ids,
+)
 from .structured_completion import complete_structured
 from .transports import OpenAICompatibleChatTransport
 
@@ -1283,6 +1289,19 @@ class NativeScientistClient:
         evidence_id_map = ShortIdMap.build(
             tuple(sorted(allowed_evidence_ids)), prefix="E"
         )
+        request_scope = str(
+            (trace_context or {}).get("request_id")
+            or f"SCI-R{int((trace_context or {}).get('round_id') or 0):02d}"
+        )
+        bridge = RequestScopedIdBridge(
+            scope_id=request_scope,
+            role="scientist",
+            schema_name="pending",
+            namespaces={"E": evidence_id_map},
+            field_policies={
+                "evidence_ids[]": FieldIdPolicy("E", "normalize"),
+            },
+        )
         model_allowed_evidence_ids = frozenset(
             evidence_id_map.encode(item) for item in allowed_evidence_ids
         )
@@ -1295,23 +1314,28 @@ class NativeScientistClient:
         )
         synthesis_contract = getattr(self, "profile_name", "scientific_v1") == "synthesis_v1"
         output_type = MainSynthesisOutput if synthesis_contract else HypothesisBodyOutput
+        bridge.schema_name = output_type.__name__
+        report_llm_id_bridge(
+            round_id=int((trace_context or {}).get("round_id") or 0),
+            **bridge.audit_payload(),
+        )
         generated_schema = output_type.model_json_schema()
         if synthesis_contract:
             contextual_validator = lambda value: validate_main_synthesis_payload(
-                value,
+                bridge.decode_and_validate(value),
                 expected_hypothesis_id=expected_id,
                 expected_parent_hypothesis_id=expected_parent_id,
-                allowed_evidence_ids=model_allowed_evidence_ids,
+                allowed_evidence_ids=allowed_evidence_ids,
                 expected_positions=exact_positions,
                 allowed_positions=allowed_positions,
                 max_positions=max_positions,
             )
         else:
             contextual_validator = lambda value: validate_hypothesis_payload(
-                value,
+                bridge.decode_and_validate(value),
                 expected_hypothesis_id=expected_id,
                 expected_parent_hypothesis_id=expected_parent_id,
-                allowed_evidence_ids=model_allowed_evidence_ids,
+                allowed_evidence_ids=allowed_evidence_ids,
                 expected_positions=exact_positions,
                 allowed_positions=allowed_positions,
                 max_positions=max_positions,
@@ -1363,28 +1387,19 @@ class NativeScientistClient:
                 "profile": getattr(self, "profile_name", "scientific_v1"),
                 "profile_version": getattr(self, "profile_version", None),
                 "schema_name": output_type.__name__,
+                "id_bridge_scope": bridge.scope_id,
             },
         )
+        report_llm_id_bridge(
+            round_id=int((trace_context or {}).get("round_id") or 0),
+            **bridge.audit_payload(),
+        )
         if synthesis_contract and isinstance(output.root, NoSupportedHypothesisOutput):
-            abstention = output.root.model_copy(
-                update={
-                    "evidence_ids": [
-                        evidence_id_map.decode(item) for item in output.root.evidence_ids
-                    ]
-                }
-            )
+            abstention = output.root
             return abstention.to_abstention(
                 allowed_evidence_ids=allowed_evidence_ids
             )
         hypothesis_output = output.root if synthesis_contract else output
-        hypothesis_output = hypothesis_output.model_copy(
-            update={
-                "evidence_ids": [
-                    evidence_id_map.decode(item)
-                    for item in hypothesis_output.evidence_ids
-                ]
-            }
-        )
         return hypothesis_output.to_hypothesis(
             expected_hypothesis_id=expected_id,
             expected_parent_hypothesis_id=expected_parent_id,

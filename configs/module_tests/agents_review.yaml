@@ -31,4 +31,4 @@ remote_llm:
   critic_model: deepseek-v4-flash
   reasoning_effort: high
   thinking: enabled
-  max_tokens: 20000
+  max_tokens: 32768

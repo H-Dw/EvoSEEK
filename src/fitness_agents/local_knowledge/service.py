@@ -31,10 +31,8 @@ class LocalKnowledgeBase:
 
     @staticmethod
     def _chunk_source_id(document_id: str, chunk_id: str) -> str:
-        normalized_document = (
-            document_id if document_id.startswith("localdoc:") else f"localdoc:{document_id}"
-        )
-        return f"{normalized_document}:{chunk_id}"
+        del document_id
+        return f"source:local_rag:{chunk_id}"
 
     def __init__(
         self,
@@ -79,7 +77,10 @@ class LocalKnowledgeBase:
                 config.kg_update.selection_calibration_path  # type: ignore[arg-type]
             )
         self.publication_catalog = PublicationCatalog.from_roots(config.roots)
-        self.index = SQLiteLocalKnowledgeIndex(corpus_path)
+        self.index = SQLiteLocalKnowledgeIndex(
+            corpus_path,
+            read_only=config.corpus_mode == "read_only_prebuilt",
+        )
         self.overlay = SQLiteRetrievalOverlay(selected_overlay_path)
         self.retriever = LocalHybridRetriever(
             self.index,
@@ -95,10 +96,13 @@ class LocalKnowledgeBase:
         ] = {}
 
     def refresh(self):
-        self.last_build_report = self.index.build(
-            self.config,
-            embedding_backend=self.embedding_backend,
-        )
+        if self.config.corpus_mode == "read_only_prebuilt":
+            self.last_build_report = self.index.prebuilt_report()
+        else:
+            self.last_build_report = self.index.build(
+                self.config,
+                embedding_backend=self.embedding_backend,
+            )
         quarantined = self.overlay.refresh_document_policy(
             corpus_manifest_hash=self.index.manifest_hash,
             documents=self.index.document_policy_inputs(),

@@ -247,7 +247,7 @@ class ChannelFinding(BaseModel):
 
 
 class PhyschemInterpretationOutput(BaseModel):
-    """Small prose-only response; descriptor cards and citations stay runtime-owned."""
+    """Bounded interpretation plus request-local sample/evidence/fact references."""
 
     model_config = ConfigDict(extra="forbid", strict=True)
 

@@ -127,6 +127,7 @@ CONDITION_SPECS: dict[str, ConditionSpec] = {
 ALLOWED_CONDITIONS = tuple(CONDITION_SPECS)
 DEFAULT_CONDITIONS = ("kg_base", "kg_base_rag", "kg_base_al", "kg_3features_rag")
 FORMAL_MAX_TOKENS = MAX_OUTPUT_TOKENS
+FORMAL_DEFAULT_MAX_TOKENS = 32768
 _RAG_LOCAL_TEMPLATE = None
 
 
@@ -358,6 +359,7 @@ def _local_knowledge_for_spec(
     return replace(
         template,
         enabled=True,
+        corpus_mode="read_only_prebuilt",
         retrieval_overlay_path=output_root.parent
         / "local_knowledge"
         / f"{spec.condition_id}-f{fold:02d}-overlay.sqlite",
@@ -375,6 +377,13 @@ def require_prebuilt_rag_corpus(conditions: Sequence[str]) -> None:
             "Build it before launching workers with: python -m fitness_agents.cli "
             "knowledge index configs/experiments/gb1_reasoning_routes_base.yaml"
         )
+    from fitness_agents.local_knowledge.index import SQLiteLocalKnowledgeIndex
+
+    index = SQLiteLocalKnowledgeIndex(corpus_path, read_only=True)
+    try:
+        index.prebuilt_report()
+    finally:
+        index.close()
 
 
 def required_tool_calls(
@@ -544,13 +553,13 @@ def audit_hierarchical_run(
             config.get("validation"),
         ),
         _check(
-            "llm_max_tokens_is_formal_budget",
-            int((config.get("llm") or {}).get("max_tokens") or 0) == FORMAL_MAX_TOKENS,
+            "llm_max_tokens_is_bounded_formal_budget",
+            1 <= int((config.get("llm") or {}).get("max_tokens") or 0) <= FORMAL_MAX_TOKENS,
             (config.get("llm") or {}).get("max_tokens"),
         ),
         _check(
-            "critic_max_tokens_is_formal_budget",
-            int((config.get("critic") or {}).get("max_tokens") or 0) == FORMAL_MAX_TOKENS,
+            "critic_max_tokens_is_bounded_formal_budget",
+            1 <= int((config.get("critic") or {}).get("max_tokens") or 0) <= FORMAL_MAX_TOKENS,
             (config.get("critic") or {}).get("max_tokens"),
         ),
         _check("rounds_match_protocol", int(config.get("rounds") or 0) == expected_rounds, config.get("rounds")),
@@ -731,9 +740,14 @@ def audit_hierarchical_run(
         checks.append(
             _check(
                 "child_role_max_tokens_are_formal_budget",
-                int(hierarchy.get("child_max_tokens") or 0) == FORMAL_MAX_TOKENS
-                and int(hierarchy.get("child_critic_max_tokens") or 0) == FORMAL_MAX_TOKENS
-                and int(hierarchy.get("main_critic_max_tokens") or 0) == FORMAL_MAX_TOKENS,
+                all(
+                    1 <= int(hierarchy.get(name) or 0) <= FORMAL_MAX_TOKENS
+                    for name in (
+                        "child_max_tokens",
+                        "child_critic_max_tokens",
+                        "main_critic_max_tokens",
+                    )
+                ),
                 {
                     "child_max_tokens": hierarchy.get("child_max_tokens"),
                     "child_critic_max_tokens": hierarchy.get("child_critic_max_tokens"),
@@ -808,7 +822,7 @@ def _build_jobs(
     output_root: Path,
     python_executable: str,
     placeholder_predictor: bool = False,
-    max_tokens: int = FORMAL_MAX_TOKENS,
+    max_tokens: int = FORMAL_DEFAULT_MAX_TOKENS,
     disable_batch_control_review: bool = False,
     disable_batch_diversity_review: bool = False,
 ) -> list[HierarchicalJob]:
@@ -1123,10 +1137,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-tokens",
         type=int,
-        default=FORMAL_MAX_TOKENS,
+        default=FORMAL_DEFAULT_MAX_TOKENS,
         help=(
             "Output token budget for Scientist, Critic, and hierarchical child roles. "
-            f"Default {FORMAL_MAX_TOKENS}."
+            f"Default {FORMAL_DEFAULT_MAX_TOKENS}; hard cap {FORMAL_MAX_TOKENS}."
         ),
     )
     parser.add_argument("--max-parallel", type=int, default=4)

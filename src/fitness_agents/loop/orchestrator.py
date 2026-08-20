@@ -408,20 +408,49 @@ class CampaignRunner:
             else None
         )
         self.task_context = ProteinTaskContext.from_task(config.task)
-        self.knowledge = KnowledgeEngine(
-            config.knowledge,
-            graph_path=self.writer.run_dir / "knowledge_graph.sqlite",
-            assay_id=config.task.assay_id,
-            protein_id=config.task.protein_id,
-            validation_config=config.validation,
-            structured_graph_path=self.writer.run_dir / "structured_kg.sqlite",
-            task_context=self.task_context,
-            protein_name=config.task.protein_name,
-            protein_aliases=config.task.protein_aliases,
-            protein_accessions=config.task.protein_accessions,
-            local_knowledge_enabled=config.knowledge_enabled,
-            snapshot_mode=config.structured_kg_snapshot_mode,
+        self.writer.report(
+            "knowledge_initialization_started",
+            message="Initializing knowledge runtime",
+            phase="initializing_knowledge",
+            round_id=0,
         )
+        try:
+            self.knowledge = KnowledgeEngine(
+                config.knowledge,
+                graph_path=self.writer.run_dir / "knowledge_graph.sqlite",
+                assay_id=config.task.assay_id,
+                protein_id=config.task.protein_id,
+                validation_config=config.validation,
+                structured_graph_path=self.writer.run_dir / "structured_kg.sqlite",
+                task_context=self.task_context,
+                protein_name=config.task.protein_name,
+                protein_aliases=config.task.protein_aliases,
+                protein_accessions=config.task.protein_accessions,
+                local_knowledge_enabled=config.knowledge_enabled,
+                snapshot_mode=config.structured_kg_snapshot_mode,
+            )
+        except Exception as error:
+            failure = {
+                "phase": "initializing_knowledge",
+                "error_type": type(error).__name__,
+                "error": str(error),
+                "corpus_mode": config.knowledge.local_knowledge.corpus_mode,
+                "corpus_index_path": str(
+                    config.knowledge.local_knowledge.corpus_index_path
+                    or config.knowledge.local_knowledge.index_path
+                    or ""
+                ),
+            }
+            self.writer.write_json("knowledge_initialization_failure.json", failure)
+            self.writer.report(
+                "knowledge_initialization_failed",
+                message="Knowledge runtime initialization failed",
+                phase="initializing_knowledge",
+                round_id=0,
+                error_type=type(error).__name__,
+                error=str(error),
+            )
+            raise
         self._scientist_local_context_allowed = bool(
             config.knowledge.local_knowledge.allow_remote_context or config.llm.provider == "mock"
         )
@@ -461,6 +490,9 @@ class CampaignRunner:
             profile=self.config.llm.profile,
             rethink_options={
                 "max_tokens": self.config.llm.rethink_max_tokens,
+                "render_max_tokens": self.config.llm.rethink_render_max_tokens,
+                "reasoning_effort": self.config.llm.rethink_reasoning_effort,
+                "thinking": self.config.llm.rethink_thinking,
                 "reasoning_batch_size": (
                     self.config.llm.rethink_reasoning_batch_size
                 ),
@@ -1139,6 +1171,7 @@ class CampaignRunner:
                 "parameters": self.config.knowledge.parameters,
                 "local_knowledge": {
                     "enabled": self.knowledge.local_knowledge is not None,
+                    "corpus_mode": self.config.knowledge.local_knowledge.corpus_mode,
                     "index_path": (
                         str(self.config.knowledge.local_knowledge.corpus_index_path)
                         if self.config.knowledge.local_knowledge.corpus_index_path is not None
@@ -1229,8 +1262,22 @@ class CampaignRunner:
                     self.config.llm.rethink_reasoning_batch_size
                 ),
                 "rethink_max_tokens": self.config.llm.rethink_max_tokens,
+                "rethink_render_max_tokens": (
+                    self.config.llm.rethink_render_max_tokens
+                ),
+                "rethink_reasoning_effort": (
+                    self.config.llm.rethink_reasoning_effort
+                ),
+                "rethink_thinking": self.config.llm.rethink_thinking,
                 "rethink_max_parallel_batches": (
                     self.config.llm.rethink_max_parallel_batches
+                ),
+                "rethink_max_calls_per_round": (
+                    self.config.llm.rethink_max_calls_per_round
+                ),
+                "rethink_call_reserve": self.config.llm.rethink_call_reserve,
+                "rethink_dimension_parallel": (
+                    self.config.llm.rethink_dimension_parallel
                 ),
                 "trace_role": "observability_only",
                 "scientific_state_source": "wet_dry_kg_artifact",
@@ -3708,6 +3755,17 @@ class CampaignRunner:
                 if criterion.primary
                 for variant_id in criterion.target_variant_ids
             }
+            sample_review_by_id = {
+                str(item.get("candidate_id")): dict(item)
+                for item in review_result.decision.sample_reviews
+                if isinstance(item, dict) and item.get("candidate_id")
+            }
+            missing_sample_reviews = sorted(set(selected_ids).difference(sample_review_by_id))
+            if missing_sample_reviews:
+                raise ValueError(
+                    "Final Critic sample_reviews do not cover selected ReThink samples; "
+                    f"missing={missing_sample_reviews}"
+                )
             rethink_context = ReThinkContextInput.model_validate(
                 {
                     "run_id": self.run_id,
@@ -3794,6 +3852,15 @@ class CampaignRunner:
                             "variant_id": variant_id,
                             "mutation_notation": public_by_id[variant_id].mutation_notation,
                             "agent_reason": selection_by_id[variant_id].reason,
+                            "feature_analysis": sample_review_by_id[variant_id].get(
+                                "feature_analysis", ""
+                            ),
+                            "critic_explanation": sample_review_by_id[variant_id].get(
+                                "critic_explanation", ""
+                            ),
+                            "critic_suggestions": list(
+                                sample_review_by_id[variant_id].get("suggestions", ())
+                            ),
                             "evidence_ids": list(selection_by_id[variant_id].evidence_ids),
                             "wet_value": revealed_by_id[variant_id].fitness,
                             "dry_validations": [

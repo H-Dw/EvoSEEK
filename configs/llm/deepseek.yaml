@@ -6,7 +6,7 @@ model: deepseek-v4-flash
 base_url: https://api.deepseek.com
 api_key: env:DEEPSEEK_API_KEY
 temperature: 0.0
-max_tokens: 20000
+max_tokens: 32768
 reasoning_effort: high
 thinking: enabled
 max_transport_retries: 2
@@ -19,9 +19,12 @@ retry_backoff_seconds: 1.0
 request_timeout_seconds: 120.0
 allow_unknown_evidence_stripping: false
 max_input_chars: 160000
-rethink_max_tokens: 20000
+rethink_max_tokens: 49152
+rethink_render_max_tokens: 32768
+rethink_reasoning_effort: null
+rethink_thinking: disabled
 rethink_reasoning_batch_size: 1
 rethink_max_parallel_batches: 8
-rethink_max_calls_per_round: 160
-rethink_call_reserve: 80
+rethink_max_calls_per_round: 256
+rethink_call_reserve: 96
 rethink_dimension_parallel: true

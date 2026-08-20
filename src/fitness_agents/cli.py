@@ -2,13 +2,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from dataclasses import asdict, replace
 from pathlib import Path
 
 from fitness_agents.config import load_experiment_config
 from fitness_agents.local_knowledge import LocalKnowledgeBase
-from fitness_agents.local_knowledge.index import SQLiteLocalKnowledgeIndex
+from fitness_agents.local_knowledge.api_backends import build_embedding_backend
+from fitness_agents.local_knowledge.index import (
+    SQLiteLocalKnowledgeIndex,
+    preflight_local_knowledge,
+)
 from fitness_agents.local_knowledge.overlay import SQLiteRetrievalOverlay
 from fitness_agents.loop import run_campaign
 from fitness_agents.protein_features import ProteinTaskContext
@@ -17,7 +22,7 @@ from fitness_agents.utils.progress import add_logging_arguments, configure_from_
 
 def _knowledge_command(argv: list[str]) -> None:
     parser = argparse.ArgumentParser(description="Manage an offline local knowledge index")
-    parser.add_argument("action", choices=("index", "inspect"))
+    parser.add_argument("action", choices=("index", "rebuild", "preflight", "inspect"))
     parser.add_argument("config", help="Experiment YAML path containing local_knowledge config")
     parser.add_argument("--index-path", type=Path)
     args = parser.parse_args(argv)
@@ -32,10 +37,13 @@ def _knowledge_command(argv: list[str]) -> None:
     )
     if index_path is None:
         index_path = (config.output_root / "local_knowledge" / f"{config.task.task_id}.sqlite").resolve()
+    if args.action == "preflight":
+        print(json.dumps(preflight_local_knowledge(local_config), ensure_ascii=False, indent=2))
+        return
     if args.action == "inspect":
         if not index_path.is_file():
             raise FileNotFoundError(f"Local knowledge index does not exist: {index_path}")
-        index = SQLiteLocalKnowledgeIndex(index_path)
+        index = SQLiteLocalKnowledgeIndex(index_path, read_only=True)
         try:
             payload = {"corpus": index.stats()}
             overlay_path = local_config.retrieval_overlay_path
@@ -49,6 +57,24 @@ def _knowledge_command(argv: list[str]) -> None:
         finally:
             index.close()
         return
+    if args.action == "rebuild":
+        temporary = index_path.with_name(f"{index_path.name}.v5-building-{os.getpid()}")
+        if temporary.exists():
+            raise FileExistsError(f"Refusing to overwrite rebuild sidecar: {temporary}")
+        backend = build_embedding_backend(local_config.retrieval)
+        index = SQLiteLocalKnowledgeIndex(temporary)
+        try:
+            report = index.build(local_config, embedding_backend=backend)
+        except Exception:
+            index.close()
+            if temporary.is_file():
+                temporary.unlink()
+            raise
+        else:
+            index.close()
+            temporary.replace(index_path)
+            print(json.dumps(asdict(report), ensure_ascii=False, indent=2))
+            return
     task_context = ProteinTaskContext.from_task(config.task)
     knowledge = LocalKnowledgeBase(
         local_config,

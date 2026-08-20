@@ -14,6 +14,7 @@ local_knowledge:
   allow_remote_context: true
   roots:
     - path: resources/local_knowledge/directed_evolution
+      root_id: DIRECTED_EVOLUTION
       include: ["claims/**/*.md"]
       exclude: ["**/~$*", "**/.git/**", "**/artifacts/**"]
   ingestion:

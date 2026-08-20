@@ -219,11 +219,11 @@ def test_hierarchical_scientist_config_matches_formal_al96_protocol() -> None:
         "kermut"
     ]
     assert config.validation.enabled is True
-    assert config.llm.max_tokens == 20000
-    assert config.critic.max_tokens == 20000
-    assert hierarchy.child_max_tokens == 20000
-    assert hierarchy.child_critic_max_tokens == 20000
-    assert hierarchy.main_critic_max_tokens == 20000
+    assert config.llm.max_tokens == 32768
+    assert config.critic.max_tokens == 32768
+    assert hierarchy.child_max_tokens == 32768
+    assert hierarchy.child_critic_max_tokens == 32768
+    assert hierarchy.main_critic_max_tokens == 32768
     assert hierarchy.enabled is True
     assert hierarchy.required_channels == ("physchem", "conservation", "structure")
     assert hierarchy.max_parallel_branches == 3
@@ -654,7 +654,7 @@ def test_default_matrix_is_twelve_jobs_in_three_waves_of_four(
         "diversity": True,
     }
     assert schedule["placeholder_predictor"] is False
-    assert schedule["max_tokens"] == 20000
+    assert schedule["max_tokens"] == 32768
     assert schedule["fitness_predictor"] == "kermut"
     assert schedule["use_fitness_predictors"] is False
     assert schedule["predictor_roles"] == {
@@ -704,7 +704,7 @@ def test_default_matrix_is_twelve_jobs_in_three_waves_of_four(
     assert all("--worker-placeholder-predictor" not in job["command"] for job in jobs)
     assert all("--worker-max-tokens" in job["command"] for job in jobs)
     assert all(
-        job["command"][job["command"].index("--worker-max-tokens") + 1] == "20000"
+            job["command"][job["command"].index("--worker-max-tokens") + 1] == "32768"
         for job in jobs
     )
 
@@ -848,8 +848,8 @@ def test_apply_token_budget_sets_all_role_limits() -> None:
     assert updated.hierarchical_hypothesis.child_max_tokens == 20000
     assert updated.hierarchical_hypothesis.child_critic_max_tokens == 20000
     assert updated.hierarchical_hypothesis.main_critic_max_tokens == 20000
-    with pytest.raises(ValueError, match="between 1 and 20000"):
-        runner.apply_token_budget(base, 20001)
+    with pytest.raises(ValueError, match="between 1 and 131072"):
+        runner.apply_token_budget(base, 131073)
 
 
 def test_validate_formal_fitness_configuration_rejects_generation_predictor() -> None:

@@ -261,6 +261,33 @@ class JsonArtifactWriter:
             )
             _atomic_replace_with_retry(temporary, target)
 
+    def record_llm_id_bridge(self, payload: Mapping[str, Any]) -> None:
+        """Write the canonical/local mapping for one logical LLM transaction."""
+
+        round_id = int(payload.get("round_id") or self._status.get("round_id") or 0)
+        role = re.sub(
+            r"[^A-Za-z0-9_.-]+", "_", str(payload.get("role") or "unknown")
+        ).strip("_") or "unknown"
+        scope_id = re.sub(
+            r"[^A-Za-z0-9_.-]+", "_", str(payload.get("scope_id") or "unknown")
+        ).strip("_") or "unknown"
+        target = (
+            self.run_dir
+            / f"round_{round_id:02d}"
+            / "llm"
+            / role
+            / "id_bridges"
+            / f"{scope_id}.json"
+        )
+        with self._write_lock:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temporary = target.with_suffix(".json.tmp")
+            temporary.write_text(
+                json.dumps(_jsonable(dict(payload)), ensure_ascii=False, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+            _atomic_replace_with_retry(temporary, target)
+
     def write_json(self, relative_path: str, payload: Any) -> Path:
         target = self.run_dir / relative_path
         target.parent.mkdir(parents=True, exist_ok=True)

@@ -7,6 +7,7 @@ import mimetypes
 import os
 import re
 from collections.abc import Iterable
+from dataclasses import dataclass
 from fnmatch import fnmatch
 from io import StringIO
 from pathlib import Path
@@ -23,6 +24,13 @@ STRUCTURED_EXTENSIONS = frozenset({".json", ".yaml", ".yml", ".csv"})
 DOCLING_EXTENSIONS = frozenset({".pdf", ".docx", ".pptx", ".xlsx", ".html", ".htm", ".xml"})
 DEFAULT_KNOWLEDGE_TYPE = "unclassified"
 KNOWLEDGE_TYPE_PATTERN = re.compile(r"^[a-z][a-z0-9_]{1,63}$")
+
+
+@dataclass(frozen=True)
+class DiscoveredLocalFile:
+    path: Path
+    root_id: str
+    relative_path: str
 
 
 def _markdown_front_matter(text: str) -> tuple[str, dict[str, object]]:
@@ -107,12 +115,23 @@ def discover_local_files(
     roots: tuple[LocalKnowledgeRootConfig, ...],
     *,
     follow_symlinks: bool,
-) -> tuple[Path, ...]:
-    discovered: dict[str, Path] = {}
+) -> tuple[DiscoveredLocalFile, ...]:
+    discovered: dict[str, DiscoveredLocalFile] = {}
+    resolved_root_ids: set[str] = set()
     for root_config in roots:
         root = root_config.path.resolve()
         if not root.exists() or not root.is_dir():
             raise FileNotFoundError(f"Local knowledge root does not exist: {root}")
+        root_id = root_config.root_id or re.sub(
+            r"[^A-Za-z0-9_-]+", "-", root.name
+        ).strip("-").upper()
+        root_id = root_id or "ROOT"
+        if root_id in resolved_root_ids:
+            raise ValueError(
+                f"Local knowledge roots resolve to duplicate root_id {root_id!r}; "
+                "configure explicit unique root_id values"
+            )
+        resolved_root_ids.add(root_id)
         for path in root.rglob("*"):
             if not path.is_file():
                 continue
@@ -126,20 +145,33 @@ def discover_local_files(
                 continue
             if _matches(relative, root_config.exclude):
                 continue
-            discovered[str(resolved)] = resolved
+            discovered[str(resolved)] = DiscoveredLocalFile(
+                path=resolved,
+                root_id=root_id,
+                relative_path=relative,
+            )
     return tuple(discovered[key] for key in sorted(discovered))
 
 
-def _stable_document_id(file_hash: str, path: Path) -> str:
+def _stable_document_id(
+    file_hash: str,
+    path: Path,
+    *,
+    root_id: str | None = None,
+    relative_path: str | None = None,
+    claim_id: str | None = None,
+) -> str:
     del file_hash  # content integrity remains a separate field, not an identifier contract
-    resolved = path.resolve()
-
-    def slug(value: str) -> str:
-        cleaned = re.sub(r"[^A-Za-z0-9]+", "-", value).strip("-").upper()
-        return (cleaned or "ITEM")[:12]
-
-    parents = [slug(item) for item in resolved.parts[-3:-1]]
-    return "localdoc:DOC-" + "-".join((*parents, slug(resolved.stem)))
+    root_label = root_id or re.sub(
+        r"[^A-Za-z0-9_-]+", "-", path.resolve().parent.name
+    ).strip("-").upper() or "ROOT"
+    identity = (
+        f"claim/{claim_id}"
+        if claim_id
+        else (relative_path or path.name).replace("\\", "/")
+    )
+    encoded = re.sub(r"[^A-Za-z0-9._/-]+", "-", identity).strip("-/") or "ITEM"
+    return f"localdoc:{root_label}:{encoded}"
 
 
 class AutoLocalParser:
@@ -152,7 +184,12 @@ class AutoLocalParser:
         suffix = path.suffix.casefold()
         return suffix in TEXT_EXTENSIONS | STRUCTURED_EXTENSIONS | DOCLING_EXTENSIONS
 
-    def parse(self, path: Path) -> ParsedDocument:
+    def parse(
+        self,
+        path: Path | DiscoveredLocalFile,
+    ) -> ParsedDocument:
+        discovered = path if isinstance(path, DiscoveredLocalFile) else None
+        path = discovered.path if discovered is not None else path
         suffix = path.suffix.casefold()
         raw = path.read_bytes()
         file_hash = hashlib.sha256(raw).hexdigest()
@@ -179,8 +216,21 @@ class AutoLocalParser:
         knowledge_type, knowledge_metadata = _knowledge_metadata(front_matter)
         configured_title = front_matter.get("title")
         title = str(configured_title).strip() if configured_title else path.stem
+        claim_id = (
+            str(knowledge_metadata.get("claim_id", "")).strip()
+            if knowledge_metadata.get("record_type") == "atomic_claim"
+            else None
+        )
         return ParsedDocument(
-            document_id=_stable_document_id(file_hash, path),
+            document_id=_stable_document_id(
+                file_hash,
+                path,
+                root_id=discovered.root_id if discovered is not None else None,
+                relative_path=(
+                    discovered.relative_path if discovered is not None else None
+                ),
+                claim_id=claim_id or None,
+            ),
             path=path.resolve(),
             file_hash=file_hash,
             mime_type=mime_type,
@@ -190,6 +240,10 @@ class AutoLocalParser:
             metadata={
                 "parser": self.name,
                 "suffix": suffix,
+                "root_id": discovered.root_id if discovered is not None else None,
+                "relative_path": (
+                    discovered.relative_path if discovered is not None else path.name
+                ),
                 **knowledge_metadata,
             },
         )

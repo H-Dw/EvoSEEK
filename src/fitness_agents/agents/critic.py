@@ -45,10 +45,15 @@ from fitness_agents.contracts.schemas import (
     UnsupportedClaim,
     Variant,
 )
-from fitness_agents.utils.progress import report_event
+from fitness_agents.utils.progress import report_event, report_llm_id_bridge
 from fitness_agents.validation.batch import CritiqueDecisionValidator
 
-from .short_ids import ShortIdMap, rewrite_exact_ids
+from .short_ids import (
+    FieldIdPolicy,
+    RequestScopedIdBridge,
+    ShortIdMap,
+    rewrite_exact_ids,
+)
 
 CRITIC_NESTED_TEXT_MAX = 240
 
@@ -462,7 +467,13 @@ def load_critic_profile(profile: str) -> str:
     skill = root / "SKILL.md"
     if not skill.is_file():
         raise FileNotFoundError(f"Unknown critic profile {profile!r}")
-    return skill.read_text(encoding="utf-8")
+    instructions = skill.read_text(encoding="utf-8")
+    integrity = Path(__file__).with_name("profiles") / "ID_INTEGRITY.md"
+    if integrity.is_file():
+        instructions = instructions.rstrip() + "\n\n" + integrity.read_text(
+            encoding="utf-8"
+        ).strip() + "\n"
+    return instructions
 
 
 def load_critic_profile_version(profile: str) -> str:
@@ -728,23 +739,43 @@ class OpenAICriticClient:
         candidate_map = ShortIdMap.build(candidate_ids, prefix="S")
         conflict_map = ShortIdMap.build(conflict_ids, prefix="C")
         evidence_map = ShortIdMap.build(visible_evidence_ids, prefix="E")
+        bridge = RequestScopedIdBridge(
+            scope_id=f"BC-R{draft.round_id:02d}-A{draft.review_attempt:02d}",
+            role="batch_critic",
+            schema_name="CritiqueDecisionBodyOutput",
+            namespaces={"S": candidate_map, "C": conflict_map, "E": evidence_map},
+            field_policies={
+                "candidate_issues[].candidate_id": FieldIdPolicy("S", "unique_near"),
+                "candidate_issues[].evidence_ids[]": FieldIdPolicy("E", "normalize"),
+                "candidate_issues[].conflict_ids[]": FieldIdPolicy("C", "exact"),
+                "batch_level_risks[].candidate_ids[]": FieldIdPolicy("S", "unique_near"),
+                "batch_level_risks[].evidence_ids[]": FieldIdPolicy("E", "normalize"),
+                "evidence_conflicts[].supporting_ids[]": FieldIdPolicy("E", "normalize"),
+                "evidence_conflicts[].opposing_ids[]": FieldIdPolicy("E", "normalize"),
+                "required_changes[].evidence_ids[]": FieldIdPolicy("E", "normalize"),
+                "cited_evidence_ids[]": FieldIdPolicy("E", "normalize"),
+                "sample_reviews[].candidate_id": FieldIdPolicy("S", "unique_near"),
+            },
+        )
+        report_llm_id_bridge(round_id=draft.round_id, **bridge.audit_payload())
 
         def _validate(payload: dict[str, Any]) -> dict[str, Any]:
             normalized = CritiqueDecisionBodyOutput.model_validate(payload).model_dump(
                 mode="json", exclude_none=True
             )
+            decoded = bridge.decode_and_validate(normalized)
             actual_samples = {
-                item["candidate_id"] for item in normalized["sample_reviews"]
+                item["candidate_id"] for item in decoded["sample_reviews"]
             }
-            if actual_samples != set(candidate_map.alias_to_value) or len(
+            if actual_samples != set(candidate_ids) or len(
                 normalized["sample_reviews"]
-            ) != len(candidate_map.alias_to_value):
+            ) != len(candidate_ids):
                 raise SemanticOutputValidationError(
                     "Batch Critic sample_reviews must cover every candidate exactly once",
                     paths=("sample_reviews[].candidate_id",),
                 )
             decoded = rewrite_exact_ids(
-                normalized,
+                decoded,
                 candidate_map,
                 conflict_map,
                 evidence_map,
@@ -922,8 +953,10 @@ class OpenAICriticClient:
                 "profile": self.profile_name,
                 "profile_version": self.profile_version,
                 "schema_name": "CritiqueDecisionBodyOutput",
+                "id_bridge_scope": bridge.scope_id,
             },
         )
+        report_llm_id_bridge(round_id=draft.round_id, **bridge.audit_payload())
         return _decision_from_payload(payload, draft=draft)
 
 
