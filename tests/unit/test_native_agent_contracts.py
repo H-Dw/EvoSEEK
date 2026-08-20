@@ -22,7 +22,9 @@ def test_role_profiles_are_versioned_and_authority_free() -> None:
     rethink = load_role_profile("rethink", "scientific_v1")
     assert scientist.metadata["state_authority"] == "none"
     assert rethink.metadata["tool_policy"] == "none"
-    assert scientist.sha256 != rethink.sha256
+    assert scientist.name == rethink.name == "scientific_v1"
+    assert scientist.role != rethink.role
+    assert scientist.metadata["version"] != rethink.metadata["version"]
     assert "Activation-state routing" in scientist.instructions
     assert "Activation-state routing" in rethink.instructions
     for instructions in (scientist.instructions, rethink.instructions):
@@ -66,21 +68,57 @@ def test_rethink_context_and_output_require_exact_candidate_coverage() -> None:
             "run_id": "run",
             "round_id": 1,
             "visible_baseline": 0.0,
-            "candidates": [{"variant_id": "v1"}, {"variant_id": "v2"}],
+            "baseline_receipt": {
+                "value": 0.0,
+                "statistic": "pre_round_visible_median",
+                "source": "revealed_observations_before_current_round",
+            },
+            "measurement_contract": {
+                "assay_id": "assay:test",
+                "fitness_scale": "raw_assay",
+                "optimization_direction": "higher_is_better",
+            },
+            "final_critic_decision": {
+                "decision_id": "D01-00",
+                "verdict": "APPROVE",
+                "summary": "approved",
+                "cited_evidence_ids": [],
+            },
+            "candidates": [
+                {
+                    "variant_id": item,
+                    "mutation_notation": "V39A",
+                    "agent_reason": "bounded",
+                    "evidence_ids": [],
+                    "wet_value": 0.1,
+                    "dry_validations": [],
+                    "intent_arm": "coverage_exploration",
+                    "allow_hypothesis_mismatch": False,
+                    "falsification_role": "not_in_primary_criterion",
+                }
+                for item in ("v1", "v2")
+            ],
         }
     )
     payload = {
         "reflections": [
             {
                 "variant_id": "v1",
-                "verdict": "support",
+                "candidate_relation": "support",
                 "summary": "supported",
                 "positive_findings": [],
                 "negative_findings": [],
                 "revised_reason": "bounded reason",
                 "next_round_advice": "test again",
+                "next_round_action": "test_matched_alternative",
             }
-        ]
+        ],
+        "batch_assessment": {
+            "assessment_id": None,
+            "status": "NOT_APPLICABLE",
+            "commentary": "No batch assessment applies.",
+            "next_round_advice": "Keep candidate relations bounded.",
+        },
     }
     with pytest.raises(ValueError, match="coverage mismatch"):
         validate_rethink_payload(payload, expected_variant_ids=context.expected_variant_ids)

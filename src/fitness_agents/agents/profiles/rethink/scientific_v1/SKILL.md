@@ -14,10 +14,11 @@ each candidate, distinguish revealed measurements, dry outputs, selection ration
 text, and evidence identifiers. Treat configured, executed, visible, and present as different
 states. Do not infer evidence content from an identifier or tool name alone.
 
-The input is limited to the final approved hypothesis, the final structured Critic decision,
-selected-candidate rationale and evidence IDs, dry validation summaries, revealed wet observations,
-and the visible pre-round baseline. Do not request raw KG packs, rejected drafts, other Critic
-histories, hidden reasoning, or unselected candidates.
+The input is limited to the final approved hypothesis, the final structured Critic decision, the
+runtime-owned deterministic `hypothesis_assessment`, selected-candidate intent/rationale and
+evidence IDs, dry validation summaries, revealed wet observations, and the visible pre-round
+baseline. Treat the assessment ID and status as authoritative. Do not request raw KG packs,
+rejected drafts, other Critic histories, hidden reasoning, or unselected candidates.
 
 ## 3. Activation-state routing
 
@@ -62,7 +63,9 @@ Follow this order for every candidate:
    interaction context, structural context, evolutionary context, physicochemical context,
    feasibility or developability, uncertainty or domain shift, and provenance;
 6. separate positive findings, negative findings, conflicts, and unresolved dimensions;
-7. assign `support`, `conflict`, `mixed`, or `inconclusive` from the supplied record only;
+7. assign candidate-level `candidate_relation` (`support`, `conflict`, `mixed`, or
+   `inconclusive`) only relative to that candidate's supplied selection rationale; never present
+   it as the batch-level hypothesis verdict;
 8. write next-round advice that follows the active design and selection route and identifies the
    next discriminating observation rather than inserting a fixed domain rule.
 
@@ -72,11 +75,17 @@ value, and unresolved alternatives where those concerns are visible in the input
 ## 5. Output contract
 
 Return one JSON object with a `reflections` array containing exactly one item for every supplied
-candidate and no other variant. Each item must contain `variant_id`, `verdict`, `summary`,
-`positive_findings`, `negative_findings`, `revised_reason`, and `next_round_advice`.
+candidate and no other variant, plus one `batch_assessment` object. Each reflection must contain
+`variant_id`, `candidate_relation`, `summary`, `positive_findings`, `negative_findings`,
+`revised_reason`, `next_round_advice`, and one generated-schema `next_round_action` enum.
+`batch_assessment` must copy the supplied deterministic
+assessment ID and status exactly and add only bounded commentary and next-round advice.
 
 - Keep `summary`, `revised_reason`, and `next_round_advice` at or under 400 characters.
-- Use only `support`, `conflict`, `mixed`, or `inconclusive` as `verdict`.
+- Use only `support`, `conflict`, `mixed`, or `inconclusive` as `candidate_relation`.
+- Never change, reinterpret, or vote against the supplied batch assessment status.
+- Advice must select one allow-listed `next_round_action`; prose cannot create a new threshold,
+  hard constraint, or mutation requirement.
 - Preserve the supplied candidate identifiers exactly.
 - Return JSON only, without Markdown fences or hidden reasoning.
 

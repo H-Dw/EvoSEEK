@@ -136,6 +136,8 @@ class ObservationKnowledgeGraph:
                 reflection_id TEXT,
                 reflection_verdict TEXT,
                 reflection_summary TEXT NOT NULL,
+                reflection_quality_status TEXT,
+                reflection_advisory_only INTEGER NOT NULL DEFAULT 1,
                 FOREIGN KEY (variant_id) REFERENCES variants(variant_id)
             );
             CREATE INDEX IF NOT EXISTS idx_observations_round
@@ -150,6 +152,7 @@ class ObservationKnowledgeGraph:
         )
         self._migrate_legacy_variants_table()
         self._migrate_legacy_evidence_table()
+        self._migrate_legacy_validation_table()
         self.connection.commit()
 
     def _migrate_legacy_variants_table(self) -> None:
@@ -184,6 +187,23 @@ class ObservationKnowledgeGraph:
         for column, definition in additions.items():
             if column not in existing:
                 self.connection.execute(f"ALTER TABLE evidence ADD COLUMN {column} {definition}")
+
+    def _migrate_legacy_validation_table(self) -> None:
+        existing = {
+            str(row[1])
+            for row in self.connection.execute(
+                "PRAGMA table_info(validation_records)"
+            ).fetchall()
+        }
+        additions = {
+            "reflection_quality_status": "TEXT",
+            "reflection_advisory_only": "INTEGER NOT NULL DEFAULT 1",
+        }
+        for column, definition in additions.items():
+            if column not in existing:
+                self.connection.execute(
+                    f"ALTER TABLE validation_records ADD COLUMN {column} {definition}"
+                )
 
     def add_variants(self, variants: Sequence[Variant]) -> None:
         with self.connection:
@@ -367,8 +387,9 @@ class ObservationKnowledgeGraph:
                          mutation_notation, value, uncertainty, source_id, model_version,
                          base_weight, reliability, agent_reason, hypothesis_id,
                          evidence_ids_json, reflection_id, reflection_verdict,
-                         reflection_summary)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         reflection_summary, reflection_quality_status,
+                         reflection_advisory_only)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         item.record_id,
@@ -388,6 +409,8 @@ class ObservationKnowledgeGraph:
                         item.reflection_id,
                         item.reflection_verdict,
                         item.reflection_summary,
+                        item.reflection_quality_status,
+                        int(item.reflection_advisory_only),
                     ),
                 )
 
@@ -422,6 +445,7 @@ class ObservationKnowledgeGraph:
                    value, uncertainty, source_id, model_version, base_weight,
                    reliability, agent_reason, hypothesis_id, evidence_ids_json,
                    reflection_id, reflection_verdict, reflection_summary
+                   , reflection_quality_status, reflection_advisory_only
             FROM validation_records
             WHERE round_id < ?
             ORDER BY round_id DESC, validation_type, variant_id, record_id
@@ -454,6 +478,8 @@ class ObservationKnowledgeGraph:
                     "reflection_id": row[14],
                     "reflection_verdict": row[15],
                     "reflection_summary": row[16],
+                    "reflection_quality_status": row[17],
+                    "reflection_advisory_only": bool(row[18]),
                     "source_type": (
                         "measurement" if row[3] == "wet" else "model_prediction"
                     ),

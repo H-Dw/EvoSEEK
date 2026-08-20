@@ -169,6 +169,9 @@ class Hypothesis:
     falsification_criterion: str
     parent_hypothesis_id: str | None = None
     hard_residue_constraints: dict[int, tuple[str, ...]] = field(default_factory=dict)
+    claim_modality: str = "directional_prior"
+    preference_strength_by_position: dict[int, str] = field(default_factory=dict)
+    falsification_template: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -216,6 +219,14 @@ class ReThinkReflection:
     revised_reason: str
     next_round_advice: str
     provider: str
+    relation_scope: str = "candidate_rationale"
+    assessment_id: str | None = None
+    assessment_status: str | None = None
+    assessment_commentary: str = ""
+    quality_status: str = "model"
+    advisory_only: bool = True
+    selection_eligible: bool = False
+    next_round_action: str = "no_change"
 
 
 @dataclass(frozen=True)
@@ -237,6 +248,8 @@ class ValidationRecord:
     reflection_id: str | None
     reflection_verdict: str | None
     reflection_summary: str
+    reflection_quality_status: str | None = None
+    reflection_advisory_only: bool = True
 
     def __post_init__(self) -> None:
         if self.validation_type not in {"wet", "dry"}:
@@ -297,6 +310,7 @@ class FalsificationSpec:
     criteria: tuple[FalsificationCriterion, ...]
     reduction_policy: str
     human_readable_description: str
+    compilation_receipt: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

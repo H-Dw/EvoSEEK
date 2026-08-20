@@ -40,8 +40,9 @@ class MockReThinkClient:
     provider_name = "mock_rethink"
 
     def reflect_round(self, *, context: ReThinkContextInput) -> tuple[ReThinkReflection, ...]:
-        context = ReThinkContextInput.model_validate(context).model_dump(mode="json")
-        baseline = float(context.get("visible_baseline", 0.0))
+        typed_context = ReThinkContextInput.model_validate(context)
+        context = typed_context.model_dump(mode="json")
+        baseline = typed_context.visible_baseline
         items: list[dict[str, Any]] = []
         for item in context.get("candidates", ()):
             wet = float(item["wet_value"])
@@ -68,7 +69,7 @@ class MockReThinkClient:
             items.append(
                 {
                     "variant_id": item["variant_id"],
-                    "verdict": verdict,
+                    "candidate_relation": verdict,
                     "summary": (
                         f"Recommendation reason is {verdict} by wet/dry directional checks; "
                         f"wet={wet:.4f}, baseline={baseline:.4f}."
@@ -84,10 +85,34 @@ class MockReThinkClient:
                         if wet_support
                         else "Down-weight this rationale and test matched alternatives."
                     ),
+                    "next_round_action": (
+                        "retain_uncertainty_aware_exploration"
+                        if wet_support
+                        else "test_matched_alternative"
+                    ),
                 }
             )
         return _parse_reflections(
-            {"reflections": items},
+            {
+                "reflections": items,
+                "batch_assessment": {
+                    "assessment_id": (
+                        typed_context.hypothesis_assessment.assessment_id
+                        if typed_context.hypothesis_assessment is not None
+                        else None
+                    ),
+                    "status": (
+                        typed_context.hypothesis_assessment.status
+                        if typed_context.hypothesis_assessment is not None
+                        else "NOT_APPLICABLE"
+                    ),
+                    "commentary": (
+                        "Candidate-level rationale relations are advisory; the runtime assessment "
+                        "is the authoritative batch-level hypothesis result."
+                    ),
+                    "next_round_advice": "Use the deterministic assessment and candidate relations separately.",
+                },
+            },
             run_id=str(context["run_id"]),
             round_id=int(context["round_id"]),
             provider=self.provider_name,
@@ -104,7 +129,7 @@ class NativeReThinkClient:
         base_url: str | None = None,
         provider: str | None = None,
         temperature: float = 0.0,
-        max_tokens: int | None = None,
+        max_tokens: int | None = 8000,
         reasoning_effort: str | None = None,
         thinking: str | None = None,
         api_key: str | None = None,
@@ -119,7 +144,7 @@ class NativeReThinkClient:
         request_timeout_seconds: float = 120.0,
         allow_unknown_evidence_stripping: bool = False,
         max_input_chars: int | None = None,
-        reasoning_batch_size: int = 8,
+        reasoning_batch_size: int = 4,
         max_parallel_batches: int = 4,
     ) -> None:
         self.model = resolve_model(model, provider=provider)
@@ -144,6 +169,7 @@ class NativeReThinkClient:
         self.max_parallel_batches = max_parallel_batches
         role_profile = load_role_profile("rethink", profile)
         self.profile_name = profile
+        self.profile_version = role_profile.metadata.get("version")
         self.profile = role_profile.instructions
         self.client = create_openai_client(
             api_key=api_key,
@@ -154,9 +180,9 @@ class NativeReThinkClient:
         self.transport = OpenAICompatibleChatTransport(self.client)
 
     @staticmethod
-    def _is_truncation(error: Exception) -> bool:
+    def _is_splittable_output_failure(error: Exception) -> bool:
         return isinstance(error, RemoteLLMCompletionError) and (
-            error.error_code == "OUTPUT_TRUNCATED"
+            error.error_code in {"OUTPUT_TRUNCATED", "OUTPUT_JSON_INVALID"}
         )
 
     def _reflect_batch(
@@ -167,11 +193,14 @@ class NativeReThinkClient:
         split_depth: int,
     ) -> tuple[ReThinkReflection, ...]:
         id_map = ShortIdMap.build(
-            tuple(str(item["variant_id"]) for item in context.candidates), prefix="S"
+            tuple(item.variant_id for item in context.candidates), prefix="S"
         )
-        alias_context = context.model_copy(
-            update={
-                "candidates": rewrite_exact_ids(context.candidates, id_map),
+        alias_context = ReThinkContextInput.model_validate(
+            {
+                **context.model_dump(mode="json"),
+                "candidates": rewrite_exact_ids(
+                    [item.model_dump(mode="json") for item in context.candidates], id_map
+                ),
             }
         )
         expected_aliases = alias_context.expected_variant_ids
@@ -223,13 +252,25 @@ class NativeReThinkClient:
                 "reflections[].variant_id": tuple(expected_aliases)
             },
             contextual_validator=lambda value: validate_rethink_payload(
-                value, expected_variant_ids=expected_aliases
+                value,
+                expected_variant_ids=expected_aliases,
+                expected_assessment_id=(
+                    context.hypothesis_assessment.assessment_id
+                    if context.hypothesis_assessment is not None
+                    else None
+                ),
+                expected_assessment_status=(
+                    context.hypothesis_assessment.status
+                    if context.hypothesis_assessment is not None
+                    else "NOT_APPLICABLE"
+                ),
             ),
             reasoning_truncation_retries=0,
             preserve_reasoning_on_retry=True,
             trace_context={
                 **trace_context.model_dump(mode="json"),
                 "profile": self.profile_name,
+                "profile_version": getattr(self, "profile_version", None),
                 "schema_name": "ReThinkOutput",
                 "retry_scope": f"rethink:{batch_id}",
                 "rethink_batch_id": batch_id,
@@ -256,14 +297,14 @@ class NativeReThinkClient:
         by_variant_id: dict[str, ReThinkReflection] = {}
         batches = adaptive_batch_submit(
             candidates,
-            item_id=lambda item: str(item["variant_id"]),
+            item_id=lambda item: item.variant_id,
             submit_batch=lambda work: self._reflect_batch_work(
                 context=validated_context,
                 work=work,
             ),
-            initial_batch_size=getattr(self, "reasoning_batch_size", 8),
+            initial_batch_size=getattr(self, "reasoning_batch_size", 4),
             max_parallel_batches=getattr(self, "max_parallel_batches", 4),
-            should_split_failure=self._is_truncation,
+            should_split_failure=self._is_splittable_output_failure,
             role="rethink",
             round_id=validated_context.round_id,
             event_reporter=report_event,
@@ -276,7 +317,7 @@ class NativeReThinkClient:
                         f"{reflection.variant_id!r}"
                     )
                 by_variant_id[reflection.variant_id] = reflection
-        expected_ids = tuple(str(item["variant_id"]) for item in candidates)
+        expected_ids = tuple(item.variant_id for item in candidates)
         missing = sorted(set(expected_ids).difference(by_variant_id))
         unexpected = sorted(set(by_variant_id).difference(expected_ids))
         if missing or unexpected:
@@ -293,7 +334,7 @@ class NativeReThinkClient:
         self,
         *,
         context: ReThinkContextInput,
-        work: AdaptiveBatchWork[dict[str, Any]],
+        work: AdaptiveBatchWork[Any],
     ) -> tuple[ReThinkReflection, ...]:
         batch_context = context.model_copy(update={"candidates": list(work.items)})
         return self._reflect_batch(

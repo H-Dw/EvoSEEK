@@ -1237,7 +1237,8 @@ class LLMConfig:
     request_timeout_seconds: float = 120.0
     allow_unknown_evidence_stripping: bool = False
     max_input_chars: int = 80000
-    rethink_reasoning_batch_size: int = 8
+    rethink_max_tokens: int = 8000
+    rethink_reasoning_batch_size: int = 4
     rethink_max_parallel_batches: int = 4
 
     def __post_init__(self) -> None:
@@ -1260,6 +1261,8 @@ class LLMConfig:
             raise ValueError("llm.max_input_chars must be at least 4096")
         if self.max_tokens is not None and not 1 <= self.max_tokens <= 20000:
             raise ValueError("llm.max_tokens must be between 1 and 20000")
+        if not 1 <= self.rethink_max_tokens <= 20000:
+            raise ValueError("llm.rethink_max_tokens must be between 1 and 20000")
         if not 1 <= self.rethink_reasoning_batch_size <= 8:
             raise ValueError("llm.rethink_reasoning_batch_size must be between 1 and 8")
         if not 1 <= self.rethink_max_parallel_batches <= 16:

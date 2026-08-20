@@ -12,12 +12,13 @@ from fitness_agents.contracts.agent_io import ReThinkContextInput
 def _reflection(candidate: dict) -> dict:
     return {
         "variant_id": candidate["variant_id"],
-        "verdict": "mixed",
+        "candidate_relation": "mixed",
         "summary": "Wet and dry evidence remain mixed.",
         "positive_findings": ["A bounded positive signal was observed."],
         "negative_findings": ["Uncertainty remains material."],
         "revised_reason": "Retain the rationale only as round-specific evidence.",
         "next_round_advice": "Test a matched alternative in the next round.",
+        "next_round_action": "test_matched_alternative",
     }
 
 
@@ -38,7 +39,15 @@ class _AdaptiveBatchClient:
         if reasoning:
             context = json.loads(messages[-1]["content"])
             candidates = context["candidates"]
-            payload = {"reflections": [_reflection(item) for item in candidates]}
+            payload = {
+                "reflections": [_reflection(item) for item in candidates],
+                "batch_assessment": {
+                    "assessment_id": None,
+                    "status": "NOT_APPLICABLE",
+                    "commentary": "No hypothesis assessment applies to this test batch.",
+                    "next_round_advice": "Keep candidate relations separate from batch status.",
+                },
+            }
         else:
             payload = json.loads(messages[-2]["content"])
             candidates = payload["reflections"]
@@ -76,6 +85,22 @@ def _context(count: int) -> ReThinkContextInput:
         run_id="run:adaptive-rethink",
         round_id=1,
         visible_baseline=0.0,
+        baseline_receipt={
+            "value": 0.0,
+            "statistic": "pre_round_visible_median",
+            "source": "revealed_observations_before_current_round",
+        },
+        measurement_contract={
+            "assay_id": "assay:test",
+            "fitness_scale": "raw_assay",
+            "optimization_direction": "higher_is_better",
+        },
+        final_critic_decision={
+            "decision_id": "D01-00",
+            "verdict": "APPROVE",
+            "summary": "approved",
+            "cited_evidence_ids": [],
+        },
         candidates=[
             {
                 "variant_id": f"V{index:02d}",
@@ -84,6 +109,9 @@ def _context(count: int) -> ReThinkContextInput:
                 "dry_validations": [],
                 "agent_reason": "bounded reason",
                 "evidence_ids": [],
+                "intent_arm": "coverage_exploration",
+                "allow_hypothesis_mismatch": False,
+                "falsification_role": "not_in_primary_criterion",
             }
             for index in range(count)
         ],
@@ -128,3 +156,11 @@ def test_rethink_splits_only_failed_batches_and_keeps_reasoning_enabled(monkeypa
     assert all(item["reasoning_effort"] == "high" for item in reasoning_calls)
     assert all(item["max_tokens"] == 20000 for item in transport_client.calls)
     assert transport_client.max_active >= 2
+
+
+def test_rethink_deepseek_defaults_use_bounded_output_and_batch_size(monkeypatch) -> None:
+    monkeypatch.setattr(rethink_module, "create_openai_client", lambda **_kwargs: object())
+    client = NativeReThinkClient(model="deepseek-chat", provider="deepseek")
+
+    assert client.max_tokens == 8000
+    assert client.reasoning_batch_size == 4
