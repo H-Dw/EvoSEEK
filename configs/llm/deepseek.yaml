@@ -19,6 +19,9 @@ retry_backoff_seconds: 1.0
 request_timeout_seconds: 120.0
 allow_unknown_evidence_stripping: false
 max_input_chars: 160000
-rethink_max_tokens: 8000
-rethink_reasoning_batch_size: 4
-rethink_max_parallel_batches: 4
+rethink_max_tokens: 20000
+rethink_reasoning_batch_size: 1
+rethink_max_parallel_batches: 8
+rethink_max_calls_per_round: 160
+rethink_call_reserve: 80
+rethink_dimension_parallel: true

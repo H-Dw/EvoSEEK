@@ -21,7 +21,7 @@ from fitness_agents.agents.output_guards import (
     SemanticOutputValidationError,
     UnknownEvidenceIdsError,
 )
-from fitness_agents.agents.rethink import NativeReThinkClient
+from fitness_agents.agents.rethink import RETHINK_DIMENSIONS, NativeReThinkClient
 from fitness_agents.agents.transports import OpenAICompatibleChatTransport
 from fitness_agents.contracts.agent_io import ReThinkContextInput
 from fitness_agents.contracts.schemas import Evidence
@@ -782,30 +782,23 @@ def _reflection(variant_id: str) -> dict:
         "revised_reason": "Keep the reason bounded to this round.",
         "next_round_advice": "Test matched alternatives.",
         "next_round_action": "test_matched_alternative",
+        "dimension_assessments": [
+            {
+                "dimension": dimension,
+                "evidence_status": "missing",
+                "finding": "No additional dimension evidence is visible.",
+                "implication": "Keep the interpretation bounded.",
+            }
+            for dimension in RETHINK_DIMENSIONS
+        ],
     }
 
 
 def test_rethink_coverage_mismatch_retries_inside_structured_boundary() -> None:
     remote = _SequenceClient(
         [
-            {
-                "reflections": [_reflection("S01")],
-                "batch_assessment": {
-                    "assessment_id": None,
-                    "status": "NOT_APPLICABLE",
-                    "commentary": "No assessment applies.",
-                    "next_round_advice": "Keep levels separate.",
-                },
-            },
-            {
-                "reflections": [_reflection("S01"), _reflection("S02")],
-                "batch_assessment": {
-                    "assessment_id": None,
-                    "status": "NOT_APPLICABLE",
-                    "commentary": "No assessment applies.",
-                    "next_round_advice": "Keep levels separate.",
-                },
-            },
+            {"reflections": [_reflection("S01")]},
+            {"reflections": [_reflection("S01"), _reflection("S02")]},
         ]
     )
     client = NativeReThinkClient.__new__(NativeReThinkClient)
@@ -816,6 +809,9 @@ def test_rethink_coverage_mismatch_retries_inside_structured_boundary() -> None:
     client.thinking = None
     client.profile_name = "scientific_v1"
     client.profile = "Return exact candidate coverage."
+    client.reasoning_batch_size = 4
+    client.max_parallel_batches = 1
+    client.dimension_parallel = False
     client.client = remote
     client.transport = OpenAICompatibleChatTransport(remote)
     context = ReThinkContextInput.model_validate(

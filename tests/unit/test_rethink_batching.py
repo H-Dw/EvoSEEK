@@ -19,6 +19,15 @@ def _reflection(candidate: dict) -> dict:
         "revised_reason": "Retain the rationale only as round-specific evidence.",
         "next_round_advice": "Test a matched alternative in the next round.",
         "next_round_action": "test_matched_alternative",
+        "dimension_assessments": [
+            {
+                "dimension": dimension,
+                "evidence_status": "missing",
+                "finding": "No additional dimension evidence is visible.",
+                "implication": "Keep the interpretation bounded.",
+            }
+            for dimension in rethink_module.RETHINK_DIMENSIONS
+        ],
     }
 
 
@@ -39,15 +48,7 @@ class _AdaptiveBatchClient:
         if reasoning:
             context = json.loads(messages[-1]["content"])
             candidates = context["candidates"]
-            payload = {
-                "reflections": [_reflection(item) for item in candidates],
-                "batch_assessment": {
-                    "assessment_id": None,
-                    "status": "NOT_APPLICABLE",
-                    "commentary": "No hypothesis assessment applies to this test batch.",
-                    "next_round_advice": "Keep candidate relations separate from batch status.",
-                },
-            }
+            payload = {"reflections": [_reflection(item) for item in candidates]}
         else:
             payload = json.loads(messages[-2]["content"])
             candidates = payload["reflections"]
@@ -74,6 +75,51 @@ class _AdaptiveBatchClient:
                 (),
                 {"message": message, "finish_reason": finish_reason},
             )()
+            return type("Response", (), {"choices": [choice], "usage": None})()
+        finally:
+            with self._lock:
+                self._active -= 1
+
+
+class _DimensionClient:
+    base_url = "https://api.deepseek.com"
+
+    def __init__(self) -> None:
+        self.chat = self
+        self.completions = self
+        self.calls: list[dict] = []
+        self._lock = threading.Lock()
+        self._active = 0
+        self.max_active = 0
+
+    def create(self, **kwargs):
+        payload = json.loads(kwargs["messages"][-1]["content"])
+        dimensions = payload["required_dimensions"]
+        variant_id = payload["candidates"][0]["variant_id"]
+        with self._lock:
+            self._active += 1
+            self.max_active = max(self.max_active, self._active)
+        try:
+            time.sleep(0.01)
+            with self._lock:
+                self.calls.append(kwargs)
+            content = json.dumps(
+                {
+                    "variant_id": variant_id,
+                    "dimension_assessments": [
+                        {
+                            "dimension": dimension,
+                            "evidence_status": "context",
+                            "finding": f"Bounded finding for {dimension}.",
+                            "implication": "Use only for this sample and round.",
+                        }
+                        for dimension in dimensions
+                    ],
+                    "group_advice": "Collect the next discriminating observation.",
+                }
+            )
+            message = type("Message", (), {"content": content})()
+            choice = type("Choice", (), {"message": message, "finish_reason": "stop"})()
             return type("Response", (), {"choices": [choice], "usage": None})()
         finally:
             with self._lock:
@@ -141,6 +187,7 @@ def test_rethink_splits_only_failed_batches_and_keeps_reasoning_enabled(monkeypa
         retry_backoff_seconds=0.0,
         reasoning_batch_size=8,
         max_parallel_batches=4,
+        dimension_parallel=False,
     )
 
     output = client.reflect_round(context=_context(10))
@@ -162,5 +209,39 @@ def test_rethink_deepseek_defaults_use_bounded_output_and_batch_size(monkeypatch
     monkeypatch.setattr(rethink_module, "create_openai_client", lambda **_kwargs: object())
     client = NativeReThinkClient(model="deepseek-chat", provider="deepseek")
 
-    assert client.max_tokens == 8000
-    assert client.reasoning_batch_size == 4
+    assert client.max_tokens == 20000
+    assert client.reasoning_batch_size == 1
+    assert client.max_parallel_batches == 8
+    assert client.dimension_parallel is True
+
+
+def test_rethink_parallel_dimension_groups_cover_every_sample(monkeypatch) -> None:
+    transport_client = _DimensionClient()
+    monkeypatch.setattr(
+        rethink_module,
+        "create_openai_client",
+        lambda **_kwargs: transport_client,
+    )
+    client = NativeReThinkClient(
+        model="deepseek-v4-flash",
+        provider="deepseek",
+        thinking="enabled",
+        reasoning_effort="high",
+        max_tokens=20000,
+        max_transport_retries=0,
+        max_truncation_retries=0,
+        max_syntax_retries=0,
+        max_schema_retries=0,
+        max_semantic_retries=0,
+        max_unknown_evidence_retries=0,
+        max_parallel_batches=8,
+        dimension_parallel=True,
+    )
+
+    output = client.reflect_round(context=_context(2))
+
+    assert len(transport_client.calls) == 8
+    assert transport_client.max_active >= 2
+    assert [item.variant_id for item in output] == ["V00", "V01"]
+    assert all(len(item.dimension_assessments) == 8 for item in output)
+    assert all(call["max_tokens"] == 20000 for call in transport_client.calls)

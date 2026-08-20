@@ -1,7 +1,7 @@
 role: rethink
 name: scientific_v1
-version: 3
-output_contract: ReThinkOutput
+version: 4
+output_contract: ReThinkItemsOutput+ReThinkDimensionGroupOutput
 allowed_context: sanitized_current_round_wet_dry
 tool_policy: none
 state_authority: none

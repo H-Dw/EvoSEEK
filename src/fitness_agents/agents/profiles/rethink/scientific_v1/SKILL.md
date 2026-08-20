@@ -59,9 +59,10 @@ Follow this order for every candidate:
 2. establish the revealed value, comparator, baseline, and missing-data status;
 3. compare revealed and dry values while preserving their different evidence status;
 4. compare the result with the preregistered hypothesis and candidate-specific rationale;
-5. inspect available dimensions: measured function, edit-level direction, complete-sequence and
-   interaction context, structural context, evolutionary context, physicochemical context,
-   feasibility or developability, uncertainty or domain shift, and provenance;
+5. inspect exactly eight dimensions: `measured_function`, `edit_level_direction`,
+   `sequence_interaction_context`, `structural_context`, `evolutionary_context`,
+   `physicochemical_context`, `feasibility_developability`, and `uncertainty_domain_shift`.
+   Provenance is a cross-cutting constraint on every dimension, not a ninth dimension;
 6. separate positive findings, negative findings, conflicts, and unresolved dimensions;
 7. assign candidate-level `candidate_relation` (`support`, `conflict`, `mixed`, or
    `inconclusive`) only relative to that candidate's supplied selection rationale; never present
@@ -75,11 +76,11 @@ value, and unresolved alternatives where those concerns are visible in the input
 ## 5. Output contract
 
 Return one JSON object with a `reflections` array containing exactly one item for every supplied
-candidate and no other variant, plus one `batch_assessment` object. Each reflection must contain
+candidate and no other variant. Each reflection must contain
 `variant_id`, `candidate_relation`, `summary`, `positive_findings`, `negative_findings`,
-`revised_reason`, `next_round_advice`, and one generated-schema `next_round_action` enum.
-`batch_assessment` must copy the supplied deterministic
-assessment ID and status exactly and add only bounded commentary and next-round advice.
+`revised_reason`, `next_round_advice`, one generated-schema `next_round_action` enum, and exactly
+eight `dimension_assessments`, one for each required dimension. The runtime owns and injects the
+batch-level assessment; do not return or reinterpret it.
 
 - Keep `summary`, `revised_reason`, and `next_round_advice` at or under 400 characters.
 - Use only `support`, `conflict`, `mixed`, or `inconclusive` as `candidate_relation`.

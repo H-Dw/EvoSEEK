@@ -420,6 +420,66 @@ class ReThinkItemOutput(BaseModel):
         "preserve_control",
         "no_change",
     ]
+    dimension_assessments: list[ReThinkDimensionAssessmentOutput] = Field(
+        default_factory=list
+    )
+
+
+class ReThinkDimensionAssessmentOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    dimension: Literal[
+        "measured_function",
+        "edit_level_direction",
+        "sequence_interaction_context",
+        "structural_context",
+        "evolutionary_context",
+        "physicochemical_context",
+        "feasibility_developability",
+        "uncertainty_domain_shift",
+    ]
+    evidence_status: Literal["measured", "dry", "context", "mixed", "missing"]
+    finding: ReThinkText
+    implication: ReThinkText
+
+
+class ReThinkItemsOutput(BaseModel):
+    """Model-visible sample-level output; batch assessment is runtime-owned."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    reflections: list[ReThinkItemOutput]
+
+    @model_validator(mode="after")
+    def validate_unique_variants(self) -> ReThinkItemsOutput:
+        ids = [item.variant_id for item in self.reflections]
+        if len(ids) != len(set(ids)):
+            raise ValueError("ReThink reflections must have unique variant_id values")
+        expected = {
+            "measured_function",
+            "edit_level_direction",
+            "sequence_interaction_context",
+            "structural_context",
+            "evolutionary_context",
+            "physicochemical_context",
+            "feasibility_developability",
+            "uncertainty_domain_shift",
+        }
+        for item in self.reflections:
+            actual = {entry.dimension for entry in item.dimension_assessments}
+            if actual != expected or len(item.dimension_assessments) != len(expected):
+                raise ValueError("ReThink must return each of the eight dimensions exactly once")
+        return self
+
+
+class ReThinkDimensionGroupOutput(BaseModel):
+    """One sample's bounded output for one merged pair of ReThink dimensions."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    variant_id: NonEmptyText
+    dimension_assessments: list[ReThinkDimensionAssessmentOutput] = Field(
+        min_length=2, max_length=2
+    )
+    group_advice: ReThinkText
 
 
 class ReThinkBatchAssessmentOutput(BaseModel):
@@ -466,6 +526,10 @@ class ReThinkOutput(BaseModel):
                     assessment_id=self.batch_assessment.assessment_id,
                     assessment_status=self.batch_assessment.status,
                     assessment_commentary=self.batch_assessment.commentary,
+                    dimension_assessments=tuple(
+                        entry.model_dump(mode="json")
+                        for entry in item.dimension_assessments
+                    ),
                 )
             )
         return tuple(output)

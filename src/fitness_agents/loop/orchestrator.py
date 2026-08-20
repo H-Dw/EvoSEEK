@@ -467,6 +467,9 @@ class CampaignRunner:
                 "max_parallel_batches": (
                     self.config.llm.rethink_max_parallel_batches
                 ),
+                "max_calls_per_round": self.config.llm.rethink_max_calls_per_round,
+                "call_reserve": self.config.llm.rethink_call_reserve,
+                "dimension_parallel": self.config.llm.rethink_dimension_parallel,
             },
             **llm_runtime_settings,
         )
@@ -2660,6 +2663,7 @@ class CampaignRunner:
                 constraints: RevisionConstraints | None = None,
                 revision_feedback: Any | None = None,
                 _context: dict[str, Any] = draft_context,
+                _round_id: int = round_id,
             ):
                 _context["revision_constraints"] = constraints
                 _context["revision_feedback"] = revision_feedback
@@ -2806,7 +2810,7 @@ class CampaignRunner:
                                         )
                                     )
                                 ),
-                                constraints_id=f"RC{round_id:02d}-{review_attempt:02d}",
+                                constraints_id=f"RC{_round_id:02d}-{review_attempt:02d}",
                             )
                         )
                 previous_diversity = _context.get("last_diversity_receipt")

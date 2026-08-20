@@ -29,9 +29,12 @@ def test_formal_feature_route_enables_hierarchy_and_bounded_retries() -> None:
     assert config.critic.max_schema_retries == 2
     assert config.llm.max_input_chars == 160000
     assert config.llm.max_tokens == 20000
-    assert config.llm.rethink_max_tokens == 8000
-    assert config.llm.rethink_reasoning_batch_size == 4
-    assert config.llm.rethink_max_parallel_batches == 4
+    assert config.llm.rethink_max_tokens == 20000
+    assert config.llm.rethink_reasoning_batch_size == 1
+    assert config.llm.rethink_max_parallel_batches == 8
+    assert config.llm.rethink_max_calls_per_round == 160
+    assert config.llm.rethink_call_reserve == 80
+    assert config.llm.rethink_dimension_parallel is True
     assert config.scientist_prompt_evidence_limit == 32
     assert config.hierarchical_hypothesis.main_max_input_chars == 160000
     assert config.hierarchical_hypothesis.child_max_input_chars == 120000

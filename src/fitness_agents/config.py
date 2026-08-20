@@ -1237,9 +1237,12 @@ class LLMConfig:
     request_timeout_seconds: float = 120.0
     allow_unknown_evidence_stripping: bool = False
     max_input_chars: int = 80000
-    rethink_max_tokens: int = 8000
-    rethink_reasoning_batch_size: int = 4
-    rethink_max_parallel_batches: int = 4
+    rethink_max_tokens: int = 20000
+    rethink_reasoning_batch_size: int = 1
+    rethink_max_parallel_batches: int = 8
+    rethink_max_calls_per_round: int = 160
+    rethink_call_reserve: int = 80
+    rethink_dimension_parallel: bool = True
 
     def __post_init__(self) -> None:
         if self.max_transport_retries not in {0, 1, 2}:
@@ -1267,6 +1270,10 @@ class LLMConfig:
             raise ValueError("llm.rethink_reasoning_batch_size must be between 1 and 8")
         if not 1 <= self.rethink_max_parallel_batches <= 16:
             raise ValueError("llm.rethink_max_parallel_batches must be between 1 and 16")
+        if self.rethink_max_calls_per_round < 16:
+            raise ValueError("llm.rethink_max_calls_per_round must be at least 16")
+        if not 0 <= self.rethink_call_reserve < self.rethink_max_calls_per_round:
+            raise ValueError("llm.rethink_call_reserve must leave a positive call budget")
 
 
 @dataclass
