@@ -178,7 +178,7 @@ class BatchHardValidator:
 
 
 class CritiqueDecisionValidator:
-    version = "1.0.0"
+    version = "1.1.0"
 
     def validate(
         self,
@@ -306,6 +306,72 @@ class CritiqueDecisionValidator:
             from fitness_agents.contracts.batch_review import BatchReviewContext
 
             review_context = BatchReviewContext.model_validate(batch_review_context)
+            actions = {change.action for change in decision.required_changes}
+            if review_context.review_controls and review_context.control_feasibility is not None:
+                control_receipt = review_context.control_feasibility
+                if (
+                    RequiredChangeAction.ADD_CONTROL in actions
+                    and control_receipt.feasible
+                    and control_receipt.selected_controls
+                    >= control_receipt.requested_controls
+                ):
+                    raise ValueError(
+                        "ADD_CONTROL contradicts the deterministic control feasibility receipt"
+                    )
+                for change in decision.required_changes:
+                    if change.action is not RequiredChangeAction.ADD_CONTROL:
+                        continue
+                    requested = change.parameters.get("control_count")
+                    if requested is not None and int(requested) != control_receipt.requested_controls:
+                        raise ValueError(
+                            "control_count must equal the runtime-owned requested control count"
+                        )
+            if review_context.review_diversity and review_context.diversity is not None:
+                diversity = review_context.diversity
+                if (
+                    RequiredChangeAction.INCREASE_DIVERSITY in actions
+                    and diversity.threshold_satisfied
+                ):
+                    raise ValueError(
+                        "INCREASE_DIVERSITY contradicts the satisfied deterministic diversity receipt"
+                    )
+                if (
+                    RequiredChangeAction.INCREASE_DIVERSITY in actions
+                    and not diversity.threshold_feasible_in_pool
+                ):
+                    raise ValueError(
+                        "INCREASE_DIVERSITY cannot request a threshold proven infeasible in the frozen pool"
+                    )
+                for change in decision.required_changes:
+                    if change.action is not RequiredChangeAction.INCREASE_DIVERSITY:
+                        continue
+                    requested = change.parameters.get("minimum_batch_distance")
+                    if (
+                        requested is not None
+                        and int(requested) != diversity.required_minimum_batch_distance
+                    ):
+                        raise ValueError(
+                            "minimum_batch_distance must equal the runtime-owned preregistered threshold"
+                        )
+
+            if draft.falsification_spec is not None:
+                from fitness_agents.evaluation.hypotheses import verify_falsification_spec
+
+                verify_falsification_spec(draft.falsification_spec)
+                falsification_codes = {
+                    "HYPOTHESIS_UNTESTABLE",
+                }
+                reported_codes = {
+                    getattr(item.code, "value", str(item.code))
+                    for item in (*decision.candidate_issues, *decision.batch_level_risks)
+                }
+                if (
+                    RequiredChangeAction.MAKE_FALSIFICATION_EXECUTABLE in actions
+                    or reported_codes.intersection(falsification_codes)
+                ):
+                    raise ValueError(
+                        "Critic cannot override a verified runtime-owned falsification specification"
+                    )
             excluded_targets = {
                 target
                 for change in decision.required_changes
@@ -322,13 +388,25 @@ class CritiqueDecisionValidator:
                 has_deterministic_hard_conflict = any(
                     target in conflict.candidate_ids for conflict in report.hard_conflicts
                 )
+                prediction_card = review_context.prediction_status_by_id.get(target)
                 has_independent_candidate_issue = any(
                     issue.candidate_id == target
-                    and getattr(issue.code, "value", str(issue.code)) != hard_code
+                    and (
+                        bool(issue.conflict_ids)
+                        or bool(issue.evidence_ids)
+                        or (
+                            getattr(issue.code, "value", str(issue.code))
+                            in {"HIGH_OOD", "MODEL_DISAGREEMENT"}
+                            and prediction_card is not None
+                            and prediction_card.decision_eligible
+                        )
+                    )
                     for issue in decision.candidate_issues
                 )
                 has_independent_batch_risk = any(
-                    target in risk.candidate_ids for risk in decision.batch_level_risks
+                    target in risk.candidate_ids
+                    and bool(risk.evidence_ids)
+                    for risk in decision.batch_level_risks
                 )
                 if (
                     intent is not None

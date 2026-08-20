@@ -36,6 +36,8 @@ from fitness_agents.validation.batch import ApprovalGateway, BatchHardValidator
 
 
 class ReviewRejected(RuntimeError):
+    code = "REVIEW_REJECTED"
+
     def __init__(self, message: str, *, decisions: Sequence[CritiqueDecision]) -> None:
         super().__init__(message)
         self.decisions = tuple(decisions)
@@ -52,6 +54,8 @@ class HypothesisRevisionRequested(ReviewRejected):
 class ControlFeasibilityError(ReviewRejected):
     """Requested controls cannot be assembled from the frozen design universe."""
 
+    code = "REVISION_INFEASIBLE"
+
     def __init__(
         self,
         receipt: ControlFeasibilityReceipt,
@@ -67,6 +71,8 @@ class ControlFeasibilityError(ReviewRejected):
 class RevisionConstraintInfeasible(ReviewRejected):
     """A revised pool cannot satisfy deterministic residue/quota constraints."""
 
+    code = "REVISION_INFEASIBLE"
+
     def __init__(
         self,
         receipt: RevisionQuotaShortfallReceipt,
@@ -75,6 +81,20 @@ class RevisionConstraintInfeasible(ReviewRejected):
     ) -> None:
         super().__init__(receipt.code, decisions=decisions)
         self.receipt = receipt
+
+
+class RevisionNoProgress(ReviewRejected):
+    """A REVISE cycle repeated the same executable state without changing the batch."""
+
+    code = "REVISION_NO_PROGRESS"
+
+
+class CriticInvalidFact(ReviewRejected):
+    code = "CRITIC_INVALID_FACT"
+
+
+class RevisionLimitExhausted(ReviewRejected):
+    code = "REVISION_LIMIT_EXHAUSTED"
 
 
 @dataclass(frozen=True)
@@ -156,6 +176,7 @@ class RevisionPlanner:
         *,
         allowed_positions: set[int] | None = None,
         wild_type_by_position: Mapping[int, str] | None = None,
+        review_context: BatchReviewContext | None = None,
     ) -> RevisionPlan:
         excluded: set[str] = set()
         constraints = RevisionConstraints()
@@ -201,7 +222,12 @@ class RevisionPlanner:
             }:
                 excluded.update(change.target_ids)
             elif change.action is RequiredChangeAction.ADD_CONTROL:
-                requested = change.parameters.get("control_count")
+                requested = (
+                    review_context.control_feasibility.requested_controls
+                    if review_context is not None
+                    and review_context.control_feasibility is not None
+                    else change.parameters.get("control_count")
+                )
                 constraints = replace(
                     constraints,
                     require_controls=True,
@@ -210,7 +236,12 @@ class RevisionPlanner:
                     ),
                 )
             elif change.action is RequiredChangeAction.INCREASE_DIVERSITY:
-                requested = change.parameters.get("minimum_batch_distance")
+                requested = (
+                    review_context.diversity.required_minimum_batch_distance
+                    if review_context is not None
+                    and review_context.diversity is not None
+                    else change.parameters.get("minimum_batch_distance")
+                )
                 constraints = replace(
                     constraints,
                     increase_diversity=True,
@@ -333,6 +364,7 @@ class BoundedReviewLoop:
         constraints = RevisionConstraints()
         parent_id: str | None = None
         revision_feedback: BatchRevisionFeedbackReceipt | None = None
+        previous_draft_signature: tuple[str, ...] | None = None
         for attempt in range(self.max_revision_attempts + 1):
             try:
                 parameters = signature(draft_builder).parameters
@@ -356,6 +388,16 @@ class BoundedReviewLoop:
                 if review_context_provider is not None
                 else None
             )
+            draft_signature = tuple(sorted(draft.candidate_ids))
+            if (
+                attempt > 0
+                and previous_draft_signature == draft_signature
+                and revision_feedback is not None
+            ):
+                raise RevisionNoProgress(
+                    "REVISION_NO_PROGRESS: revised draft repeated the same candidate set",
+                    decisions=attempts,
+                )
             if attempt > 0 and constraints.has_residue_constraints:
                 validator_task = getattr(self.validator, "task", None)
                 design_space = getattr(self.validator, "design_space", None)
@@ -479,7 +521,9 @@ class BoundedReviewLoop:
                     decision.summary or "Critic rejected the draft", decisions=attempts
                 )
             if attempt >= self.max_revision_attempts:
-                raise ReviewRejected("Critic revision limit exhausted", decisions=attempts)
+                raise RevisionLimitExhausted(
+                    "REVISION_LIMIT_EXHAUSTED", decisions=attempts
+                )
             try:
                 validator_task = getattr(self.validator, "task", None)
                 design_space = getattr(self.validator, "design_space", None)
@@ -505,10 +549,11 @@ class BoundedReviewLoop:
                     decision,
                     allowed_positions=allowed_positions,
                     wild_type_by_position=planner_wild_type,
+                    review_context=review_context,
                 )
             except (TypeError, ValueError) as error:
-                raise ReviewRejected(
-                    f"Revision request cannot be executed safely: {error}",
+                raise CriticInvalidFact(
+                    f"CRITIC_INVALID_FACT: {error}",
                     decisions=attempts,
                 ) from error
             if plan.regenerate_hypothesis:
@@ -520,8 +565,15 @@ class BoundedReviewLoop:
                 raise ReviewRejected(
                     "Revision request cannot be executed safely", decisions=attempts
                 )
-            exclusions.update(plan.exclusions)
-            constraints = constraints.merge(plan.constraints)
+            merged_exclusions = exclusions.union(plan.exclusions)
+            merged_constraints = constraints.merge(plan.constraints)
+            if merged_exclusions == exclusions and merged_constraints == constraints:
+                raise RevisionNoProgress(
+                    "REVISION_NO_PROGRESS: required changes do not alter runtime constraints",
+                    decisions=attempts,
+                )
+            exclusions = merged_exclusions
+            constraints = merged_constraints
             revision_feedback = self.revision_planner.feedback_receipt(
                 decision,
                 RevisionPlan(
@@ -532,4 +584,5 @@ class BoundedReviewLoop:
                 ),
             )
             parent_id = draft.draft_batch_id
+            previous_draft_signature = draft_signature
         raise AssertionError("Bounded review loop terminated unexpectedly")

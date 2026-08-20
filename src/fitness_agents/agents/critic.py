@@ -7,6 +7,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+import yaml
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 from fitness_agents.agents.output_guards import SemanticOutputValidationError
@@ -419,6 +420,18 @@ def load_critic_profile(profile: str) -> str:
     return skill.read_text(encoding="utf-8")
 
 
+def load_critic_profile_version(profile: str) -> str:
+    root = Path(__file__).with_name("critic_profiles") / profile
+    rubric = root / "rubric.yaml"
+    if not rubric.is_file():
+        raise FileNotFoundError(f"Unknown critic rubric {profile!r}")
+    metadata = yaml.safe_load(rubric.read_text(encoding="utf-8")) or {}
+    version = metadata.get("version")
+    if not version:
+        raise ValueError(f"Critic profile {profile!r} lacks an explicit version")
+    return str(version)
+
+
 class RuleBasedCriticClient:
     """Deterministic critic used offline and as a fail-closed remote fallback."""
 
@@ -598,6 +611,7 @@ class OpenAICriticClient:
         self.max_input_chars = max_input_chars
         self.profile_name = profile
         self.profile = load_critic_profile(profile)
+        self.profile_version = load_critic_profile_version(profile)
         self.client = create_openai_client(
             api_key=api_key,
             base_url=base_url,
@@ -807,6 +821,7 @@ class OpenAICriticClient:
                 "round_id": draft.round_id,
                 "role": "batch_critic",
                 "profile": self.profile_name,
+                "profile_version": self.profile_version,
                 "schema_name": "CritiqueDecisionBodyOutput",
             },
         )

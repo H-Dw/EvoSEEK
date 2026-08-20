@@ -193,6 +193,85 @@ def test_disabled_batch_review_scope_omits_control_and_diversity_receipts() -> N
         )
 
 
+def test_critic_cannot_invent_or_repeat_a_satisfied_diversity_threshold(
+    experiment_config,
+) -> None:
+    variants = {"v1": _variant("v1", "ADGV"), "v2": _variant("v2", "VDAV")}
+    predictions = {
+        candidate_id: replace(
+            _prediction("real-model:v1"), variant_id=candidate_id
+        )
+        for candidate_id in variants
+    }
+    draft = build_draft_batch(
+        round_id=1,
+        review_attempt=0,
+        candidate_ids=tuple(variants),
+        variants=variants,
+        predictions=predictions,
+        evidence={},
+        hypothesis_id=None,
+        falsification_spec=None,
+    )
+    report = BatchHardValidator(
+        experiment_config.task, experiment_config.critic
+    ).validate(
+        draft,
+        variants=variants,
+        predictions=predictions,
+        evidence={},
+        revealed_ids=set(),
+        pending_ids=set(),
+        allowed_ids=set(variants),
+        expected_batch_size=2,
+    )
+    context = BatchReviewContext(
+        prediction_status_by_id={
+            candidate_id: prediction_review_card(
+                prediction,
+                source_kind="real_model",
+                decision_eligible=True,
+                calibration_status="calibrated",
+            )
+            for candidate_id, prediction in predictions.items()
+        },
+        diversity=batch_diversity_receipt(
+            selected_ids=tuple(variants),
+            candidate_pool_ids=tuple(variants),
+            variants_by_id=variants,
+            required_minimum_batch_distance=1,
+            hypothesis=None,
+            position_to_index={39: 0, 40: 1, 41: 2, 54: 3},
+        ),
+    )
+    decision = CritiqueDecision(
+        decision_id="D01-00",
+        draft_batch_id=draft.draft_batch_id,
+        round_id=1,
+        review_attempt=0,
+        verdict=ReviewVerdict.REVISE,
+        falsification_readiness=FalsificationReadiness.READY,
+        required_changes=(
+            RequiredChange(
+                action=RequiredChangeAction.INCREASE_DIVERSITY,
+                target_ids=(),
+                parameters={"minimum_batch_distance": 2},
+                rationale="Invent a stricter threshold.",
+            ),
+        ),
+        confidence=0.8,
+        summary="Revise.",
+    )
+    with pytest.raises(ValueError, match="satisfied deterministic diversity receipt"):
+        CritiqueDecisionValidator().validate(
+            decision,
+            draft=draft,
+            report=report,
+            visible_evidence_ids=set(),
+            batch_review_context=context,
+        )
+
+
 def test_disabled_diversity_review_removes_validator_distance_warning(
     experiment_config,
 ) -> None:

@@ -66,6 +66,30 @@ def _prediction(variant_id: str, mean: float) -> Prediction:
     )
 
 
+def _compiled_hypothesis(hypothesis_id: str) -> Hypothesis:
+    return Hypothesis(
+        hypothesis_id=hypothesis_id,
+        statement="Test a bounded directional prior.",
+        preferred_residues={39: ("V",)},
+        evidence_ids=(),
+        expected_outcome="The selected batch exceeds the pre-round comparator.",
+        falsification_criterion=(
+            "The selected batch median must exceed the preregistered pre-round "
+            "visible-observation median; missing required observations yield INCONCLUSIVE."
+        ),
+        falsification_template={
+            "detector": "batch_median_lift",
+            "target_relation": "selected_batch",
+            "comparator_relation": "pre_round_visible_observations",
+            "operator": "greater",
+            "threshold_source": "zero_lift",
+            "min_observations": "selected_batch_size",
+            "missing_data_policy": "INCONCLUSIVE",
+            "reduction_policy": "primary_contradiction_first_v1",
+        },
+    )
+
+
 class _ReviseThenApprove:
     provider_name = "scripted"
 
@@ -388,7 +412,7 @@ def test_joint_epistasis_requires_all_constituents_and_detects_sign_change():
 def test_falsification_status_is_computed_after_observation(target_fitness, expected):
     baseline = FitnessObservation("base", 0.0, "initial_observed", 0)
     spec = preregister_batch_median_test(
-        hypothesis_id="hyp:1",
+        hypothesis=_compiled_hypothesis("hyp:1"),
         round_id=1,
         target_variant_ids=("target",),
         visible_observations=(baseline,),
@@ -404,7 +428,7 @@ def test_falsification_status_is_computed_after_observation(target_fitness, expe
 def test_falsification_spec_uses_structural_validation_without_hash_receipt():
     baseline = FitnessObservation("base", 0.0, "initial_observed", 0)
     spec = preregister_batch_median_test(
-        hypothesis_id="hyp:locked",
+        hypothesis=_compiled_hypothesis("hyp:locked"),
         round_id=1,
         target_variant_ids=("target",),
         visible_observations=(baseline,),
@@ -413,12 +437,12 @@ def test_falsification_spec_uses_structural_validation_without_hash_receipt():
         spec,
         criteria=(replace(spec.criteria[0], support_threshold=-100.0),),
     )
-    assessment = DeterministicHypothesisEvaluator().evaluate(
-        spec=changed,
-        observations=(baseline, FitnessObservation("target", 1.0, "oracle_pool", 1)),
-        round_id=1,
-    )
-    assert assessment.falsification_spec_id == changed.spec_id
+    with pytest.raises(PermissionError, match="compilation receipt"):
+        DeterministicHypothesisEvaluator().evaluate(
+            spec=changed,
+            observations=(baseline, FitnessObservation("target", 1.0, "oracle_pool", 1)),
+            round_id=1,
+        )
 
 
 def test_scientific_critic_skill_is_structured_english():

@@ -138,12 +138,20 @@ Treat control feasibility and diversity receipts as authoritative deterministic 
 must fail fast or regenerate the design space. Judge diversity only against the preregistered
 threshold. If `threshold_feasible_in_pool=false`, do not demand mutations outside allowed positions
 or repeat an impossible `INCREASE_DIVERSITY`; report the design-space limitation instead.
+If the control receipt is feasible and its selected count meets its requested count, do not emit
+`INSUFFICIENT_CONTROL` or `ADD_CONTROL`. If `threshold_satisfied=true`, do not emit
+`INSUFFICIENT_DIVERSITY`, `BATCH_MODE_COLLAPSE`, or `INCREASE_DIVERSITY`. Never invent a new
+`minimum_batch_distance` or `control_count`: when a change is genuinely required, copy the exact
+runtime-owned requested value from the corresponding receipt.
 
 ### 4.7 Falsification auditor
 
 Require a frozen executable criterion before submission: target, comparator, metric, decision rule,
 minimum usable observations, and missing-data policy. Evaluate readiness only. Do not label the
 hypothesis supported or contradicted before results exist.
+When `draft.falsification_spec` contains those fields and has passed deterministic validation, set
+falsification readiness to `ready`; do not emit `HYPOTHESIS_UNTESTABLE` or
+`MAKE_FALSIFICATION_EXECUTABLE` merely because the Scientist's prose uses different wording.
 
 ## 5. Decision procedure
 
@@ -219,6 +227,9 @@ bounded Critic explanation paired with the exact Scientist hypothesis and review
   issue unless it violates explicit `hard_residue_constraints` or another deterministic gate.
 - Treat runtime-provided `soft_prior_mismatch_ids` as descriptive only. They never justify
   `EXCLUDE_CANDIDATE`, `REPLACE_CANDIDATE`, or residue exclusions by themselves.
+- A self-authored `HYPOTHESIS_UNTESTABLE`, `UNSUPPORTED_CLAIM`, or other unanchored issue does not
+  make a soft-prior exclusion independent. Candidate exclusion requires a cited deterministic
+  conflict, visible evidence, or a decision-eligible runtime prediction signal.
 - If `hard_residue_constraints` is empty, never emit `HARD_RESIDUE_CONSTRAINT_VIOLATION` and never
   emit `required_residues_by_position`. That issue is legal only for a candidate-scoped issue that
   cites the exact deterministic hard-conflict `C` label. Never derive a required residue from
@@ -230,7 +241,7 @@ bounded Critic explanation paired with the exact Scientist hypothesis and review
 
 APPROVE: `{"verdict":"APPROVE","falsification_readiness":"ready","candidate_issues":[],"batch_level_risks":[],"evidence_conflicts":[],"unsupported_claims":[],"required_changes":[],"cited_evidence_ids":[],"confidence":0.9,"explanation":"The batch is executable and falsification-ready."}`
 
-REVISE: `{"verdict":"REVISE","falsification_readiness":"needs_revision","candidate_issues":[],"batch_level_risks":[{"code":"INSUFFICIENT_DIVERSITY","severity":"warning","statement":"The batch lacks separation between proposed modes.","candidate_ids":[],"evidence_ids":[]}],"evidence_conflicts":[],"unsupported_claims":[],"required_changes":[{"action":"INCREASE_DIVERSITY","target_ids":[],"parameters":{"minimum_batch_distance":2,"excluded_substitutions":[]},"rationale":"Increase information value across the batch.","evidence_ids":[],"priority":1}],"cited_evidence_ids":[],"confidence":0.8,"explanation":"Increase batch diversity before approval."}`
+REVISE (only when the receipt says `required_minimum_batch_distance=1` and `threshold_satisfied=false`): `{"verdict":"REVISE","falsification_readiness":"ready","candidate_issues":[],"batch_level_risks":[{"code":"INSUFFICIENT_DIVERSITY","severity":"warning","statement":"The batch does not meet the preregistered distance threshold.","candidate_ids":[],"evidence_ids":[]}],"evidence_conflicts":[],"unsupported_claims":[],"required_changes":[{"action":"INCREASE_DIVERSITY","target_ids":[],"parameters":{"minimum_batch_distance":1,"excluded_substitutions":[]},"rationale":"Meet the runtime-owned preregistered diversity threshold.","evidence_ids":[],"priority":1}],"cited_evidence_ids":[],"confidence":0.8,"explanation":"Revise only to meet the unsatisfied deterministic threshold."}`
 
 REJECT: `{"verdict":"REJECT","falsification_readiness":"untestable","candidate_issues":[],"batch_level_risks":[],"evidence_conflicts":[],"unsupported_claims":[],"required_changes":[{"action":"ABORT_ROUND","target_ids":[],"parameters":{"excluded_substitutions":[]},"rationale":"A blocking deterministic conflict remains.","evidence_ids":[],"priority":0}],"cited_evidence_ids":[],"confidence":1.0,"explanation":"Reject because a blocking conflict remains."}`
 
