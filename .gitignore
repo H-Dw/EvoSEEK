@@ -6,10 +6,7 @@ __pycache__/
 .ruff_cache/
 .coverage
 htmlcov/
-artifacts/*
-!artifacts/runs/
-artifacts/runs/*
-!artifacts/runs/.gitkeep
+artifacts/
 data/raw/*
 data/processed/*
 data/demo/*
@@ -17,8 +14,7 @@ data/demo/*
 data/interim/*
 !data/interim/.gitkeep
 data/processed/gb1_full_*.csv
-models/*
-!models/.gitkeep
+models/
 .env
 .codex_tmp/
 .learnings/
