@@ -27,3 +27,9 @@ models/*
 .out
 output/
 docs/
+.workbuddy
+.github
+analysis/
+tmp/
+tests/
+services/

@@ -526,7 +526,7 @@ options:
 NPZ 必须包含 `variant_ids` 或 `sequences`，以及 `embeddings` 和 `zero_shot`。无论选择哪种
 特征模式，都仍然需要 `conditional_probs_path` 和 `coords_path`。如果资源缺失，后端会在加载
 650M ESM-2 权重前终止并报告缺少的配置。更完整的插件契约和其他模型接入方法见
-[`docs/predictor-plugins.md`](docs/predictor-plugins.md)。
+`src/fitness_agents/models/` 中的 predictor registry。
 
 `CampaignRunner` 也允许构造时注入 `ExperimentBackend`、predictor factory 和 `ScientistAgent`，
 因此可以把 CSV oracle 换成 LIMS/机器人队列，而不修改闭环状态机。真实实验 backend 必须保证：提交幂等、

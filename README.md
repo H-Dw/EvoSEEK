@@ -463,7 +463,7 @@ options:
   precomputed_features_path: models/kermut/gb1_features.npz
 ```
 
-The NPZ must contain `variant_ids` or `sequences`, plus `embeddings` and `zero_shot`. Regardless of feature mode, `conditional_probs_path` and `coords_path` are still required. If the resources are missing, the backend terminates before loading the 650M ESM-2 weights and reports the missing config. For the fuller plugin contract and other model-integration methods see [`docs/predictor-plugins.md`](docs/predictor-plugins.md).
+The NPZ must contain `variant_ids` or `sequences`, plus `embeddings` and `zero_shot`. Regardless of feature mode, `conditional_probs_path` and `coords_path` are still required. If the resources are missing, the backend terminates before loading the 650M ESM-2 weights and reports the missing config. For the fuller plugin contract and other model-integration methods see the predictor registry under `src/fitness_agents/models/`.
 
 `CampaignRunner` also allows injecting `ExperimentBackend`, a predictor factory, and `ScientistAgent` at construction time, so the CSV oracle can be swapped for a LIMS/robotics queue without modifying the loop state machine. A real experiment backend must guarantee: idempotent submission, explicit QC status, retained repeat measurements, retryable failures, and an irreversible final-test gate.
 
