@@ -143,6 +143,87 @@ class ShortIdMap:
             )
         return raw
 
+    def prose_alias_pattern(self) -> re.Pattern[str]:
+        """Match padded request-local aliases such as ``E01`` or ``E33``.
+
+        Canonical IDs like ``E1:kg:sha256:...`` use a single digit plus ``:`` and
+        are intentionally excluded.
+        """
+
+        return re.compile(rf"\b{re.escape(self.prefix)}\d{{2,}}\b")
+
+    def unknown_aliases_in_text(self, text: str) -> tuple[str, ...]:
+        """Return padded aliases in prose that are not in this request map."""
+
+        found = self.prose_alias_pattern().findall(str(text))
+        return tuple(
+            dict.fromkeys(
+                alias for alias in found if alias not in self.alias_to_value
+            )
+        )
+
+    def strip_unknown_aliases_in_text(self, text: str) -> str:
+        """Drop padded aliases that are not in this request map.
+
+        Prior-round ``E33`` labels have no identity here. Current-map aliases
+        such as ``E01`` are kept.
+        """
+
+        def _replace(match: re.Match[str]) -> str:
+            token = match.group(0)
+            return token if token in self.alias_to_value else ""
+
+        cleaned = self.prose_alias_pattern().sub(_replace, str(text))
+        cleaned = re.sub(r"\s*[/,;]\s*(?=[/,;]|$)", " ", cleaned)
+        cleaned = re.sub(r"\(\s*\)", "", cleaned)
+        cleaned = re.sub(r"\s+\.", ".", cleaned)
+        cleaned = re.sub(r"\s{2,}", " ", cleaned)
+        return cleaned.strip(" ,;/")
+
+    def expand_aliases_in_text(self, text: str) -> str:
+        """Replace whole-token aliases inside prose with canonical identifiers.
+
+        ``decode`` only matches an entire string. Interpretation sentences can
+        embed request-local labels such as ``S01`` next to mutation tokens, and
+        those must be expanded with the same batch map used for typed ID fields.
+        Longer aliases are substituted first so ``S10`` is not eaten by ``S1``.
+        """
+
+        output = str(text)
+        for alias, canonical in sorted(
+            self.alias_to_value.items(),
+            key=lambda item: len(item[0]),
+            reverse=True,
+        ):
+            if alias == canonical:
+                continue
+            output = re.sub(rf"\b{re.escape(alias)}\b", canonical, output)
+        return output
+
+    def collapse_canonicals_in_text(self, text: str) -> str:
+        """Replace canonical identifiers inside prose with this request's aliases.
+
+        Typed ID fields are rewritten as whole strings. Finding statements still
+        embed canonical sample or evidence IDs after per-batch expansion, and
+        those must collapse with the same map the Critic uses for arrays.
+        Longer canonicals are substituted first.
+        """
+
+        output = str(text)
+        for alias, canonical in sorted(
+            self.alias_to_value.items(),
+            key=lambda item: len(item[1]),
+            reverse=True,
+        ):
+            if alias == canonical:
+                continue
+            output = re.sub(
+                rf"(?<![A-Za-z0-9]){re.escape(canonical)}(?![A-Za-z0-9])",
+                alias,
+                output,
+            )
+        return output
+
     def prompt_map(self, labels: dict[str, str] | None = None) -> dict[str, str]:
         """Return alias-to-readable-label rows without exposing canonical IDs."""
 

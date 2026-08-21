@@ -522,3 +522,114 @@ def test_retry_instruction_includes_allowed_ids() -> None:
     text = retry_instruction(failure, error=error)
     assert "ev:x" in text
     assert "ev:1" in text
+
+
+def test_retry_instruction_keeps_critic_suggestions_and_allows_coupled_fields() -> None:
+    from pydantic import ValidationError
+
+    from fitness_agents.agents.output_guards import critic_advice_from_payload
+    from fitness_agents.contracts.hypothesis_pipeline import MainReviewBody
+
+    payload = {
+        "review_scope": "main",
+        "verdict": "REVISE",
+        "rating": {
+            "score": 3,
+            "rationale": "Repairable overclaim.",
+            "suggestions": ["Narrow the directional claim to visible cards."],
+            "text_errors": [],
+        },
+        "issues": [],
+        "required_changes": [],
+        "cited_evidence_ids": [],
+        "explanation": "The claim overreaches the visible cards.",
+    }
+    with pytest.raises(ValidationError) as captured:
+        MainReviewBody.model_validate(payload)
+    failure = classify_output_failure(
+        captured.value, finish_reason="stop", content=json.dumps(payload)
+    )
+    text = retry_instruction(
+        failure,
+        error=captured.value,
+        schema=MainReviewBody.model_json_schema(),
+        previous_payload=payload,
+    )
+    assert "Narrow the directional claim to visible cards." in text
+    assert "NARROW_CLAIM" in text
+    assert "Do not change verdict, action" not in text
+    assert "repair verdict, rating, and required_changes together" in text.casefold()
+    advice = critic_advice_from_payload(payload)
+    assert advice is not None
+    assert advice["suggestions"] == ["Narrow the directional claim to visible cards."]
+
+
+def test_complete_json_critic_schema_retry_injects_suggestions() -> None:
+    from fitness_agents.contracts.hypothesis_pipeline import MainReviewBody
+
+    first = {
+        "review_scope": "main",
+        "verdict": "REVISE",
+        "rating": {
+            "score": 3,
+            "rationale": "Repairable overclaim.",
+            "suggestions": ["Narrow the directional claim to visible cards."],
+            "text_errors": [],
+        },
+        "issues": [],
+        "required_changes": [],
+        "cited_evidence_ids": [],
+        "explanation": "The claim overreaches the visible cards.",
+    }
+    second = {**first, "required_changes": ["NARROW_CLAIM"]}
+    client = _ScriptedClient(
+        [
+            (json.dumps(first), "stop"),
+            (json.dumps(second), "stop"),
+        ]
+    )
+    payload = complete_json(
+        client=client,
+        model="unit-test-model",
+        messages=[{"role": "user", "content": "json"}],
+        schema=MainReviewBody.model_json_schema(),
+        validator=lambda value: MainReviewBody.model_validate(value).model_dump(mode="json"),
+        schema_retries=2,
+    )
+    retry_text = client.calls[1]["messages"][-1]["content"]
+    assert "Narrow the directional claim to visible cards." in retry_text
+    assert "Do not change verdict, action" not in retry_text
+    assert payload["required_changes"] == ["NARROW_CLAIM"]
+
+
+def test_critic_revision_payload_includes_suggestions() -> None:
+    from types import SimpleNamespace
+
+    from fitness_agents.agents.output_guards import critic_revision_payload
+
+    decision = SimpleNamespace(
+        verdict=SimpleNamespace(value="REVISE"),
+        summary="Calibrate the claim.",
+        required_changes=(
+            SimpleNamespace(
+                action=SimpleNamespace(value="LOWER_CONFIDENCE"),
+                target_ids=(),
+                parameters={},
+                rationale="Confidence exceeds visible uncertainty.",
+                evidence_ids=(),
+                priority=1,
+            ),
+        ),
+        rating_suggestions=("Lower confidence to match visible uncertainty.",),
+        rating_text_errors=(),
+        rating_score=3,
+        rating_rationale="Repairable overclaim.",
+    )
+    rejected = SimpleNamespace(
+        hypothesis_id="H01",
+        statement="Prefer Val at 39.",
+        preferred_residues={39: ("V",)},
+    )
+    payload = critic_revision_payload(decision=decision, rejected_hypothesis=rejected)
+    assert payload["suggestions"] == ["Lower confidence to match visible uncertainty."]
+    assert payload["required_changes"][0]["action"] == "LOWER_CONFIDENCE"

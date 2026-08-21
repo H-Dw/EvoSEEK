@@ -210,9 +210,9 @@ The Scientist owns the hypothesis. Do not return, rewrite, or propose one. Use `
 bounded Critic explanation paired with the exact Scientist hypothesis and reviewed batch.
 
 - Use only supplied request-local `S`, `E`, and deterministic `C` labels.
-- Keep `explanation` at or under 400 characters and explain why the exact proposal is reasonable,
+- Keep `explanation` at or under 2000 characters and explain why the exact proposal is reasonable,
   needs revision, or must be rejected.
-- Keep nested `claim`, `statement`, and `rationale` strings at or under 240 characters.
+- Keep nested `claim`, `statement`, and `rationale` strings at or under 400 characters.
 - Emit at most 8 `candidate_issues` and 8 `required_changes`.
 - Set `confidence` between 0 and 1; it never overrides deterministic validation.
 - For `APPROVE`, keep `required_changes` empty and set falsification readiness to `ready`.
@@ -245,7 +245,14 @@ for bounded, repairable defects; 4 when the batch is acceptable with no unresolv
 5 only when it is fully supported, scoped, falsification-ready, and textually correct. Scores 0–1
 map to `REJECT`, 2–3 to `REVISE`, and 4–5 to `APPROVE`. A 2–3 rating requires actionable
 `suggestions` and matching machine-executable `required_changes`. If `text_errors` is non-empty,
-the score cannot exceed 3.
+the score cannot exceed 3. `rating.suggestions` is not a substitute for `required_changes`. On a
+schema retry, keep existing suggestions and emit matching allow-listed `required_changes[].action`
+values; repair `verdict`, `rating`, and `required_changes` together.
+
+If hypothesis prose asserts residue necessity (for example `V39 must` or `position 39 is forbidden`)
+while `hard_residue_constraints` is empty, treat that as overclaiming. Do not emit
+`HARD_RESIDUE_CONSTRAINT_VIOLATION`. Ask for a softer statement via `suggestions` and a REVISE-band
+rating. Assay language such as "the batch median must exceed" is not residue hardness.
 
 Return exactly one `sample_reviews` entry for every request-local candidate. Each entry must keep
 `feature_analysis` separate from `critic_explanation` and include only suggestions that apply to

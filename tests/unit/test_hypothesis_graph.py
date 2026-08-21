@@ -583,9 +583,20 @@ class _ReviseOnceCritic(RuleBasedSubCritic):
 class _ReviseMainOnceCritic(RuleBasedMainHypothesisCritic):
     def __init__(self) -> None:
         self.calls = 0
+        self.review_kwargs: list[dict] = []
 
-    def review(self, *, hypothesis, approved, conflicts, evidence_universe):
+    def review(
+        self,
+        *,
+        hypothesis,
+        approved,
+        conflicts,
+        evidence_universe,
+        prior_review=None,
+        **kwargs,
+    ):
         self.calls += 1
+        self.review_kwargs.append({"prior_review": prior_review, **kwargs})
         if self.calls == 1:
             return MainReviewOutput(
                 review_scope="main",
@@ -616,6 +627,8 @@ class _ReviseMainOnceCritic(RuleBasedMainHypothesisCritic):
             approved=approved,
             conflicts=conflicts,
             evidence_universe=evidence_universe,
+            prior_review=prior_review,
+            **kwargs,
         )
 
 
@@ -643,6 +656,7 @@ def test_child_critic_feedback_is_structured_and_bounded_to_one_revision() -> No
     assert retry["schema"] == "critic_retry_control.v1"
     assert retry["priority"] == "highest"
     assert retry["required_changes"] == ["NARROW_ANALYSIS"]
+    assert retry["suggestions"] == ["Narrow the channel-local claim."]
     assert [item.disposition for item in result.branches[0].review_attempts] == [
         "REVISE",
         "APPROVED",
@@ -656,10 +670,11 @@ def test_main_critic_feedback_has_protected_priority_and_one_revision() -> None:
         main_calls.append(kwargs)
         return _main_proposer(**kwargs)
 
+    main_critic = _ReviseMainOnceCritic()
     graph = HypothesisReviewGraph(
         child_scientists={channel: _Scientist() for channel in CHANNELS},
         child_critics={channel: RuleBasedSubCritic() for channel in CHANNELS},
-        main_critic=_ReviseMainOnceCritic(),
+        main_critic=main_critic,
         max_main_revision_attempts=1,
     )
     result = graph.run(
@@ -675,6 +690,14 @@ def test_main_critic_feedback_has_protected_priority_and_one_revision() -> None:
     assert retry["priority"] == "highest"
     assert retry["issue_codes"] == ["OVERCONFIDENT"]
     assert retry["required_changes"] == ["LOWER_CONFIDENCE"]
+    assert retry["suggestions"] == ["Lower confidence to match visible uncertainty."]
+    assert main_critic.review_kwargs[0]["prior_review"] is None
+    prior = main_critic.review_kwargs[1]["prior_review"]
+    assert prior["issue_codes"] == ["OVERCONFIDENT"]
+    assert prior["required_changes"] == ["LOWER_CONFIDENCE"]
+    assert prior["suggestions"] == ["Lower confidence to match visible uncertainty."]
+    assert "explanation" not in prior
+    assert all("message" not in item for item in prior["issues"])
 
 
 def test_required_unavailable_channel_fails_before_main_synthesis() -> None:

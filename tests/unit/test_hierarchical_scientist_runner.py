@@ -145,37 +145,37 @@ def _write_campaign(
         json.dumps(_passing_completion_manifest(expected_rounds=rounds)),
         encoding="utf-8",
     )
-    if write_pipeline:
-        for round_id in range(1, rounds + 1):
-            round_dir = run_dir / f"round_{round_id:02d}"
-            round_dir.mkdir()
-            selected_ids = [f"v{index}" for index in range(budget)]
-            (round_dir / "prediction_scope_receipt.json").write_text(
-                json.dumps(
-                    {
-                        "planned_candidate_count": candidate_limit,
-                        "round_candidate_count": candidate_limit,
-                        "acquisition_prediction_count": (
-                            candidate_limit if spec["al"] else 0
-                        ),
-                        "acquisition_predictions_within_round_candidate_set": True,
-                        "approved_batch_size": budget,
-                        "dry_validation_scope": "draft_selected_candidates_only",
-                        "dry_validation_calls": [
-                            {
-                                "candidate_ids": selected_ids,
-                                "candidate_count": budget,
-                            }
-                        ],
-                        "all_dry_validation_targets_were_draft_selected": True,
-                        "acquisition_prediction_scope": (
-                            "candidate_pool" if spec["al"] else "none"
-                        ),
-                        "oracle_measurement_scope": "approved_batch_only",
-                    }
-                ),
-                encoding="utf-8",
-            )
+    for round_id in range(1, rounds + 1):
+        round_dir = run_dir / f"round_{round_id:02d}"
+        round_dir.mkdir()
+        selected_ids = [f"v{index}" for index in range(budget)]
+        (round_dir / "prediction_scope_receipt.json").write_text(
+            json.dumps(
+                {
+                    "planned_candidate_count": candidate_limit,
+                    "round_candidate_count": candidate_limit,
+                    "acquisition_prediction_count": (
+                        candidate_limit if spec["al"] else 0
+                    ),
+                    "acquisition_predictions_within_round_candidate_set": True,
+                    "approved_batch_size": budget,
+                    "dry_validation_scope": "draft_selected_candidates_only",
+                    "dry_validation_calls": [
+                        {
+                            "candidate_ids": selected_ids,
+                            "candidate_count": budget,
+                        }
+                    ],
+                    "all_dry_validation_targets_were_draft_selected": True,
+                    "acquisition_prediction_scope": (
+                        "candidate_pool" if spec["al"] else "none"
+                    ),
+                    "oracle_measurement_scope": "approved_batch_only",
+                }
+            ),
+            encoding="utf-8",
+        )
+        if write_pipeline:
             (round_dir / "hypothesis_pipeline.json").write_text(
                 json.dumps(_passing_pipeline()),
                 encoding="utf-8",
@@ -515,6 +515,9 @@ def test_audit_rejects_campaign_missing_succeeded_hypothesis_pipeline(tmp_path) 
     )
     assert audit["passed"] is False
     assert "pipeline_present_for_every_completed_round" in audit["failed_checks"]
+    assert "round_01_hypothesis_pipeline" in audit["failed_checks"]
+    assert "round_00_hypothesis_pipeline" not in audit["failed_checks"]
+    assert "round_00_prediction_scope_receipt" not in audit["failed_checks"]
 
 
 def test_audit_accepts_three_succeeded_channel_branches(tmp_path) -> None:
@@ -530,6 +533,32 @@ def test_audit_accepts_three_succeeded_channel_branches(tmp_path) -> None:
     )
     assert audit["passed"] is True
     assert audit["failed_checks"] == []
+
+
+def test_audit_ignores_warmup_round_00_llm_traces(tmp_path) -> None:
+    runner = _load_runner()
+    for condition, fold_index in (("hierarchical", 2), ("kg_3features_rag", 0)):
+        run_dir = tmp_path / f"run-{condition}-warmup"
+        summary = _write_campaign(run_dir, fold_index=fold_index, condition=condition)
+        warmup = run_dir / "round_00" / "llm" / "main_hypothesis_critic"
+        warmup.mkdir(parents=True)
+        (warmup / "conversations.json").write_text("{}", encoding="utf-8")
+        audit = runner.audit_hierarchical_run(
+            summary,
+            condition=condition,
+            expected_fold=fold_index,
+            expected_rounds=3,
+            expected_budget=16,
+            expected_candidate_limit=32,
+        )
+        assert audit["passed"] is True
+        assert audit["failed_checks"] == []
+        assert "round_00_prediction_scope_receipt" not in [
+            item["name"] for item in audit["checks"]
+        ]
+        assert "round_00_hypothesis_pipeline" not in [
+            item["name"] for item in audit["checks"]
+        ]
 
 
 def test_apply_condition_can_disable_hierarchy_for_single_agent_ablation() -> None:

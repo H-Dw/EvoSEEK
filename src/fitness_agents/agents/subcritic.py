@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, get_args
 
 from fitness_agents.agents.output_guards import UnknownEvidenceIdsError
 from fitness_agents.contracts.evidence_universe import RoleVisibleEvidenceUniverse
 from fitness_agents.contracts.hypothesis_pipeline import (
+    COUPLED_REVIEW_CONTRACT,
     ChannelAnalysisOutput,
     ChannelEvidenceInput,
     ChannelReviewOutput,
+    ReviewVerdictName,
+    required_actions_for_review,
     review_body_type,
     review_output_type,
 )
@@ -25,8 +28,321 @@ from .short_ids import (
     rewrite_exact_ids,
 )
 from .structured_completion import complete_structured
-from .subscientist import validate_channel_hypothesis
+from .subscientist import (
+    _mutation_tokens_in_text,
+    _visible_mutation_universe,
+    rewrite_channel_analysis_prose,
+    validate_channel_hypothesis,
+)
 from .transports import OpenAICompatibleChatTransport
+
+_EMPTY_INTERPRETATION_CITATION_MARKERS = (
+    "empty",
+    "uncited",
+    "no fact",
+    "no evidence",
+    "fact_ids",
+    "evidence_ids",
+    "without a citation",
+    "without citation",
+    "missing citation",
+    "no citation",
+)
+_PHYSCHEM_EMPTY_INTERPRETATION_CITATION_CONTRACT = (
+    " Empty INTERPRETATION fact_ids and evidence_ids are expected after materialize; "
+    "do not emit FINDING_UNSUPPORTED or ADD_EVIDENCE_LINK for that contract. Align "
+    "residue direction to mutation tokens on OBSERVATION cards, not sample-label strings."
+)
+_CHANNEL_LIMITATION_CITATION_CONTRACT = (
+    " Empty LIMITATION evidence_ids are expected when no exact card supports the gap; "
+    "do not emit FINDING_UNSUPPORTED or ADD_EVIDENCE_LINK for that contract. Align "
+    "residue identity to mutation notation on visible sample cards, not sample-label "
+    "strings."
+)
+_STRUCTURE_LIMITATION_COORDINATE_CONTRACT = (
+    " A sample- or mutation-scoped missing-coordinate LIMITATION is not refuted by a "
+    "coordinate card for a different sample or mutation token. Do not require "
+    "ACKNOWLEDGE_MISSING_COORDINATES when a LIMITATION already states that gap."
+)
+_SAMPLE_LABEL_MISMATCH_MARKERS = (
+    "sample_map",
+    "sample id",
+    "sample-label",
+    "sample label",
+    "sample ids",
+    "not present in the sample",
+    "wrong sample",
+    "use the variant_id",
+    "use the correct sample",
+)
+_MISSING_COORDINATE_MARKERS = (
+    "missing coordinate",
+    "no coordinate",
+    "coordinates are not",
+    "coordinates were not",
+    "absent coordinate",
+    "no structure evidence",
+    "not provided",
+    "preventing assessment",
+)
+
+
+def _folded_review_text(text: str) -> str:
+    return " ".join(str(text).casefold().split())
+
+
+def _mentions_empty_interpretation_citation(text: str) -> bool:
+    folded = _folded_review_text(text)
+    if "interpretation" not in folded:
+        return False
+    return any(marker in folded for marker in _EMPTY_INTERPRETATION_CITATION_MARKERS)
+
+
+def _physchem_interpretation_citations_are_runtime_empty(
+    hypothesis: ChannelAnalysisOutput,
+) -> bool:
+    interpretations = [
+        finding for finding in hypothesis.findings if finding.kind == "INTERPRETATION"
+    ]
+    return bool(interpretations) and all(
+        not finding.evidence_ids and not finding.fact_ids for finding in interpretations
+    )
+
+
+def sanitize_physchem_review(
+    payload: dict[str, Any],
+    *,
+    hypothesis: ChannelAnalysisOutput,
+) -> dict[str, Any]:
+    """Drop unsatisfiable empty-INTERPRETATION citation demands and keep coupled verdict."""
+
+    if hypothesis.channel != "physchem":
+        return payload
+    review = dict(payload)
+    source_issues = list(review.get("issues") or [])
+    kept_issues: list[Any] = []
+    dropped_empty_citation_issue = False
+    for issue in source_issues:
+        if (
+            isinstance(issue, dict)
+            and issue.get("code") == "FINDING_UNSUPPORTED"
+            and _mentions_empty_interpretation_citation(str(issue.get("message") or ""))
+        ):
+            dropped_empty_citation_issue = True
+            continue
+        kept_issues.append(issue)
+
+    changes = [item for item in (review.get("required_changes") or []) if item]
+    rating = dict(review.get("rating") or {})
+    suggestion_blob = " ".join(
+        [
+            str(review.get("summary") or ""),
+            *(str(item) for item in (rating.get("suggestions") or [])),
+            *(
+                str(issue.get("message") or "")
+                for issue in source_issues
+                if isinstance(issue, dict)
+            ),
+        ]
+    )
+    if "ADD_EVIDENCE_LINK" in changes and (
+        dropped_empty_citation_issue
+        or _mentions_empty_interpretation_citation(suggestion_blob)
+        or _physchem_interpretation_citations_are_runtime_empty(hypothesis)
+    ):
+        changes = [item for item in changes if item != "ADD_EVIDENCE_LINK"]
+
+    review["issues"] = kept_issues
+    review["required_changes"] = changes
+    if review.get("verdict") != "REVISE":
+        review["rating"] = rating
+        return review
+    if changes:
+        review["rating"] = rating
+        return review
+
+    residual_errors = [
+        issue
+        for issue in kept_issues
+        if isinstance(issue, dict) and issue.get("severity") in {"error", "blocker"}
+    ]
+    if residual_errors:
+        review["required_changes"] = ["LOWER_CONFIDENCE"]
+        score = int(rating.get("score") or 3)
+        if score < 2 or score > 3:
+            rating["score"] = 3
+        if not rating.get("suggestions"):
+            rating["suggestions"] = [
+                "Repair the remaining physicochemical direction or confidence defect."
+            ]
+        review["verdict"] = "REVISE"
+        review["rating"] = rating
+        return review
+
+    rating["score"] = 4
+    rating["text_errors"] = []
+    review["verdict"] = "APPROVE"
+    review["required_changes"] = []
+    review["rating"] = rating
+    return review
+
+
+def _empty_limitation_finding_ids(hypothesis: ChannelAnalysisOutput) -> frozenset[str]:
+    return frozenset(
+        finding.finding_id
+        for finding in hypothesis.findings
+        if finding.kind == "LIMITATION" and not finding.evidence_ids
+    )
+
+
+def _mentions_empty_limitation_citation(
+    text: str, *, empty_limitation_ids: frozenset[str]
+) -> bool:
+    folded = _folded_review_text(text)
+    if any(finding_id.casefold() in folded for finding_id in empty_limitation_ids):
+        return True
+    if "limitation" not in folded:
+        return False
+    return any(marker in folded for marker in _EMPTY_INTERPRETATION_CITATION_MARKERS)
+
+
+def _limitation_already_names_missing_coordinates(
+    hypothesis: ChannelAnalysisOutput,
+) -> bool:
+    blobs = [
+        hypothesis.uncertainty,
+        *(finding.statement for finding in hypothesis.findings if finding.kind == "LIMITATION"),
+    ]
+    return any(
+        marker in _folded_review_text(blob)
+        for blob in blobs
+        for marker in _MISSING_COORDINATE_MARKERS
+    )
+
+
+def _mentions_sample_label_mismatch(text: str) -> bool:
+    folded = _folded_review_text(text)
+    return any(marker in folded for marker in _SAMPLE_LABEL_MISMATCH_MARKERS)
+
+
+def _observation_mutation_tokens_are_visible(
+    hypothesis: ChannelAnalysisOutput,
+    context: ChannelEvidenceInput,
+) -> bool:
+    universe = _visible_mutation_universe(context)
+    if not universe:
+        return False
+    mentioned = set()
+    for finding in hypothesis.findings:
+        mentioned.update(_mutation_tokens_in_text(finding.statement))
+    return bool(mentioned) and mentioned.issubset(universe)
+
+
+def sanitize_channel_review(
+    payload: dict[str, Any],
+    *,
+    context: ChannelEvidenceInput,
+    hypothesis: ChannelAnalysisOutput,
+) -> dict[str, Any]:
+    """Drop unsatisfiable LIMITATION citation and sample-label demands."""
+
+    if hypothesis.channel not in {"structure", "conservation"}:
+        return payload
+    review = dict(payload)
+    source_issues = list(review.get("issues") or [])
+    empty_limitation_ids = _empty_limitation_finding_ids(hypothesis)
+    mutation_tokens_visible = _observation_mutation_tokens_are_visible(
+        hypothesis, context
+    )
+    kept_issues: list[Any] = []
+    dropped_empty_limitation_issue = False
+    for issue in source_issues:
+        if not isinstance(issue, dict):
+            kept_issues.append(issue)
+            continue
+        message = str(issue.get("message") or "")
+        code = issue.get("code")
+        if code == "FINDING_UNSUPPORTED" and (
+            _mentions_empty_limitation_citation(
+                message, empty_limitation_ids=empty_limitation_ids
+            )
+            or (
+                empty_limitation_ids
+                and any(
+                    marker in _folded_review_text(message)
+                    for marker in _EMPTY_INTERPRETATION_CITATION_MARKERS
+                )
+            )
+        ):
+            dropped_empty_limitation_issue = True
+            continue
+        if (
+            hypothesis.channel == "structure"
+            and code in {"FINDING_UNSUPPORTED", "COORDINATES_MISSING"}
+            and _mentions_sample_label_mismatch(message)
+            and mutation_tokens_visible
+        ):
+            continue
+        kept_issues.append(issue)
+
+    changes = [item for item in (review.get("required_changes") or []) if item]
+    rating = dict(review.get("rating") or {})
+    suggestion_blob = " ".join(
+        [
+            str(review.get("summary") or ""),
+            *(str(item) for item in (rating.get("suggestions") or [])),
+            *(
+                str(issue.get("message") or "")
+                for issue in source_issues
+                if isinstance(issue, dict)
+            ),
+        ]
+    )
+    if "ADD_EVIDENCE_LINK" in changes and (
+        dropped_empty_limitation_issue
+        or _mentions_empty_limitation_citation(
+            suggestion_blob, empty_limitation_ids=empty_limitation_ids
+        )
+        or bool(empty_limitation_ids)
+    ):
+        changes = [item for item in changes if item != "ADD_EVIDENCE_LINK"]
+    if (
+        hypothesis.channel == "structure"
+        and "ACKNOWLEDGE_MISSING_COORDINATES" in changes
+        and _limitation_already_names_missing_coordinates(hypothesis)
+    ):
+        changes = [item for item in changes if item != "ACKNOWLEDGE_MISSING_COORDINATES"]
+
+    review["issues"] = kept_issues
+    review["required_changes"] = changes
+    review["rating"] = rating
+    if review.get("verdict") != "REVISE":
+        return review
+    if changes:
+        return review
+    residual_errors = [
+        issue
+        for issue in kept_issues
+        if isinstance(issue, dict) and issue.get("severity") in {"error", "blocker"}
+    ]
+    if residual_errors:
+        review["required_changes"] = ["LOWER_CONFIDENCE"]
+        score = int(rating.get("score") or 3)
+        if score < 2 or score > 3:
+            rating["score"] = 3
+        if not rating.get("suggestions"):
+            rating["suggestions"] = [
+                "Repair the remaining channel-semantic or coordinate defect."
+            ]
+        review["verdict"] = "REVISE"
+        review["rating"] = rating
+        return review
+    rating["score"] = 4
+    rating["text_errors"] = []
+    review["verdict"] = "APPROVE"
+    review["required_changes"] = []
+    review["rating"] = rating
+    return review
 
 
 def validate_subcritic_review(
@@ -56,7 +372,16 @@ def validate_subcritic_review(
     actual_samples = {item.sample_id for item in review.sample_reviews}
     if actual_samples != expected_samples or len(review.sample_reviews) != len(expected_samples):
         raise ValueError("Sub-Critic sample_reviews must cover every visible sample exactly once")
-    return review.model_dump(mode="json")
+    dumped = review.model_dump(mode="json")
+    if context.channel == "physchem":
+        dumped = sanitize_physchem_review(dumped, hypothesis=hypothesis)
+        dumped = body_type.model_validate(dumped).model_dump(mode="json")
+    elif context.channel in {"structure", "conservation"}:
+        dumped = sanitize_channel_review(
+            dumped, context=context, hypothesis=hypothesis
+        )
+        dumped = body_type.model_validate(dumped).model_dump(mode="json")
+    return dumped
 
 
 def _approved_review(
@@ -211,8 +536,15 @@ class RemoteSubCritic:
         model_context = ChannelEvidenceInput.model_validate(
             rewrite_exact_ids(context.model_dump(mode="python"), evidence_ids, sample_ids)
         )
-        model_hypothesis = ChannelAnalysisOutput.model_validate(
-            rewrite_exact_ids(hypothesis.model_dump(mode="json"), evidence_ids, sample_ids)
+        model_hypothesis = rewrite_channel_analysis_prose(
+            ChannelAnalysisOutput.model_validate(
+                rewrite_exact_ids(
+                    hypothesis.model_dump(mode="json"), evidence_ids, sample_ids
+                )
+            ),
+            sample_ids,
+            evidence_ids,
+            mode="collapse",
         )
         model_universe = RoleVisibleEvidenceUniverse.model_validate(
             rewrite_exact_ids(evidence_universe.model_dump(mode="python"), evidence_ids)
@@ -241,7 +573,22 @@ class RemoteSubCritic:
                         + "\nWrite the evaluation in the fixed rating object. score 0-1 means "
                         "REJECT, 2-3 means REVISE with actionable suggestions, and 4-5 means "
                         "APPROVE. Any declared text error caps the score at 3. The verdict must "
-                        "match the score band."
+                        "match the score band. "
+                        + COUPLED_REVIEW_CONTRACT
+                        + (
+                            _PHYSCHEM_EMPTY_INTERPRETATION_CITATION_CONTRACT
+                            if context.channel == "physchem"
+                            else (
+                                _CHANNEL_LIMITATION_CITATION_CONTRACT
+                                + (
+                                    _STRUCTURE_LIMITATION_COORDINATE_CONTRACT
+                                    if context.channel == "structure"
+                                    else ""
+                                )
+                                if context.channel in {"structure", "conservation"}
+                                else ""
+                            )
+                        )
                         + " Return one sample_reviews item for every request-local sample label "
                         "in sample_map, with bounded feature_analysis and critic_explanation."
                         + "\nEvidence identifiers are request-local E labels from evidence_map. "
@@ -274,6 +621,8 @@ class RemoteSubCritic:
             max_input_chars=self.max_input_chars,
             repair_hints={
                 "review_scope": (context.channel,),
+                "verdict": get_args(ReviewVerdictName),
+                "required_changes[]": required_actions_for_review(context.channel),
                 "cited_evidence_ids[]": tuple(sorted(model_universe.ids)),
                 "issues[].evidence_ids[]": tuple(sorted(model_universe.ids)),
             },
@@ -285,8 +634,9 @@ class RemoteSubCritic:
                 "id_bridge_scope": bridge.scope_id,
             },
         )
-        decoded = body.model_dump(mode="json")
-        validate_subcritic_review(decoded, context=context, hypothesis=hypothesis)
+        decoded = validate_subcritic_review(
+            body.model_dump(mode="json"), context=context, hypothesis=hypothesis
+        )
         report_llm_id_bridge(round_id=context.round_id, **bridge.audit_payload())
         return output_type(
             **decoded,
@@ -298,5 +648,7 @@ __all__ = [
     "DeterministicSubGateReviewer",
     "RemoteSubCritic",
     "RuleBasedSubCritic",
+    "sanitize_channel_review",
+    "sanitize_physchem_review",
     "validate_subcritic_review",
 ]

@@ -13,12 +13,16 @@ from fitness_agents.agents.adaptive_batch import (
 )
 from fitness_agents.agents.output_guards import SemanticOutputValidationError
 from fitness_agents.agents.remote_llm import RemoteLLMCompletionError
+from fitness_agents.agents.short_ids import ShortIdMap
 from fitness_agents.agents.subscientist import (
     RemoteSubScientist,
     validate_channel_hypothesis,
+    validate_physchem_interpretation,
 )
+from fitness_agents.contracts.evidence_universe import RoleVisibleEvidenceUniverse
 from fitness_agents.contracts.hypothesis_pipeline import (
     BatchedChannelAnalysisResult,
+    ChannelAnalysisBatchArtifact,
     ChannelAnalysisOutput,
     ChannelEvidenceInput,
     PhyschemInterpretationOutput,
@@ -341,6 +345,248 @@ def test_physchem_materialization_keeps_multi_mutation_facts_separate() -> None:
     assert "V39A" in observations[0].statement
     assert observations[1].fact_ids == ["D002"]
     assert "D40Y" in observations[1].statement
+
+
+def test_physchem_interpretation_may_mention_visible_mutation_without_fact_ids() -> None:
+    raw = _context(1).model_dump(mode="python")
+    raw["visible_observations"][0]["mutation_notation"] = "V39A;D40Y"
+    raw["visible_observations"][0]["descriptor_facts"] = (
+        {
+            "fact_id": "D001",
+            "evidence_id": "ev:pc:0",
+            "sample_id": "sample:0",
+            "position": 39,
+            "from_residue": "V",
+            "to_residue": "A",
+            "descriptor": "charge_delta",
+            "delta": 1.0,
+        },
+        {
+            "fact_id": "D002",
+            "evidence_id": "ev:pc:0",
+            "sample_id": "sample:0",
+            "position": 40,
+            "from_residue": "D",
+            "to_residue": "Y",
+            "descriptor": "mass_delta",
+            "delta": 2.0,
+        },
+    )
+    context = ChannelEvidenceInput.model_validate(raw)
+    output = subscientist_module._materialize_physchem_analysis(
+        context=context,
+        explanation=PhyschemInterpretationOutput(
+            analysis_summary="Two mutation-scoped descriptor cards are visible.",
+            interpretations=["Charge and hydropathy diverge for V39A."],
+            counterevidence=[],
+            uncertainty="Descriptor changes do not establish assay performance.",
+            fact_ids=[],
+        ),
+        batch_id="b000",
+    )
+
+    interpretations = [item for item in output.findings if item.kind == "INTERPRETATION"]
+    assert len(interpretations) == 1
+    assert interpretations[0].statement == "Charge and hydropathy diverge for V39A."
+    assert interpretations[0].fact_ids == []
+    assert interpretations[0].evidence_ids == []
+    observations = [item for item in output.findings if item.kind == "OBSERVATION"]
+    assert observations[0].fact_ids == ["D001"]
+    assert observations[1].fact_ids == ["D002"]
+
+
+def test_physchem_materialization_expands_batch_local_sample_labels() -> None:
+    raw = _context(1).model_dump(mode="python")
+    raw["visible_observations"][0]["sample_id"] = "S95"
+    raw["visible_observations"][0]["descriptor_facts"][0]["sample_id"] = "S95"
+    raw["sample_map"] = {"S95": "V39A"}
+    context = ChannelEvidenceInput.model_validate(raw)
+    sample_id_map = ShortIdMap.build(("S95",), prefix="S")
+
+    output = subscientist_module._materialize_physchem_analysis(
+        context=context,
+        explanation=PhyschemInterpretationOutput(
+            analysis_summary="S01 shows a bounded hydropathy shift.",
+            interpretations=["V39A (S01) reduces hydropathy."],
+            counterevidence=["S01 does not reverse charge."],
+            uncertainty="S01 descriptor direction does not establish assay performance.",
+        ),
+        batch_id="b001",
+        sample_id_map=sample_id_map,
+    )
+
+    observations = [item for item in output.findings if item.kind == "OBSERVATION"]
+    interpretations = [item for item in output.findings if item.kind == "INTERPRETATION"]
+    assert observations[0].statement.startswith("S95 (V39A):")
+    assert interpretations[0].statement == "V39A (S95) reduces hydropathy."
+    assert "S01" not in interpretations[0].statement
+    assert interpretations[0].fact_ids == []
+    assert interpretations[0].evidence_ids == []
+    assert output.analysis_summary == "S95 shows a bounded hydropathy shift."
+    assert output.counterevidence == ["S95 does not reverse charge."]
+    assert "S95" in output.uncertainty
+    assert "S01" not in output.uncertainty
+
+
+def test_physchem_materialization_uses_per_batch_sample_maps_not_a_global_map() -> None:
+    first = _context(1).model_dump(mode="python")
+    first["visible_observations"][0]["sample_id"] = "S95"
+    first["visible_observations"][0]["descriptor_facts"][0]["sample_id"] = "S95"
+    first["sample_map"] = {"S95": "V39A"}
+    second = _context(1).model_dump(mode="python")
+    second["visible_observations"][0]["sample_id"] = "S96"
+    second["visible_observations"][0]["descriptor_facts"][0]["sample_id"] = "S96"
+    second["visible_observations"][0]["mutation_notation"] = "G41Q"
+    second["visible_observations"][0]["descriptor_facts"][0]["to_residue"] = "Q"
+    second["visible_observations"][0]["descriptor_facts"][0]["position"] = 41
+    second["visible_observations"][0]["descriptor_facts"][0]["from_residue"] = "G"
+    second["sample_map"] = {"S96": "G41Q"}
+    first_context = ChannelEvidenceInput.model_validate(first)
+    second_context = ChannelEvidenceInput.model_validate(second)
+    global_map = ShortIdMap.build(("S95", "S96"), prefix="S")
+    first_map = ShortIdMap.build(("S95",), prefix="S")
+    second_map = ShortIdMap.build(("S96",), prefix="S")
+
+    first_output = subscientist_module._materialize_physchem_analysis(
+        context=first_context,
+        explanation=PhyschemInterpretationOutput(
+            analysis_summary="The visible cards show bounded descriptor shifts.",
+            interpretations=["V39A (S01) reduces hydropathy."],
+            counterevidence=[],
+            uncertainty="Descriptor changes do not establish assay performance.",
+        ),
+        batch_id="b000",
+        sample_id_map=first_map,
+    )
+    second_output = subscientist_module._materialize_physchem_analysis(
+        context=second_context,
+        explanation=PhyschemInterpretationOutput(
+            analysis_summary="The visible cards show bounded descriptor shifts.",
+            interpretations=["G41Q (S01) reduces hydropathy."],
+            counterevidence=[],
+            uncertainty="Descriptor changes do not establish assay performance.",
+        ),
+        batch_id="b001",
+        sample_id_map=second_map,
+    )
+
+    first_interp = next(
+        item for item in first_output.findings if item.kind == "INTERPRETATION"
+    )
+    second_interp = next(
+        item for item in second_output.findings if item.kind == "INTERPRETATION"
+    )
+    assert first_interp.statement == "V39A (S95) reduces hydropathy."
+    assert second_interp.statement == "G41Q (S96) reduces hydropathy."
+    assert global_map.expand_aliases_in_text("G41Q (S01) reduces hydropathy.") == (
+        "G41Q (S95) reduces hydropathy."
+    )
+    assert first_interp.fact_ids == second_interp.fact_ids == []
+
+
+def test_physchem_aggregation_does_not_decode_sample_labels() -> None:
+    context = _context(2)
+    analysis = ChannelAnalysisOutput(
+        analysis_id="A-PC-R01-B000",
+        channel="physchem",
+        analysis_summary="The visible cards show bounded descriptor shifts.",
+        findings=[
+            {
+                "finding_id": "F01",
+                "kind": "OBSERVATION",
+                "statement": "sample:0 (V39A): charge_delta delta 0.",
+                "evidence_ids": ["ev:pc:0"],
+                "fact_ids": ["D001"],
+                "confidence": "high",
+            },
+            {
+                "finding_id": "F02",
+                "kind": "INTERPRETATION",
+                "statement": "V39A (S01) reduces hydropathy.",
+                "evidence_ids": [],
+                "fact_ids": [],
+                "confidence": "low",
+            },
+        ],
+        candidate_hypotheses=[],
+        evidence_ids=["ev:pc:0"],
+        fact_ids=["D001"],
+        counterevidence=[],
+        uncertainty="Descriptor changes do not establish assay performance.",
+    )
+    artifact = ChannelAnalysisBatchArtifact(
+        batch_id="b000",
+        split_depth=0,
+        sample_ids=("sample:0",),
+        input_receipt_id="IN-01",
+        output_receipt_id="OUT-01",
+        evidence_universe=RoleVisibleEvidenceUniverse.from_role_sources(
+            role="subscientist:physchem",
+            evidence=context.evidence,
+        ),
+        analysis=analysis,
+    )
+
+    aggregate = subscientist_module._aggregate_batch_analyses(
+        context=context, batches=(artifact,)
+    )
+    interpretation = next(
+        item for item in aggregate.findings if item.kind == "INTERPRETATION"
+    )
+    assert interpretation.statement == "V39A (S01) reduces hydropathy."
+    assert interpretation.fact_ids == []
+
+
+def test_physchem_interpretation_rejects_unseen_mutation_tokens() -> None:
+    context = _context(1)
+    payload = PhyschemInterpretationOutput(
+        analysis_summary="The visible cards show bounded descriptor shifts.",
+        interpretations=["G41D would reverse the local charge direction."],
+        counterevidence=[],
+        uncertainty="Descriptor changes do not establish assay performance.",
+    ).model_dump(mode="json")
+
+    with pytest.raises(SemanticOutputValidationError) as captured:
+        validate_physchem_interpretation(payload, context=context)
+
+    assert captured.value.paths == ("interpretations.0",)
+    assert "visible sample cards" in str(captured.value)
+
+    with pytest.raises(SemanticOutputValidationError) as materialized:
+        subscientist_module._materialize_physchem_analysis(
+            context=context,
+            explanation=PhyschemInterpretationOutput.model_validate(payload),
+            batch_id="b000",
+        )
+
+    assert materialized.value.paths == ("interpretations.0",)
+
+
+def test_physchem_summary_and_counterevidence_reject_unseen_mutation_tokens() -> None:
+    context = _context(1)
+    with pytest.raises(SemanticOutputValidationError) as summary_error:
+        validate_physchem_interpretation(
+            PhyschemInterpretationOutput(
+                analysis_summary="G41D is outside this request but is discussed anyway.",
+                interpretations=["Charge deltas remain bounded."],
+                counterevidence=[],
+                uncertainty="Descriptor changes do not establish assay performance.",
+            ).model_dump(mode="json"),
+            context=context,
+        )
+    assert summary_error.value.paths == ("analysis_summary",)
+
+    with pytest.raises(SemanticOutputValidationError) as counter_error:
+        validate_physchem_interpretation(
+            PhyschemInterpretationOutput(
+                analysis_summary="The visible cards show bounded descriptor shifts.",
+                interpretations=["Charge deltas remain bounded."],
+                counterevidence=["G41D is a counterexample not on these cards."],
+                uncertainty="Descriptor changes do not establish assay performance.",
+            ).model_dump(mode="json"),
+            context=context,
+        )
+    assert counter_error.value.paths == ("counterevidence.0",)
 
 
 def test_adaptive_batch_failure_preserves_completed_sibling_results() -> None:

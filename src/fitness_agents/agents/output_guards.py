@@ -244,6 +244,135 @@ def classify_output_failure(
     )
 
 
+_COUPLED_CRITIC_PATHS = frozenset(
+    {
+        "$",
+        "verdict",
+        "rating",
+        "required_changes",
+        "rating.score",
+        "rating.suggestions",
+        "rating.text_errors",
+    }
+)
+_COUPLED_CRITIC_MARKERS = (
+    "verdict must be",
+    "revise requires",
+    "approve cannot",
+    "required_changes",
+    "rating 2-3",
+    "rating 4-5",
+    "text errors remain",
+    "matching required_changes",
+    "machine-executable required_changes",
+)
+
+
+def critic_advice_from_payload(payload: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Extract Critic suggestions so a schema retry can keep the repair brief."""
+
+    if not isinstance(payload, dict):
+        return None
+    rating = payload.get("rating") if isinstance(payload.get("rating"), dict) else {}
+    suggestions: list[str] = []
+    for item in rating.get("suggestions") or ():
+        text = str(item).strip()
+        if text:
+            suggestions.append(text[:300])
+    for review in payload.get("sample_reviews") or ():
+        if not isinstance(review, dict):
+            continue
+        for item in review.get("suggestions") or ():
+            text = str(item).strip()
+            if text:
+                suggestions.append(text[:300])
+    required_changes = payload.get("required_changes")
+    serialized_changes: list[Any] = []
+    if isinstance(required_changes, list):
+        for change in required_changes[:12]:
+            if isinstance(change, str) and change.strip():
+                serialized_changes.append(change.strip())
+                continue
+            if not isinstance(change, dict):
+                continue
+            rationale = str(change.get("rationale") or "").strip()
+            if rationale:
+                suggestions.append(rationale[:300])
+            serialized_changes.append(
+                {
+                    key: change[key]
+                    for key in ("action", "rationale", "target_ids", "parameters", "priority")
+                    if key in change
+                }
+            )
+    issues = []
+    for issue in payload.get("issues") or ():
+        if not isinstance(issue, dict):
+            continue
+        issues.append(
+            {
+                "code": issue.get("code"),
+                "severity": issue.get("severity"),
+                "message": str(issue.get("message") or "")[:240],
+            }
+        )
+    explanation = str(payload.get("explanation") or payload.get("summary") or "").strip()
+    advice = {
+        "score": rating.get("score"),
+        "rationale": str(rating.get("rationale") or "")[:400],
+        "suggestions": list(dict.fromkeys(suggestions))[:12],
+        "text_errors": [str(item)[:240] for item in (rating.get("text_errors") or ()) if item][:8],
+        "previous_required_changes": serialized_changes[:12],
+        "issues": issues[:12],
+        "explanation": explanation[:600],
+    }
+    if not any(
+        (
+            advice["suggestions"],
+            advice["text_errors"],
+            advice["previous_required_changes"],
+            advice["issues"],
+            advice["explanation"],
+            advice["score"] is not None,
+        )
+    ):
+        return None
+    return {key: value for key, value in advice.items() if value not in (None, "", [], {})}
+
+
+def _schema_has_coupled_critic_fields(schema: dict[str, Any] | None) -> bool:
+    constraints = schema_constraints(schema or {})
+    has_verdict = "verdict" in constraints
+    has_changes = (
+        "required_changes[]" in constraints or "required_changes[].action" in constraints
+    )
+    return has_verdict and has_changes
+
+
+def coupled_critic_repair_needed(
+    error: Exception,
+    *,
+    schema: dict[str, Any] | None = None,
+    previous_payload: dict[str, Any] | None = None,
+) -> bool:
+    """True when verdict/rating/required_changes must be repaired together."""
+
+    if _schema_has_coupled_critic_fields(schema):
+        return True
+    if isinstance(previous_payload, dict) and {
+        "verdict",
+        "rating",
+        "required_changes",
+    }.issubset(previous_payload):
+        return True
+    details = validation_error_entries(error)
+    paths = {item["path"] for item in details}
+    if paths.intersection(_COUPLED_CRITIC_PATHS):
+        return True
+    blob = " ".join(item["message"] for item in details).casefold()
+    return any(marker in blob for marker in _COUPLED_CRITIC_MARKERS)
+
+
 def retry_instruction(
     failure: OutputFailure,
     *,
@@ -251,6 +380,7 @@ def retry_instruction(
     schema: dict[str, Any] | None = None,
     repair_hints: dict[str, tuple[str, ...] | list[str]] | None = None,
     allowed_evidence_ids: tuple[str, ...] = (),
+    previous_payload: dict[str, Any] | None = None,
 ) -> str:
     parts = [
         f"The previous JSON failed ({failure.kind}): {failure.message[:800]}.",
@@ -261,11 +391,32 @@ def retry_instruction(
     if failure.decode_position is not None:
         parts.append(f"JSON parse failed at character {failure.decode_position}.")
     parts.append(f"content_chars={failure.content_length}.")
+    coupled = coupled_critic_repair_needed(
+        error, schema=schema, previous_payload=previous_payload
+    )
     if failure.kind == "truncated":
         parts.append(
             "The previous completion was truncated; do not copy it or guess its missing suffix. "
             "Emit a fresh compact object."
         )
+    elif coupled:
+        parts.append(
+            "Path $ or a rating/verdict/required_changes error is a cross-field invariant. "
+            "Repair verdict, rating, and required_changes together. Keep existing "
+            "rating.suggestions and explanation. If verdict is REVISE, required_changes must "
+            "be a non-empty subset of the allow-listed actions; suggestions are not a "
+            "substitute. If verdict is APPROVE, required_changes must be [] and issues must "
+            "not contain blockers. If verdict is REJECT, required_changes must be []. "
+            "Score 0-1 maps to REJECT, 2-3 to REVISE, and 4-5 to APPROVE. Non-empty "
+            "text_errors caps the score at 3."
+        )
+        details = validation_error_entries(error)
+        if details:
+            parts.append(
+                "Validation errors (field path/type/message): "
+                + json.dumps(details, ensure_ascii=False, separators=(",", ":"))
+                + "."
+            )
     else:
         parts.append("Modify only the fields named by the validation errors.")
         details = validation_error_entries(error)
@@ -275,6 +426,13 @@ def retry_instruction(
                 + json.dumps(details, ensure_ascii=False, separators=(",", ":"))
                 + "."
             )
+    advice = critic_advice_from_payload(previous_payload)
+    if advice and failure.kind != "truncated":
+        parts.append(
+            "Preserve this Critic repair brief while making the JSON schema-valid: "
+            + json.dumps(advice, ensure_ascii=False, separators=(",", ":"))
+            + ". If required_changes is empty, map suggestions onto allow-listed actions."
+        )
     unknown = getattr(error, "unknown", ())
     allowed = getattr(error, "allowed", allowed_evidence_ids)
     if unknown:
@@ -295,10 +453,16 @@ def retry_instruction(
             + json.dumps(constraints, ensure_ascii=False, separators=(",", ":"))
             + "."
         )
-    parts.append(
-        "Do not change verdict, action, or identifier fields unless their exact path is "
-        "listed as invalid."
-    )
+    if coupled:
+        parts.append(
+            "Identifier fields stay unchanged unless their exact path is listed as invalid. "
+            "Verdict and required_changes may change when needed to satisfy the coupled contract."
+        )
+    else:
+        parts.append(
+            "Do not change verdict, action, or identifier fields unless their exact path is "
+            "listed as invalid."
+        )
     return " ".join(parts)
 
 
@@ -588,11 +752,26 @@ def critic_revision_payload(
                 "priority": int(getattr(change, "priority", 1)),
             }
         )
+    suggestions = [
+        str(item)
+        for item in (getattr(decision, "rating_suggestions", ()) or ())
+        if str(item).strip()
+    ]
+    if not suggestions:
+        suggestions = [item["rationale"] for item in changes if item.get("rationale")]
     return {
         "revision_scope": "hypothesis",
         "verdict": getattr(getattr(decision, "verdict", None), "value", "REVISE"),
         "summary": getattr(decision, "summary", "") or "",
         "required_changes": changes,
+        "suggestions": suggestions[:12],
+        "text_errors": [
+            str(item)
+            for item in (getattr(decision, "rating_text_errors", ()) or ())
+            if str(item).strip()
+        ][:8],
+        "rating_score": getattr(decision, "rating_score", None),
+        "rating_rationale": getattr(decision, "rating_rationale", "") or "",
         "rejected_hypothesis_id": getattr(rejected_hypothesis, "hypothesis_id", None),
         "rejected_statement": getattr(rejected_hypothesis, "statement", None),
         "rejected_preferred_residues": serialised,

@@ -31,6 +31,7 @@ from .context_projection import (
     main_synthesis_evidence_cards,
     select_main_review_evidence_cards,
 )
+from .main_hypothesis_critic import prior_review_payload
 from .remote_llm import completion_receipt_snapshot, reset_completion_receipt
 from .subscientist import validate_channel_hypothesis
 
@@ -286,6 +287,7 @@ class HypothesisReviewGraph:
                     "decision_id": review.decision_id,
                     "rating": review.rating.model_dump(mode="json"),
                     "required_changes": list(review.required_changes),
+                    "suggestions": list(review.rating.suggestions),
                     "summary": review.summary,
                 }
             )
@@ -298,6 +300,8 @@ class HypothesisReviewGraph:
                 "decision_id": review.decision_id,
                 "issue_codes": [item.code for item in review.issues],
                 "required_changes": list(review.required_changes),
+                "suggestions": list(review.rating.suggestions),
+                "text_errors": list(review.rating.text_errors),
                 "critic_summary": review.summary,
                 "critic_history": list(critic_history),
             }
@@ -394,6 +398,7 @@ class HypothesisReviewGraph:
         last_hypothesis: Hypothesis | None = None
         last_review = None
         revision = None
+        prior_review: dict[str, Any] | None = None
         main_critic_history: list[dict[str, Any]] = []
         for attempt in range(self.max_main_revision_attempts + 1):
             hypothesis = None
@@ -448,12 +453,18 @@ class HypothesisReviewGraph:
                     "conflicts": conflicts,
                     "evidence_universe": critic_evidence_universe,
                 }
-                if any(
-                    item.name == "evidence_cards"
-                    or item.kind is Parameter.VAR_KEYWORD
+                accepts_kwargs = any(
+                    item.kind is Parameter.VAR_KEYWORD for item in review_parameters
+                )
+                param_names = {
+                    item.name
                     for item in review_parameters
-                ):
+                    if item.kind is not Parameter.VAR_KEYWORD
+                }
+                if "evidence_cards" in param_names or accepts_kwargs:
                     review_kwargs["evidence_cards"] = selected_evidence_cards
+                if "prior_review" in param_names or accepts_kwargs:
+                    review_kwargs["prior_review"] = prior_review
                 review = self.main_critic.review(**review_kwargs)
             except Exception as error:  # noqa: BLE001 - graph must emit a terminal receipt
                 if hypothesis is not None:
@@ -526,9 +537,11 @@ class HypothesisReviewGraph:
                     "decision_id": review.decision_id,
                     "rating": review.rating.model_dump(mode="json"),
                     "required_changes": list(review.required_changes),
+                    "suggestions": list(review.rating.suggestions),
                     "explanation": review.explanation,
                 }
             )
+            prior_review = prior_review_payload(review)
             revision = {
                 "schema": "critic_retry_control.v1",
                 "priority": "highest",
@@ -541,6 +554,8 @@ class HypothesisReviewGraph:
                 "decision_id": review.decision_id,
                 "issue_codes": [item.code for item in review.issues],
                 "required_changes": list(review.required_changes),
+                "suggestions": list(review.rating.suggestions),
+                "text_errors": list(review.rating.text_errors),
                 "explanation": review.explanation,
                 "critic_history": list(main_critic_history),
             }

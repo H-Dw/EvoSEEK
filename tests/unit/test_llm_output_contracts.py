@@ -220,6 +220,24 @@ def test_native_scientist_revision_block_sets_parent_and_attempt_id() -> None:
     assert hypothesis.parent_hypothesis_id == "hyp:run:r1"
 
 
+def test_soft_hypothesis_allows_assay_must_and_does_not_fail_closed_on_verbal_hardness() -> None:
+    payload = {
+        **_valid_payload(),
+        "statement": "Test V39A; V39 must remain Val if the assay is to bind.",
+        "expected_outcome": (
+            "The selected batch median must exceed the preregistered pre-round "
+            "visible-observation median; missing required observations yield INCONCLUSIVE."
+        ),
+    }
+    dumped = validate_hypothesis_payload(
+        payload,
+        expected_hypothesis_id="H01",
+        expected_positions=(39, 40, 41, 54),
+    )
+    assert dumped["hard_residue_constraints"] == {}
+    assert "must exceed" in dumped["expected_outcome"]
+
+
 def test_hypothesis_output_schema_accepts_task_scoped_dynamic_site_keys() -> None:
     schema = HypothesisOutput.model_json_schema()
     site_schema = schema["properties"]["preferred_residues"]
@@ -237,7 +255,7 @@ def test_scientist_profile_defines_output_and_authority_boundaries() -> None:
     assert "batch submission" in profile
     assert "sha256" not in profile.casefold()
     assert "critic_revision" in profile
-    assert "400" in profile
+    assert "800" in profile
     assert "visible_observations" in profile
     assert "## 3. Activation-state routing" in profile
     assert "## 4. Directed-evolution reasoning hierarchy" in profile

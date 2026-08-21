@@ -15,4 +15,6 @@ When the request supplies an `id_maps`, `sample_map`, `evidence_map`, or other a
    unresolved, or missing-evidence form. Do not borrow an ID from another sample or namespace.
 
 These constraints apply independently to every LLM transaction. Labels from an earlier request
-have no identity in the current request unless they are explicitly supplied again.
+have no identity in the current request unless they are explicitly supplied again. A short label
+absent from the current request's allowed-ID region is not a citation and must not be treated as
+missing evidence or as a reason to demand a new card.

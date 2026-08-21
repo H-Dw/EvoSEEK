@@ -10,11 +10,16 @@ from typing import Any
 from fitness_agents.contracts.evidence_universe import RoleVisibleEvidenceUniverse
 from fitness_agents.contracts.hypothesis_pipeline import (
     BatchedChannelAnalysisResult,
+    CANDIDATE_PROSE_MAX,
     ChannelAnalysisBatchArtifact,
     ChannelAnalysisOutput,
     ChannelEvidenceInput,
+    CHANNEL_ANALYSIS_PROSE_MAX,
+    CHANNEL_FINDING_STATEMENT_MAX,
+    PHYSCHEM_SUMMARY_MAX,
     PhyschemInterpretationOutput,
 )
+from fitness_agents.mutation.notation import InvalidMutationNotation, parse_mutation_notation
 from fitness_agents.utils.progress import report_event, report_llm_id_bridge
 
 from .adaptive_batch import (
@@ -53,6 +58,144 @@ _PACK_SAMPLE_FIELDS = (
 _MUTATION_REFERENCE_RE = re.compile(
     r"\b([ACDEFGHIKLMNPQRSTVWY][1-9][0-9]*[ACDEFGHIKLMNPQRSTVWY])\b"
 )
+_PHYSCHEM_PROSE_MUTATION_MESSAGE = (
+    "physchem prose may only mention mutation tokens that appear on visible sample "
+    "cards; prefer those mutation tokens in interpretation sentences and do not invent "
+    "residue identities"
+)
+
+
+def _mutation_tokens_in_text(text: str) -> set[str]:
+    return {token.upper() for token in _MUTATION_REFERENCE_RE.findall(str(text).upper())}
+
+
+def _visible_mutation_universe(context: ChannelEvidenceInput) -> frozenset[str]:
+    """Mutations grounded by this request's sample cards and descriptor facts."""
+
+    universe: set[str] = set()
+    for sample in context.visible_observations:
+        for fact in sample.descriptor_facts:
+            universe.add(f"{fact.from_residue}{fact.position}{fact.to_residue}".upper())
+        notation = str(sample.mutation_notation or "")
+        try:
+            edits = parse_mutation_notation(notation)
+        except InvalidMutationNotation:
+            edits = ()
+        for edit in edits:
+            universe.add(f"{edit.wt}{edit.position}{edit.mutant}".upper())
+        universe.update(_mutation_tokens_in_text(notation))
+    return frozenset(universe)
+
+
+def _out_of_universe_mutation_paths(
+    fields: tuple[tuple[str, str], ...],
+    *,
+    universe: frozenset[str],
+) -> tuple[str, ...]:
+    return tuple(
+        path
+        for path, text in fields
+        if _mutation_tokens_in_text(text).difference(universe)
+    )
+
+
+def _physchem_universe_error(
+    paths: tuple[str, ...], *, universe: frozenset[str]
+) -> SemanticOutputValidationError:
+    return SemanticOutputValidationError(
+        _PHYSCHEM_PROSE_MUTATION_MESSAGE,
+        paths=paths,
+        allowed_values={"visible_mutations": tuple(sorted(universe)[:24])},
+    )
+
+
+def _prose_with_canonical_sample_labels(
+    text: str,
+    sample_id_map: ShortIdMap | None,
+    *,
+    limit: int,
+) -> str:
+    """Expand batch-local Sxx tokens in prose to the sample IDs OBSERVATION uses."""
+
+    expanded = str(text)
+    if sample_id_map is not None:
+        expanded = sample_id_map.expand_aliases_in_text(expanded)
+    return expanded[:limit]
+
+
+def _rewrite_prose_with_id_maps(
+    text: str,
+    maps: tuple[ShortIdMap | None, ...],
+    *,
+    mode: str,
+    limit: int,
+) -> str:
+    rewritten = str(text)
+    for mapping in maps:
+        if mapping is None:
+            continue
+        if mode == "collapse":
+            rewritten = mapping.collapse_canonicals_in_text(rewritten)
+        else:
+            rewritten = mapping.expand_aliases_in_text(rewritten)
+    if not rewritten.strip():
+        return str(text)[:limit]
+    return rewritten[:limit]
+
+
+def rewrite_channel_analysis_prose(
+    analysis: ChannelAnalysisOutput,
+    *maps: ShortIdMap | None,
+    mode: str = "expand",
+) -> ChannelAnalysisOutput:
+    """Rewrite sample/evidence aliases in analysis prose using this request's maps.
+
+    ``expand`` turns batch-local ``Sxx``/``Exx`` into canonical IDs. ``collapse``
+    turns those canonical IDs back into the current request's aliases. Typed ID
+    arrays are left unchanged.
+    """
+
+    def rewrite(text: str, *, limit: int) -> str:
+        return _rewrite_prose_with_id_maps(text, maps, mode=mode, limit=limit)
+
+    return analysis.model_copy(
+        update={
+            "analysis_summary": rewrite(
+                analysis.analysis_summary, limit=CHANNEL_ANALYSIS_PROSE_MAX
+            ),
+            "uncertainty": rewrite(analysis.uncertainty, limit=CHANNEL_ANALYSIS_PROSE_MAX),
+            "counterevidence": [
+                rewrite(item, limit=CHANNEL_ANALYSIS_PROSE_MAX)
+                for item in analysis.counterevidence
+            ],
+            "findings": [
+                finding.model_copy(
+                    update={
+                        "statement": rewrite(
+                            finding.statement, limit=CHANNEL_FINDING_STATEMENT_MAX
+                        )
+                    }
+                )
+                for finding in analysis.findings
+            ],
+            "candidate_hypotheses": [
+                hypothesis.model_copy(
+                    update={
+                        "statement": rewrite(
+                            hypothesis.statement, limit=CANDIDATE_PROSE_MAX
+                        ),
+                        "expected_observation": rewrite(
+                            hypothesis.expected_observation, limit=CANDIDATE_PROSE_MAX
+                        ),
+                        "falsification_criterion": rewrite(
+                            hypothesis.falsification_criterion, limit=CANDIDATE_PROSE_MAX
+                        ),
+                    }
+                )
+                for hypothesis in analysis.candidate_hypotheses
+            ],
+        }
+    )
 
 
 def _row_sample_id(value: Any) -> str | None:
@@ -371,7 +514,7 @@ def _aggregate_batch_analyses(
             "additional batch-local items remain in typed artifacts."
         ),
         [item.uncertainty for item in analyses],
-        limit=400,
+        limit=CHANNEL_ANALYSIS_PROSE_MAX,
     )
     aggregate = ChannelAnalysisOutput(
         analysis_id=f"A-{context.channel[:2].upper()}-R{context.round_id:02d}-AGG",
@@ -426,7 +569,9 @@ def validate_channel_hypothesis(
     uncited_paths = tuple(
         path
         for index, finding in enumerate(output.findings)
-        if finding.kind != "LIMITATION" and not finding.evidence_ids
+        if finding.kind != "LIMITATION"
+        and not (output.channel == "physchem" and finding.kind == "INTERPRETATION")
+        and not finding.evidence_ids
         for path in (f"findings.{index}.kind", f"findings.{index}.evidence_ids")
     )
     if uncited_paths:
@@ -476,11 +621,11 @@ def validate_channel_hypothesis(
             required_evidence = {fact.evidence_id for fact in referenced_facts}
             if not required_evidence.issubset(finding.evidence_ids):
                 mismatched_fact_paths.append(f"findings.{index}.evidence_ids")
-            statement_mutations = set(
-                _MUTATION_REFERENCE_RE.findall(finding.statement.upper())
-            )
+            if finding.kind != "OBSERVATION":
+                continue
+            statement_mutations = _mutation_tokens_in_text(finding.statement)
             referenced_mutations = {
-                f"{fact.from_residue}{fact.position}{fact.to_residue}"
+                f"{fact.from_residue}{fact.position}{fact.to_residue}".upper()
                 for fact in referenced_facts
             }
             if statement_mutations.difference(referenced_mutations):
@@ -490,6 +635,24 @@ def validate_channel_hypothesis(
                 "descriptor fact references must be visible and match the cited mutation/evidence",
                 paths=tuple(unknown_fact_paths + mismatched_fact_paths),
             )
+        universe = _visible_mutation_universe(context)
+        prose_fields = (
+            ("analysis_summary", output.analysis_summary),
+            ("uncertainty", output.uncertainty),
+            *(
+                (f"counterevidence.{index}", text)
+                for index, text in enumerate(output.counterevidence)
+            ),
+            *(
+                (f"findings.{index}.statement", finding.statement)
+                for index, finding in enumerate(output.findings)
+                if finding.kind != "OBSERVATION"
+            ),
+        )
+        if prose_paths := _out_of_universe_mutation_paths(
+            prose_fields, universe=universe
+        ):
+            raise _physchem_universe_error(prose_paths, universe=universe)
     cited_ids = set(output.evidence_ids)
     cited_ids.update(
         evidence_id
@@ -527,6 +690,21 @@ def validate_physchem_interpretation(
             "physchem interpretation references IDs outside the visible request",
             paths=("sample_ids", "evidence_ids", "fact_ids"),
         )
+    universe = _visible_mutation_universe(context)
+    prose_fields = (
+        ("analysis_summary", output.analysis_summary),
+        ("uncertainty", output.uncertainty),
+        *(
+            (f"interpretations.{index}", text)
+            for index, text in enumerate(output.interpretations)
+        ),
+        *(
+            (f"counterevidence.{index}", text)
+            for index, text in enumerate(output.counterevidence)
+        ),
+    )
+    if prose_paths := _out_of_universe_mutation_paths(prose_fields, universe=universe):
+        raise _physchem_universe_error(prose_paths, universe=universe)
     return output.model_dump(mode="json")
 
 
@@ -535,9 +713,13 @@ def _materialize_physchem_analysis(
     context: ChannelEvidenceInput,
     explanation: PhyschemInterpretationOutput,
     batch_id: str,
+    sample_id_map: ShortIdMap | None = None,
 ) -> ChannelAnalysisOutput:
     """Attach runtime-owned descriptor cards and citation unions to bounded prose."""
 
+    validate_physchem_interpretation(
+        explanation.model_dump(mode="json"), context=context
+    )
     facts_by_mutation: dict[tuple[str, int, str, str], list[Any]] = {}
     for sample in context.visible_observations:
         for fact in sample.descriptor_facts:
@@ -578,7 +760,9 @@ def _materialize_physchem_analysis(
             {
                 "finding_id": f"F{len(findings) + 1:02d}",
                 "kind": "OBSERVATION",
-                "statement": f"{sample_id} ({mutation}): {descriptor_text}."[:300],
+                "statement": f"{sample_id} ({mutation}): {descriptor_text}."[
+                    :CHANNEL_FINDING_STATEMENT_MAX
+                ],
                 "evidence_ids": list(
                     dict.fromkeys(item.evidence_id for item in facts)
                 ),
@@ -590,9 +774,11 @@ def _materialize_physchem_analysis(
         findings.append(
             {
                 "finding_id": f"F{len(findings) + 1:02d}",
-                "kind": "INTERPRETATION" if evidence_ids else "LIMITATION",
-                "statement": text,
-                "evidence_ids": evidence_ids[:8] if evidence_ids else [],
+                "kind": "INTERPRETATION",
+                "statement": _prose_with_canonical_sample_labels(
+                    text, sample_id_map, limit=CHANNEL_FINDING_STATEMENT_MAX
+                ),
+                "evidence_ids": [],
                 "fact_ids": [],
                 "confidence": "low",
             }
@@ -611,7 +797,9 @@ def _materialize_physchem_analysis(
     output = ChannelAnalysisOutput(
         analysis_id=f"A-PC-R{context.round_id:02d}-{batch_id.upper()}",
         channel="physchem",
-        analysis_summary=explanation.analysis_summary,
+        analysis_summary=_prose_with_canonical_sample_labels(
+            explanation.analysis_summary, sample_id_map, limit=CHANNEL_ANALYSIS_PROSE_MAX
+        ),
         findings=findings,
         candidate_hypotheses=[],
         evidence_ids=sorted(
@@ -628,8 +816,13 @@ def _materialize_physchem_analysis(
                 for fact_id in finding["fact_ids"]
             }
         ),
-        counterevidence=explanation.counterevidence,
-        uncertainty=explanation.uncertainty,
+        counterevidence=[
+            _prose_with_canonical_sample_labels(text, sample_id_map, limit=CHANNEL_ANALYSIS_PROSE_MAX)
+            for text in explanation.counterevidence
+        ],
+        uncertainty=_prose_with_canonical_sample_labels(
+            explanation.uncertainty, sample_id_map, limit=CHANNEL_ANALYSIS_PROSE_MAX
+        ),
     )
     validate_channel_hypothesis(output.model_dump(mode="json"), context=context)
     return output
@@ -687,12 +880,12 @@ class RuleBasedSubScientist:
                 f"A{1 if context.retry_control else 0}"
             ),
             channel=context.channel,
-            analysis_summary=claim[:400],
+            analysis_summary=claim[:CHANNEL_ANALYSIS_PROSE_MAX],
             findings=[
                 {
                     "finding_id": "F01",
                     "kind": finding_kind,
-                    "statement": claim[:300],
+                    "statement": claim[:CHANNEL_FINDING_STATEMENT_MAX],
                     "evidence_ids": evidence_ids[:8],
                     "fact_ids": fact_ids,
                     "confidence": "low",
@@ -852,8 +1045,15 @@ class RemoteSubScientist:
         output_type = PhyschemInterpretationOutput if physchem else ChannelAnalysisOutput
         request_instruction = (
             "\nReturn bounded physicochemical analysis for the supplied descriptor observation "
-            "cards. You may cite request-local sample, evidence, and fact labels from id_maps. "
-            "Local code owns citation closure and downstream scientific attribution."
+            "cards. Prefer mutation tokens already printed on visible sample cards in "
+            "interpretation sentences. Top-level sample_ids/evidence_ids/fact_ids may use "
+            "request-local Sxx/Fxx/Exx labels from id_maps; local code owns observation "
+            "findings and citation closure. Request-local Sxx tokens in prose are expanded at "
+            "materialize to the same sample IDs OBSERVATION uses. INTERPRETATION findings keep "
+            "empty evidence_ids/fact_ids; do not treat ADD_EVIDENCE_LINK as a request to attach "
+            "facts to interpretations. Do not invent mutation identities; if prose mentions a "
+            "mutation token such as V39A, it must already appear on a visible sample card. "
+            "Keep analysis_summary under 600 characters."
             if physchem
             else (
                 "\nProduce an analysis card, not a required mutation proposal. This request "
@@ -865,6 +1065,12 @@ class RemoteSubScientist:
                 "card with sibling batch cards. candidate_hypotheses may be empty."
             )
         )
+        if model_context.retry_control:
+            request_instruction += (
+                " retry_control is a Critic-triggered repair brief. Address every "
+                "required_changes action and the free-text suggestions; do not ignore "
+                "suggestions because the actions are enums."
+            )
         model_output = complete_structured(
             client=self.client,
             transport=self.transport,
@@ -911,7 +1117,13 @@ class RemoteSubScientist:
             allow_unknown_evidence_stripping=self.allow_unknown_evidence_stripping,
             max_input_chars=self.max_input_chars,
             repair_hints=(
-                {}
+                {
+                    "sample_ids[]": tuple(
+                        item.sample_id for item in model_context.visible_observations
+                    ),
+                    "evidence_ids[]": tuple(sorted(model_context.visible_evidence_ids)),
+                    "fact_ids[]": tuple(sorted(model_context.descriptor_fact_by_id)),
+                }
                 if physchem
                 else {
                     "channel": (context.channel,),
@@ -949,10 +1161,14 @@ class RemoteSubScientist:
                         model_output
                     ),
                     batch_id=batch_id,
+                    sample_id_map=sample_id_map,
                 )
                 if physchem
-                else ChannelAnalysisOutput.model_validate(
-                    model_output
+                else rewrite_channel_analysis_prose(
+                    ChannelAnalysisOutput.model_validate(model_output),
+                    sample_id_map,
+                    evidence_ids,
+                    mode="expand",
                 )
             )
             if not physchem:

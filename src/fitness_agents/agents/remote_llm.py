@@ -903,6 +903,12 @@ def complete_json(
                 retry_messages = list(messages)
                 if content and failure.kind != "truncated":
                     retry_messages.append({"role": "assistant", "content": content})
+                previous_payload = None
+                if content and failure.kind not in {"truncated", "empty"}:
+                    try:
+                        previous_payload = extract_json_object(content)
+                    except Exception:  # noqa: BLE001 - salvage is best-effort for retry hints
+                        previous_payload = json_salvage(content)
                 retry_messages.append(
                     {
                         "role": "user",
@@ -911,6 +917,9 @@ def complete_json(
                             error=error,
                             schema=schema,
                             repair_hints=repair_hints,
+                            previous_payload=previous_payload
+                            if isinstance(previous_payload, dict)
+                            else None,
                         ),
                     }
                 )

@@ -43,6 +43,25 @@ class ReviewRejected(RuntimeError):
         self.decisions = tuple(decisions)
 
 
+class HypothesisGenerationFailed(ReviewRejected):
+    """Scientist JSON generation exhausted retries; abort the round instead of the campaign."""
+
+    code = "HYPOTHESIS_NODE_FAILED"
+    terminal_policy = "abort_round"
+
+    def __init__(
+        self,
+        error: BaseException,
+        *,
+        decisions: Sequence[CritiqueDecision] = (),
+    ) -> None:
+        super().__init__(
+            f"{type(error).__name__}:{str(error)[:240]}",
+            decisions=decisions,
+        )
+        self.cause = error
+
+
 class HypothesisRevisionRequested(ReviewRejected):
     """Critic asked for a new hypothesis rather than only a new batch."""
 

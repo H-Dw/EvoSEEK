@@ -105,7 +105,8 @@ that were not supplied in the current inputs.
 
 When `context.critic_revision` is present:
 
-1. address only supplied `required_changes` and retain their structured parameters, evidence, and priority;
+1. address supplied `required_changes` and the free-text `suggestions` (`rating.suggestions`);
+   suggestions are the repair brief when the actions are only enums;
 2. change the statement or residue map so the result is not a restatement;
 3. do not repeat the rejected batch's residue map;
 4. rerun the activation routing and full hierarchy with the same visibility limits.
@@ -122,7 +123,7 @@ exactly. The runtime renders the executable criterion text and compilation recei
 template. Local runtime code owns hypothesis IDs and parent links. The Critic owns
 the corresponding explanation. Runtime-owned identifiers are injected after this phase.
 
-- Keep `statement`, `expected_outcome`, and `falsification_criterion` at or under 400 characters.
+- Keep `statement`, `expected_outcome`, and `falsification_criterion` at or under 800 characters.
 - Cite at most 12 identifiers that occur in the supplied evidence or visible KG packs.
 - Use only request-local evidence labels supplied in the evidence universe.
 - Return an empty `evidence_ids` array when no eligible identifier is visible.
@@ -133,8 +134,12 @@ the corresponding explanation. Runtime-owned identifiers are injected after this
 - Treat `preferred_residues` as soft priors. Return `hard_residue_constraints: {}` unless the
   supplied deterministic design/safety contract explicitly requires a residue set; never infer
   hardness from prose or confidence.
-- With empty hard constraints, describe residues as prioritized for testing or exploratory; never
-  say a residue is required, forbidden, mandatory, or immutable.
+- Assay or falsification English such as "the batch median must exceed" or "missing required
+  observations" is allowed. Do not encode residue hardness in prose. If a residue is actually
+  required or forbidden, put it in `hard_residue_constraints`. Verbal residue hardness
+  (for example `V39 must` or `position 39 is forbidden`) without a matching typed constraint is
+  overclaiming for the Critic's `OVERCONFIDENT` code; the runtime still treats preferred residues
+  as soft.
 - When `approved_channel_analyses` is present, treat each item as an approved channel analysis card:
   preserve its observation/interpretation/limitation distinctions, consider optional
   `candidate_hypotheses` without copying them blindly. The main Scientist alone proposes the final

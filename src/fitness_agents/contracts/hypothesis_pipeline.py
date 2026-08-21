@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, get_args
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -22,17 +22,48 @@ def verdict_for_rating(score: int) -> ReviewVerdictName:
     return "APPROVE"
 
 
+COUPLED_REVIEW_CONTRACT = (
+    "rating.score, verdict, and required_changes are one legal object. "
+    "Score 0-1 maps to REJECT with required_changes=[]. "
+    "Score 2-3 maps to REVISE with at least one allow-listed required_changes item "
+    "and at least one rating.suggestions entry. "
+    "Score 4-5 maps to APPROVE with required_changes=[], no blocker issues, and empty "
+    "text_errors. Non-empty text_errors caps the score at 3. "
+    "rating.suggestions is free-text repair advice and is not a substitute for "
+    "required_changes. On a schema retry, keep existing suggestions and emit matching "
+    "allow-listed actions; repair verdict, rating, and required_changes together."
+)
+
+# LLM prose caps. Sized from hierarchical Main Critic production output
+# (explanation 674, rationale 558, hypothesis statement ~380) with headroom
+# for three-channel synthesis reviews. Identifiers stay on their own limits.
+CRITIC_EXPLANATION_MAX = 2000
+CRITIC_RATIONALE_MAX = 1200
+CRITIC_SUGGESTION_MAX = 600
+CRITIC_TEXT_ERROR_MAX = 400
+CRITIC_ISSUE_MESSAGE_MAX = 800
+CRITIC_SUMMARY_MAX = 800
+CRITIC_NESTED_TEXT_MAX = 400
+SAMPLE_REVIEW_PROSE_MAX = 600
+CHANNEL_FINDING_STATEMENT_MAX = 600
+CHANNEL_ANALYSIS_PROSE_MAX = 800
+PHYSCHEM_SUMMARY_MAX = 600
+PHYSCHEM_INTERPRETATION_PROSE_MAX = 480
+CANDIDATE_PROSE_MAX = 800
+SYNTHESIS_CARD_STATEMENT_MAX = 1200
+
+
 class CriticRatingRegion(BaseModel):
     """Shared, model-visible Rating region used by every semantic Critic."""
 
     model_config = ConfigDict(extra="forbid", strict=True)
 
     score: int = Field(ge=0, le=5)
-    rationale: str = Field(min_length=1, max_length=400)
-    suggestions: list[Annotated[str, Field(min_length=1, max_length=300)]] = Field(
+    rationale: str = Field(min_length=1, max_length=CRITIC_RATIONALE_MAX)
+    suggestions: list[Annotated[str, Field(min_length=1, max_length=CRITIC_SUGGESTION_MAX)]] = Field(
         default_factory=list, max_length=12
     )
-    text_errors: list[Annotated[str, Field(min_length=1, max_length=240)]] = Field(
+    text_errors: list[Annotated[str, Field(min_length=1, max_length=CRITIC_TEXT_ERROR_MAX)]] = Field(
         default_factory=list, max_length=8
     )
 
@@ -123,6 +154,20 @@ MainRequiredAction = Literal[
     "ADD_EXPLANATION",
     "RESOLVE_CHANNEL_CONFLICT",
 ]
+
+
+def required_actions_for_review(
+    scope: Literal["main", "physchem", "conservation", "structure"],
+) -> tuple[str, ...]:
+    """Return the allow-listed required_changes enums for one Critic body."""
+
+    mapping = {
+        "main": MainRequiredAction,
+        "physchem": PhyschemRequiredAction,
+        "conservation": ConservationRequiredAction,
+        "structure": StructureRequiredAction,
+    }
+    return get_args(mapping[scope])
 
 
 class DescriptorObservationFact(BaseModel):
@@ -240,7 +285,7 @@ class ChannelFinding(BaseModel):
 
     finding_id: str = Field(min_length=1, max_length=160)
     kind: Literal["OBSERVATION", "INTERPRETATION", "LIMITATION"]
-    statement: str = Field(min_length=1, max_length=300)
+    statement: str = Field(min_length=1, max_length=CHANNEL_FINDING_STATEMENT_MAX)
     evidence_ids: list[str] = Field(max_length=8)
     fact_ids: list[str] = Field(default_factory=list, max_length=8)
     confidence: Literal["low", "medium", "high"]
@@ -251,14 +296,14 @@ class PhyschemInterpretationOutput(BaseModel):
 
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    analysis_summary: str = Field(min_length=1, max_length=300)
-    interpretations: list[Annotated[str, Field(min_length=1, max_length=240)]] = Field(
+    analysis_summary: str = Field(min_length=1, max_length=PHYSCHEM_SUMMARY_MAX)
+    interpretations: list[Annotated[str, Field(min_length=1, max_length=PHYSCHEM_INTERPRETATION_PROSE_MAX)]] = Field(
         default_factory=list, max_length=8
     )
-    counterevidence: list[Annotated[str, Field(min_length=1, max_length=240)]] = Field(
+    counterevidence: list[Annotated[str, Field(min_length=1, max_length=PHYSCHEM_INTERPRETATION_PROSE_MAX)]] = Field(
         default_factory=list, max_length=4
     )
-    uncertainty: str = Field(min_length=1, max_length=300)
+    uncertainty: str = Field(min_length=1, max_length=PHYSCHEM_SUMMARY_MAX)
     sample_ids: list[str] = Field(default_factory=list, max_length=16)
     evidence_ids: list[str] = Field(default_factory=list, max_length=16)
     fact_ids: list[str] = Field(default_factory=list, max_length=32)
@@ -270,11 +315,11 @@ class ChannelCandidateHypothesis(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     hypothesis_id: str = Field(min_length=1, max_length=160)
-    statement: str = Field(min_length=1, max_length=400)
+    statement: str = Field(min_length=1, max_length=CANDIDATE_PROSE_MAX)
     proposed_residues: dict[str, list[str]] = Field(default_factory=dict)
     evidence_ids: list[str] = Field(max_length=8)
-    expected_observation: str = Field(min_length=1, max_length=400)
-    falsification_criterion: str = Field(min_length=1, max_length=400)
+    expected_observation: str = Field(min_length=1, max_length=CANDIDATE_PROSE_MAX)
+    falsification_criterion: str = Field(min_length=1, max_length=CANDIDATE_PROSE_MAX)
 
     @model_validator(mode="after")
     def validate_residues(self) -> ChannelCandidateHypothesis:
@@ -293,17 +338,17 @@ class ChannelAnalysisOutput(BaseModel):
 
     analysis_id: str = Field(min_length=1, max_length=160)
     channel: ChannelName
-    analysis_summary: str = Field(min_length=1, max_length=400)
+    analysis_summary: str = Field(min_length=1, max_length=CHANNEL_ANALYSIS_PROSE_MAX)
     findings: list[ChannelFinding] = Field(min_length=1, max_length=8)
     candidate_hypotheses: list[ChannelCandidateHypothesis] = Field(
         default_factory=list, max_length=4
     )
     evidence_ids: list[str] = Field(max_length=12)
     fact_ids: list[str] = Field(default_factory=list, max_length=24)
-    counterevidence: list[Annotated[str, Field(min_length=1, max_length=400)]] = Field(
+    counterevidence: list[Annotated[str, Field(min_length=1, max_length=CHANNEL_ANALYSIS_PROSE_MAX)]] = Field(
         max_length=8
     )
-    uncertainty: str = Field(min_length=1, max_length=400)
+    uncertainty: str = Field(min_length=1, max_length=CHANNEL_ANALYSIS_PROSE_MAX)
 
     @model_validator(mode="after")
     def validate_citations(self) -> ChannelAnalysisOutput:
@@ -380,7 +425,7 @@ class _ReviewIssueBase(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     severity: Literal["warning", "error", "blocker"]
-    message: str = Field(min_length=1, max_length=400)
+    message: str = Field(min_length=1, max_length=CRITIC_ISSUE_MESSAGE_MAX)
     evidence_ids: list[str] = Field(default_factory=list, max_length=12)
 
 
@@ -405,8 +450,8 @@ class SampleCriticExplanation(BaseModel):
 
     model_config = ConfigDict(extra="forbid", strict=True)
     sample_id: str = Field(min_length=1, max_length=160)
-    feature_analysis: str = Field(min_length=1, max_length=300)
-    critic_explanation: str = Field(min_length=1, max_length=300)
+    feature_analysis: str = Field(min_length=1, max_length=SAMPLE_REVIEW_PROSE_MAX)
+    critic_explanation: str = Field(min_length=1, max_length=SAMPLE_REVIEW_PROSE_MAX)
 
 
 class _ReviewBodyBase(BaseModel):
@@ -415,7 +460,7 @@ class _ReviewBodyBase(BaseModel):
     verdict: ReviewVerdictName
     rating: CriticRatingRegion
     cited_evidence_ids: list[str] = Field(max_length=16)
-    summary: str = Field(min_length=1, max_length=400)
+    summary: str = Field(min_length=1, max_length=CRITIC_SUMMARY_MAX)
     sample_reviews: list[SampleCriticExplanation] = Field(
         default_factory=list, max_length=128
     )
@@ -466,7 +511,7 @@ class MainReviewBody(BaseModel):
     cited_evidence_ids: list[str] = Field(max_length=16)
     explanation: str = Field(
         min_length=1,
-        max_length=600,
+        max_length=CRITIC_EXPLANATION_MAX,
         validation_alias=AliasChoices("explanation", "summary"),
     )
 
@@ -593,7 +638,7 @@ class MainSynthesisEvidenceCard(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
     evidence_id: str = Field(min_length=1, max_length=320)
-    atomic_statement: str = Field(min_length=1, max_length=600)
+    atomic_statement: str = Field(min_length=1, max_length=SYNTHESIS_CARD_STATEMENT_MAX)
     channel: str = Field(min_length=1, max_length=120)
     contribution: Literal["support", "constraint_counterevidence", "analysis_only"]
     polarity: Literal["support", "contradict", "neutral", "unknown"]
@@ -612,10 +657,10 @@ class SynthesisAbstention(BaseModel):
 
     outcome: Literal["NO_SUPPORTED_HYPOTHESIS"] = "NO_SUPPORTED_HYPOTHESIS"
     abstention_id: str = Field(min_length=1, max_length=160)
-    reason: str = Field(min_length=1, max_length=400)
+    reason: str = Field(min_length=1, max_length=CANDIDATE_PROSE_MAX)
     evidence_ids: tuple[str, ...] = Field(default=(), max_length=12)
-    unresolved_constraints: tuple[Annotated[str, Field(min_length=1, max_length=400)], ...]
-    recommended_next_evidence: tuple[Annotated[str, Field(min_length=1, max_length=400)], ...]
+    unresolved_constraints: tuple[Annotated[str, Field(min_length=1, max_length=CANDIDATE_PROSE_MAX)], ...]
+    recommended_next_evidence: tuple[Annotated[str, Field(min_length=1, max_length=CANDIDATE_PROSE_MAX)], ...]
 
 
 class MainReviewAttemptArtifact(BaseModel):

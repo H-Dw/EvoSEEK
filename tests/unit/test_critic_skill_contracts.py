@@ -12,6 +12,12 @@ from fitness_agents.agents.critic import (
     CritiqueDecisionOutput,
     _decision_from_payload,
 )
+from fitness_agents.agents.main_hypothesis_critic import sanitize_main_review
+from fitness_agents.agents.output_contracts import MainSynthesisOutput
+from fitness_agents.contracts.evidence_universe import (
+    RoleVisibleEvidenceEntry,
+    RoleVisibleEvidenceUniverse,
+)
 from fitness_agents.contracts.hypothesis_pipeline import (
     ChannelHypothesisOutput,
     ConservationReviewBody,
@@ -20,7 +26,7 @@ from fitness_agents.contracts.hypothesis_pipeline import (
     PhyschemReviewBody,
     StructureReviewBody,
 )
-from fitness_agents.contracts.schemas import DraftBatch
+from fitness_agents.contracts.schemas import DraftBatch, Hypothesis
 
 ROOT = Path(__file__).parents[2]
 
@@ -316,15 +322,29 @@ def test_subscientist_skill_matches_analysis_contract_and_example(
     if channel == "physchem":
         match = re.search(r"Example: `([^`]+)`", text)
         assert match
-        PhyschemInterpretationOutput.model_validate_json(match.group(1))
-        assert "fact_ids" not in match.group(1)
-        assert "evidence_ids" not in match.group(1)
+        example = PhyschemInterpretationOutput.model_validate_json(match.group(1))
+        assert example.sample_ids == ["S01"]
+        assert example.evidence_ids == []
+        assert example.fact_ids == []
+        assert "id_maps" in text
+        assert "never invent" in text.casefold()
+        assert "prefer mutation tokens" in text.casefold()
+        assert "sibling batch" in text.casefold()
+        assert "always keep empty" in text.casefold()
+        assert "ADD_EVIDENCE_LINK" in text
         return
     match = re.search(r"Analysis-only example: `([^`]+)`", text)
     assert match
     output = ChannelHypothesisOutput.model_validate_json(match.group(1))
     assert output.channel == channel
     assert output.candidate_hypotheses == []
+    folded = text.casefold()
+    assert "id_maps" in text
+    assert "sibling batch" in folded
+    assert "mutation notation" in folded
+    assert "evidence_ids: []" in text
+    assert "V54C" not in text
+    assert "S95" not in text
 
 
 def test_main_synthesis_skill_matches_hypothesis_contract() -> None:
@@ -333,6 +353,229 @@ def test_main_synthesis_skill_matches_hypothesis_contract() -> None:
         / "src/fitness_agents/agents/profiles/scientist/synthesis_v1/SKILL.md"
     )
     text = path.read_text(encoding="utf-8")
-    assert "sha256" not in text.casefold()
+    compact = " ".join(text.split())
+    folded = compact.casefold()
+    assert "sha256" not in folded
     assert "approved_channel_analyses" in text
     assert "evidence_universe" in text
+    assert "suggestions" in text
+    assert "hard_residue_constraints" in text
+    assert "OVERCONFIDENT" in text
+    assert "visible measurement association" in folded
+    assert "do not invent or wait for an assay support card" in folded
+    assert "never copy" in folded
+    assert "no hypothesis explanation field" in folded
+    assert "soft set of alternatives" in folded
+    assert "do not repair by switching to `association` and one letter per site" in folded
+    assert "keep any conservation, structure" in folded
+    assert "instead of rewriting the draft" in folded
+    assert '"39":["L","I","V"]' in text
+    assert '"39":["V"],"40":["D"]' not in text
+    match = re.search(r"SYNTHESIZED example for `[^`]+`: `([^`]+)`", text)
+    assert match
+    example = MainSynthesisOutput.model_validate_json(match.group(1)).root
+    residue_sets = example.preferred_residues
+    assert any(len(residues) > 1 for residues in residue_sets.values())
+
+
+def test_critic_skills_state_coupled_verdict_contract() -> None:
+    paths = (
+        ROOT / "src/fitness_agents/agents/profiles/critic/hypothesis_v1/SKILL.md",
+        ROOT / "src/fitness_agents/agents/profiles/subcritic/physchem_v1/SKILL.md",
+        ROOT / "src/fitness_agents/agents/profiles/subcritic/conservation_v1/SKILL.md",
+        ROOT / "src/fitness_agents/agents/profiles/subcritic/structure_v1/SKILL.md",
+    )
+    for path in paths:
+        text = path.read_text(encoding="utf-8")
+        assert "## Coupled verdict contract" in text
+        assert "not a substitute for `required_changes`" in text
+
+
+def test_main_critic_skill_allows_analysis_only_measurement_association() -> None:
+    text = (
+        ROOT / "src/fitness_agents/agents/profiles/critic/hypothesis_v1/SKILL.md"
+    ).read_text(encoding="utf-8")
+    folded = text.casefold()
+    compact = " ".join(text.split())
+    assert "analysis_only` is neither support nor a defect" in compact
+    assert "named visible measurement association" in folded
+    assert "scientist cannot create cards" in folded
+    assert "hypothesis.statement" in text
+    assert "hypothesis.expected_outcome" in text
+    assert "do not inspect your own `explanation`" in folded
+    assert "do not survive across rounds" in folded
+    assert "multi-residue soft priors" in folded
+    assert "singleton map as `untestable`" in folded
+    assert "make_falsifiable" in folded
+    assert "do not require a child `candidate_hypotheses`" in folded
+    assert "## retry review" in folded
+    assert "prior_review" in folded
+    assert "do not invent a new defect code" in folded
+    assert "empty child" in folded
+    assert "multi-residue soft set is not" in folded
+
+
+def test_structure_conservation_skills_use_generic_mutation_and_limitation_contract() -> None:
+    scientist_paths = (
+        ROOT / "src/fitness_agents/agents/profiles/subscientist/structure_v1/SKILL.md",
+        ROOT / "src/fitness_agents/agents/profiles/subscientist/conservation_v1/SKILL.md",
+    )
+    critic_paths = (
+        ROOT / "src/fitness_agents/agents/profiles/subcritic/structure_v1/SKILL.md",
+        ROOT / "src/fitness_agents/agents/profiles/subcritic/conservation_v1/SKILL.md",
+    )
+    forbidden = ("V54C", "S95", "V39A", "G41D")
+    for path in scientist_paths:
+        text = path.read_text(encoding="utf-8")
+        folded = text.casefold()
+        compact = " ".join(text.split())
+        assert "mutation notation" in folded
+        assert "sibling batch" in folded
+        assert "evidence_ids: []" in compact
+        for token in forbidden:
+            assert token not in text
+    for path in critic_paths:
+        text = path.read_text(encoding="utf-8")
+        folded = text.casefold()
+        assert "mutation notation" in folded
+        assert "sample-label mismatch" in folded
+        assert "empty `evidence_ids` on `limitation`" in folded
+        assert "do not emit `finding_unsupported` or `add_evidence_link`" in folded
+        for token in forbidden:
+            assert token not in text
+    structure_critic = (
+        ROOT / "src/fitness_agents/agents/profiles/subcritic/structure_v1/SKILL.md"
+    ).read_text(encoding="utf-8")
+    assert "ACKNOWLEDGE_MISSING_COORDINATES" in structure_critic
+    assert "different sample or mutation token" in structure_critic
+    conservation_critic = (
+        ROOT / "src/fitness_agents/agents/profiles/subcritic/conservation_v1/SKILL.md"
+    ).read_text(encoding="utf-8")
+    assert "COORDINATES_MISSING" not in conservation_critic
+    assert "ACKNOWLEDGE_MISSING_COORDINATES" not in conservation_critic
+
+
+def test_physchem_critic_skill_accepts_empty_interpretation_citations() -> None:
+    text = (
+        ROOT / "src/fitness_agents/agents/profiles/subcritic/physchem_v1/SKILL.md"
+    ).read_text(encoding="utf-8")
+    folded = text.casefold()
+    compact = " ".join(text.split())
+    assert "empty interpretation" in folded
+    assert "Do not emit `FINDING_UNSUPPORTED` or `ADD_EVIDENCE_LINK`" in compact
+    assert "mutation tokens" in folded
+    assert "sample-label" in folded
+
+
+def _soft_set_hypothesis() -> Hypothesis:
+    return Hypothesis(
+        hypothesis_id="H02-02",
+        statement=(
+            "Test a narrowed four-position soft directional prior with explicit "
+            "alternative sets from visible measured-fitness associations."
+        ),
+        preferred_residues={
+            39: ("I", "L", "C"),
+            40: ("W", "Y", "H"),
+            41: ("G", "A"),
+            54: ("A", "F", "C"),
+        },
+        evidence_ids=("ev:kg:1",),
+        expected_outcome="The selected batch median exceeds the pre-round visible median.",
+        falsification_criterion="Batch median lift versus pre-round observations.",
+        claim_modality="directional_prior",
+    )
+
+
+def _universe(*evidence_ids: str) -> RoleVisibleEvidenceUniverse:
+    return RoleVisibleEvidenceUniverse(
+        role="main_critic",
+        entries=tuple(
+            RoleVisibleEvidenceEntry(evidence_id=item, origins=("test",))
+            for item in evidence_ids
+        ),
+    )
+
+
+def test_sanitize_main_review_drops_empty_child_and_soft_set_untestable() -> None:
+    hypothesis = _soft_set_hypothesis()
+    universe = _universe("ev:kg:1")
+    payload = {
+        "review_scope": "main",
+        "verdict": "REVISE",
+        "rating": {
+            "score": 3,
+            "rationale": "Repairable falsifiability defect.",
+            "suggestions": ["Add a child candidate or uniquely named residue."],
+            "text_errors": [],
+        },
+        "issues": [
+            {
+                "code": "UNTESTABLE",
+                "severity": "error",
+                "message": (
+                    "The hypothesis states no child candidate hypotheses and the "
+                    "approved channel analyses also contain no candidate hypotheses."
+                ),
+                "evidence_ids": [],
+            },
+            {
+                "code": "UNTESTABLE",
+                "severity": "warning",
+                "message": (
+                    "The preferred residue sets are not uniquely named by any cited "
+                    "evidence card."
+                ),
+                "evidence_ids": [],
+            },
+        ],
+        "required_changes": ["MAKE_FALSIFIABLE"],
+        "cited_evidence_ids": ["ev:kg:1"],
+        "explanation": "The soft prior is bounded but treated as untestable.",
+    }
+    sanitized = sanitize_main_review(
+        payload, hypothesis=hypothesis, evidence_universe=universe
+    )
+    assert sanitized["issues"] == []
+    assert sanitized["verdict"] == "APPROVE"
+    assert sanitized["required_changes"] == []
+    assert sanitized["rating"]["score"] == 4
+
+
+def test_sanitize_main_review_keeps_singleton_untestable() -> None:
+    hypothesis = Hypothesis(
+        hypothesis_id="H01-00",
+        statement="Test the singleton association V39I, D40W, G41A, V54C.",
+        preferred_residues={39: ("I",), 40: ("W",), 41: ("A",), 54: ("C",)},
+        evidence_ids=("ev:kg:1",),
+        expected_outcome="The selected batch median exceeds the pre-round visible median.",
+        falsification_criterion="Batch median lift versus pre-round observations.",
+        claim_modality="association",
+    )
+    payload = {
+        "review_scope": "main",
+        "verdict": "REVISE",
+        "rating": {
+            "score": 3,
+            "rationale": "Singleton map is not contrastable.",
+            "suggestions": ["Expand each site to a soft alternative set."],
+            "text_errors": [],
+        },
+        "issues": [
+            {
+                "code": "UNTESTABLE",
+                "severity": "error",
+                "message": "The singleton all-site map cannot be contrasted in the visible design space.",
+                "evidence_ids": [],
+            }
+        ],
+        "required_changes": ["MAKE_FALSIFIABLE"],
+        "cited_evidence_ids": ["ev:kg:1"],
+        "explanation": "Each site is a single letter without a uniquely named card.",
+    }
+    sanitized = sanitize_main_review(
+        payload, hypothesis=hypothesis, evidence_universe=_universe("ev:kg:1")
+    )
+    assert sanitized["verdict"] == "REVISE"
+    assert sanitized["issues"][0]["code"] == "UNTESTABLE"
+    assert sanitized["required_changes"] == ["MAKE_FALSIFIABLE"]

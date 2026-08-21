@@ -18,10 +18,35 @@ from fitness_agents.agents.output_guards import (
     SemanticOutputValidationError,
     UnknownEvidenceIdsError,
 )
-from fitness_agents.contracts.hypothesis_pipeline import SynthesisAbstention
+from fitness_agents.agents.short_ids import ShortIdMap
+from fitness_agents.contracts.hypothesis_pipeline import (
+    CANDIDATE_PROSE_MAX,
+    SynthesisAbstention,
+)
+
+_SYNTHESIS_PROSE_KEYS = (
+    "statement",
+    "expected_outcome",
+    "falsification_criterion",
+    "reason",
+)
+
+
+def _strip_unknown_request_local_evidence_aliases(
+    payload: dict[str, Any],
+    *,
+    allowed_evidence_ids: frozenset[str],
+) -> dict[str, Any]:
+    id_map = ShortIdMap.build(tuple(sorted(allowed_evidence_ids)), prefix="E")
+    output = dict(payload)
+    for key in _SYNTHESIS_PROSE_KEYS:
+        value = output.get(key)
+        if isinstance(value, str):
+            output[key] = id_map.strip_unknown_aliases_in_text(value)
+    return output
 from fitness_agents.contracts.schemas import Hypothesis, ReThinkReflection
 
-HYPOTHESIS_TEXT_MAX = 400
+HYPOTHESIS_TEXT_MAX = CANDIDATE_PROSE_MAX
 RETHINK_TEXT_MAX = 2000
 RETHINK_DIMENSION_TEXT_MAX = 1600
 RETHINK_GROUP_ADVICE_MAX = 2400
@@ -271,15 +296,6 @@ class HypothesisBodyOutput(BaseModel):
             raise ValueError(
                 "preference_strength_by_position must exactly cover preferred_residues"
             )
-        if not hard_constraints:
-            hard_language = (
-                "must ", "required", "forbidden", "only residue", "必须", "禁止", "不可变"
-            )
-            prose = f"{self.statement} {self.expected_outcome}".casefold()
-            if any(marker in prose for marker in hard_language):
-                raise ValueError(
-                    "soft hypothesis prose cannot declare required or forbidden residues"
-                )
         rendered_falsification = self.falsification_template.render_description()
         return Hypothesis(
             hypothesis_id=hypothesis_id,
@@ -389,6 +405,10 @@ def validate_main_synthesis_payload(
     allowed_positions: tuple[int, ...] | None,
     max_positions: int | None,
 ) -> dict[str, Any]:
+    payload = _strip_unknown_request_local_evidence_aliases(
+        dict(payload),
+        allowed_evidence_ids=allowed_evidence_ids,
+    )
     output = MainSynthesisOutput.model_validate(payload).root
     if isinstance(output, NoSupportedHypothesisOutput):
         abstention = output.to_abstention(allowed_evidence_ids=allowed_evidence_ids)

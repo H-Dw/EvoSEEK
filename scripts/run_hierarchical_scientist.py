@@ -483,7 +483,11 @@ def audit_hierarchical_run(
     config_path = run_dir / "config.json"
     config = json.loads(config_path.read_text(encoding="utf-8")) if config_path.is_file() else {}
     completion_audit = _load_completion_auditor()(run_dir)
-    round_dirs = sorted(path for path in run_dir.glob("round_*") if path.is_dir())
+    # Protocol rounds are 1..N. Warmup traces may land in round_00/llm when an LLM
+    # writer defaults a missing round_id to 0; that directory is not an experimental round.
+    protocol_round_dirs = [
+        run_dir / f"round_{index:02d}" for index in range(1, expected_rounds + 1)
+    ]
     completed_rounds = len(summary.get("round_metrics") or ())
     expected_queries = expected_budget * expected_rounds
     hierarchy = config.get("hierarchical_hypothesis") or {}
@@ -673,7 +677,7 @@ def audit_hierarchical_run(
             sorted(enabled_operators.intersection(rag_operators)),
         )
     )
-    for round_dir in round_dirs:
+    for round_dir in protocol_round_dirs:
         scope_path = round_dir / "prediction_scope_receipt.json"
         checks.append(
             _check(f"{round_dir.name}_prediction_scope_receipt", scope_path.is_file())
@@ -756,7 +760,9 @@ def audit_hierarchical_run(
             )
         )
         pipeline_rounds = [
-            path for path in round_dirs if (path / "hypothesis_pipeline.json").is_file()
+            path
+            for path in protocol_round_dirs
+            if (path / "hypothesis_pipeline.json").is_file()
         ]
         checks.append(
             _check(
@@ -768,7 +774,7 @@ def audit_hierarchical_run(
                 },
             )
         )
-        for round_dir in round_dirs:
+        for round_dir in protocol_round_dirs:
             pipeline_path = round_dir / "hypothesis_pipeline.json"
             checks.append(_check(f"{round_dir.name}_hypothesis_pipeline", pipeline_path.is_file()))
             if not pipeline_path.is_file():

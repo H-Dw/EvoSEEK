@@ -2,7 +2,8 @@
 # Never put a literal sk-... value in this file or in experiment YAML.
 provider: deepseek
 profile: scientific_v1
-model: deepseek-v4-flash
+# model: deepseek-v4-flash
+model: deepseek-v4-pro
 base_url: https://api.deepseek.com
 api_key: env:DEEPSEEK_API_KEY
 temperature: 0.0

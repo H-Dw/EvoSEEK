@@ -9,6 +9,8 @@ from typing import Any
 
 import numpy as np
 
+from pydantic import ValidationError
+
 from fitness_agents.acquisition import create_policy
 from fitness_agents.active_learning import create_active_learning_module
 from fitness_agents.agents.client_registry import create_role_client_bundle
@@ -25,8 +27,17 @@ from fitness_agents.agents.main_hypothesis_critic import (
     RemoteMainHypothesisCritic,
     RuleBasedMainHypothesisCritic,
 )
-from fitness_agents.agents.output_guards import RevisionConstraints, critic_revision_payload
+from fitness_agents.agents.output_guards import (
+    EmptyLLMOutputError,
+    OutputTruncatedError,
+    PromptBudgetExceededError,
+    RevisionConstraints,
+    SemanticOutputValidationError,
+    UnknownEvidenceIdsError,
+    critic_revision_payload,
+)
 from fitness_agents.agents.profile_loader import load_role_profile
+from fitness_agents.agents.remote_llm import RemoteLLMCompletionError
 from fitness_agents.agents.rethink import create_rethink_client
 from fitness_agents.agents.scientist import ScientistAgent
 from fitness_agents.agents.subcritic import (
@@ -113,6 +124,7 @@ from fitness_agents.validation.batch import (
 from .backends import ApprovalEnforcingBackend, CsvOracleBackend
 from .review import (
     BoundedReviewLoop,
+    HypothesisGenerationFailed,
     HypothesisRevisionRequested,
     ReviewRejected,
     RevisionConstraintInfeasible,
@@ -122,6 +134,23 @@ from .review import (
 def _descending_ranks(values: dict[str, float]) -> dict[str, int]:
     ordered = sorted(values, key=lambda key: (values[key], key), reverse=True)
     return {variant_id: rank for rank, variant_id in enumerate(ordered, start=1)}
+
+
+def is_hypothesis_generation_error(error: BaseException) -> bool:
+    """True when Scientist JSON generation failed after bounded retries."""
+
+    return isinstance(
+        error,
+        (
+            RemoteLLMCompletionError,
+            SemanticOutputValidationError,
+            UnknownEvidenceIdsError,
+            ValidationError,
+            PromptBudgetExceededError,
+            OutputTruncatedError,
+            EmptyLLMOutputError,
+        ),
+    )
 
 
 def _filter_hard_residue_constraints(
@@ -1471,6 +1500,35 @@ class CampaignRunner:
             },
         }
 
+    def _record_round_abort(
+        self,
+        *,
+        round_id: int,
+        reason: str,
+        planned_batch_sizes: list[int],
+        actual_batch_sizes: list[int],
+        message: str,
+        decision_ids: Sequence[str] = (),
+        extra_event: dict[str, Any] | None = None,
+    ) -> None:
+        self._required_node_failures.append(f"round_{round_id}:{reason}")
+        planned_batch_sizes.append(self.config.budget_per_round)
+        actual_batch_sizes.append(0)
+        self._progress(
+            None,
+            message,
+            phase=CampaignPhase.ROUND_ABORTED,
+            persist=False,
+        )
+        event = {
+            "round_id": round_id,
+            "reason": reason,
+            "decision_ids": list(decision_ids),
+        }
+        if extra_event:
+            event.update(extra_event)
+        self.writer.event("round_aborted", event)
+
     def _repropose_after_critic(
         self,
         decision: Any,
@@ -1965,19 +2023,13 @@ class CampaignRunner:
                     )
                     if pipeline_result.status != "SUCCEEDED":
                         failure = pipeline_result.failure_code or "HYPOTHESIS_PIPELINE_FAILED"
-                        self._required_node_failures.append(f"round_{round_id}:{failure}")
                         rounds_aborted += 1
-                        planned_batch_sizes.append(self.config.budget_per_round)
-                        actual_batch_sizes.append(0)
-                        self._progress(
-                            None,
-                            f"round {round_id} aborted by hypothesis review graph",
-                            phase=CampaignPhase.ROUND_ABORTED,
-                            persist=False,
-                        )
-                        self.writer.event(
-                            "round_aborted",
-                            {"round_id": round_id, "reason": failure, "decision_ids": []},
+                        self._record_round_abort(
+                            round_id=round_id,
+                            reason=failure,
+                            planned_batch_sizes=planned_batch_sizes,
+                            actual_batch_sizes=actual_batch_sizes,
+                            message=f"round {round_id} aborted by hypothesis review graph",
                         )
                         break
                     hypothesis = Hypothesis(**(pipeline_result.main_hypothesis or {}))
@@ -1990,14 +2042,33 @@ class CampaignRunner:
                             critic_role="main_hypothesis_critic",
                         )
                 else:
-                    hypothesis = self.agent.propose_hypothesis(
-                        self.state,
-                        observed_variants,
-                        self.state.observed,
-                        scientist_evidence,
-                        kg_interaction=interaction_result,
-                        activation_state=scientist_activation,
-                    )
+                    try:
+                        hypothesis = self.agent.propose_hypothesis(
+                            self.state,
+                            observed_variants,
+                            self.state.observed,
+                            scientist_evidence,
+                            kg_interaction=interaction_result,
+                            activation_state=scientist_activation,
+                        )
+                    except Exception as error:
+                        if not is_hypothesis_generation_error(error):
+                            raise
+                        failure = (
+                            f"HYPOTHESIS_NODE_FAILED:{type(error).__name__}:"
+                            f"{str(error)[:240]}"
+                        )
+                        rounds_aborted += 1
+                        self._record_round_abort(
+                            round_id=round_id,
+                            reason=failure,
+                            planned_batch_sizes=planned_batch_sizes,
+                            actual_batch_sizes=actual_batch_sizes,
+                            message=(
+                                f"round {round_id} aborted by scientist hypothesis generation"
+                            ),
+                        )
+                        break
                 self.state.hypotheses.append(hypothesis)
                 self.knowledge.graph.add_hypothesis(
                     hypothesis.hypothesis_id,
@@ -3080,14 +3151,21 @@ class CampaignRunner:
                             "Critic revision limit exhausted",
                             decisions=requested.decisions,
                         ) from requested
-                    hypothesis = self._repropose_after_critic(
-                        requested.decision,
-                        hypothesis,
-                        observed_variants=observed_variants,
-                        evidence=evidence,
-                        local_evidence=local_evidence,
-                        interaction_result=interaction_result,
-                    )
+                    try:
+                        hypothesis = self._repropose_after_critic(
+                            requested.decision,
+                            hypothesis,
+                            observed_variants=observed_variants,
+                            evidence=evidence,
+                            local_evidence=local_evidence,
+                            interaction_result=interaction_result,
+                        )
+                    except Exception as error:
+                        if not is_hypothesis_generation_error(error):
+                            raise
+                        raise HypothesisGenerationFailed(
+                            error, decisions=requested.decisions
+                        ) from error
                     revised_round_candidates = _filter_hard_residue_constraints(
                         [public_by_id[item] for item in round_candidate_ids],
                         hypothesis=hypothesis,
@@ -3356,6 +3434,8 @@ class CampaignRunner:
                         on_attempt_start=record_review_start,
                     )
                 except (HypothesisRevisionRequested, ReviewRejected) as nested:
+                    if isinstance(nested, HypothesisGenerationFailed):
+                        raise
                     error = (
                         nested
                         if isinstance(nested, ReviewRejected)
@@ -3367,7 +3447,12 @@ class CampaignRunner:
                     )
                     raise error from nested
             except ReviewRejected as error:
-                if isinstance(error, RevisionConstraintInfeasible):
+                if isinstance(error, HypothesisGenerationFailed):
+                    terminal_policy = "abort_round"
+                    self._required_node_failures.append(
+                        f"round_{round_id}:HYPOTHESIS_NODE_FAILED:{error}"
+                    )
+                elif isinstance(error, RevisionConstraintInfeasible):
                     terminal_policy = "abort_campaign"
                     self.writer.write_json(
                         f"round_{round_id:02d}/revision_constraint_infeasible.json",
