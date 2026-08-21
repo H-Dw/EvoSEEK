@@ -218,7 +218,7 @@ class TimedHeartbeat:
             return self
         self._started = time.monotonic()
         self._thread = threading.Thread(
-            target=self._run, name="fitness-agents-heartbeat", daemon=True
+            target=self._run, name="evoseek-heartbeat", daemon=True
         )
         self._thread.start()
         return self
@@ -273,7 +273,7 @@ def configure_progress_logging(
     handler = logging.StreamHandler(stream or sys.stderr)
     handler.setLevel(resolved)
     handler.setFormatter(
-        logging.Formatter("[fitness-agents] %(asctime)s %(message)s", datefmt="%H:%M:%S")
+        logging.Formatter("[EvoSEEK] %(asctime)s %(message)s", datefmt="%H:%M:%S")
     )
     logger.addHandler(handler)
     return logger

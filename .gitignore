@@ -3,6 +3,10 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 build/
+uv.lock
+Dockerfile
+docker-compose.yml
+THIRD_PARTY.md
 .pytest_cache/
 .ruff_cache/
 .coverage

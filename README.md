@@ -566,7 +566,7 @@ python -m pip install -e ".[ui]"
 Launch the interactive web interface backed by a knowledge-agent experiment config:
 
 ```bash
-fitness-agents serve configs/experiments/knowledge_agent_open_design.yaml --host 127.0.0.1 --port 7860
+evoseek serve configs/experiments/knowledge_agent_open_design.yaml --host 127.0.0.1 --port 7860
 ```
 
 This starts a Gradio server bound to `127.0.0.1:7860`. Open the printed URL in your browser to drive the Design → Score → Select → Test → Learn loop through the UI. The served experiment must define a valid `model_config` and knowledge/RAG settings; see §6.2 and §4 for configuration details.

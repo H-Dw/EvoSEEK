@@ -207,8 +207,8 @@ def find_proteinmpnn_dir(explicit: Path | None) -> Path | None:
         candidates.append(explicit)
     candidates.extend(
         [
-            Path("/tmp/fitness-agents-third-party/ProteinMPNN-main"),
-            Path("/tmp/fitness-agents-third-party/ProteinMPNN"),
+            Path("/tmp/evoseek-third-party/ProteinMPNN-main"),
+            Path("/tmp/evoseek-third-party/ProteinMPNN"),
             project_root() / "models" / "kermut" / "proteinmpnn",
             project_root() / "third_party" / "ProteinMPNN",
         ]

@@ -1,6 +1,6 @@
 # Real Kermut backend using the official composite-kernel GP implementation.
 # This host: driver 530.41.03 / CUDA 12.1, 4x RTX 3090 24GB. Requires
-# torch 2.5.1+cu121 in the fitness-agents conda env (default pip torch is cu130
+# torch 2.5.1+cu121 in the EvoSEEK conda env (default pip torch is cu130
 # and will fail with "NVIDIA driver too old"). Parallel campaign runners pin each
 # worker with CUDA_VISIBLE_DEVICES so this file can keep device: cuda:0. Launch
 # with --cuda-devices 0,1,2,3 (or auto) and --max-parallel 4.

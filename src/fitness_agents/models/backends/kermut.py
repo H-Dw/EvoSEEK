@@ -33,7 +33,7 @@ def _load_runtime() -> dict[str, Any]:
         raise KermutDependencyError(
             "The built-in Kermut backend requires torch and gpytorch, plus fair-esm for live "
             "features. "
-            "Install `fitness-agents[kermut]`."
+            "Install `EvoSEEK[kermut]`."
         ) from error
     return {
         "gpytorch": gpytorch,

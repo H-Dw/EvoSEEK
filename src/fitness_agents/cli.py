@@ -153,7 +153,7 @@ def main() -> None:
     if len(sys.argv) > 1 and sys.argv[1] == "serve":
         _serve_command(sys.argv[2:])
         return
-    parser = argparse.ArgumentParser(description="Low-level fitness-agents campaign entry point")
+    parser = argparse.ArgumentParser(description="Low-level EvoSEEK campaign entry point")
     parser.add_argument("config", help="Experiment YAML path")
     parser.add_argument("--seed", type=int)
     parser.add_argument("--fold-index", type=int)

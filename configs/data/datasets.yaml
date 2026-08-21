@@ -1,4 +1,4 @@
-# Data source registry for fitness-agents.
+# Data source registry for EvoSEEK.
 #
 # Every external dataset is declared here exactly once. Downloaders
 # (scripts/data/download_profile.py and its wrappers) resolve datasets by id,

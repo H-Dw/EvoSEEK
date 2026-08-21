@@ -36,7 +36,7 @@ from fitness_agents.config import project_root, read_yaml
 REGISTRY_PATH = "configs/data/datasets.yaml"
 PROFILE_DIR = "configs/data/profiles"
 MANIFEST_NAME = "download_manifest.json"
-USER_AGENT = "fitness-agents-downloader/1.0"
+USER_AGENT = "EvoSEEK-downloader/1.0"
 
 
 class DownloadError(RuntimeError):
