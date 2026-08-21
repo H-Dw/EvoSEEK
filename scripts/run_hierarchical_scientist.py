@@ -8,6 +8,10 @@ contends. RAG jobs share a prebuilt read-only corpus and use per-condition/fold
 overlay databases so parallel workers do not share a writer. Parallel Kermut
 workers are pinned to distinct GPUs with --cuda-devices (default auto).
 
+Beyond the default matrix, --conditions also accepts kg_3features_base
+(three-channel hierarchical Scientist on the base KG without RAG) and
+agent_only (multi-round Scientist iteration with the KG fully ablated).
+
 Formal runs call DeepSeek, use Qwen for RAG, and keep Kermut acquisition and
 post-selection validation roles explicit. Placeholder predictors are not accepted.
 """
@@ -72,6 +76,7 @@ class ConditionSpec:
     channels: tuple[str, ...]
     active_learning: bool
     test_goal: str
+    kg: bool = True
 
 
 CONDITION_SPECS: dict[str, ConditionSpec] = {
@@ -115,6 +120,14 @@ CONDITION_SPECS: dict[str, ConditionSpec] = {
         active_learning=True,
         test_goal="Base observation KG without RAG, with active-learning acquisition.",
     ),
+    "kg_3features_base": ConditionSpec(
+        condition_id="kg_3features_base",
+        hierarchical=True,
+        rag=False,
+        channels=REQUIRED_CHANNELS,
+        active_learning=False,
+        test_goal="Three-channel hierarchical Scientist with base KG and no RAG.",
+    ),
     "kg_3features_rag": ConditionSpec(
         condition_id="kg_3features_rag",
         hierarchical=True,
@@ -122,6 +135,18 @@ CONDITION_SPECS: dict[str, ConditionSpec] = {
         channels=REQUIRED_CHANNELS,
         active_learning=False,
         test_goal="Three-channel hierarchical Scientist with document RAG.",
+    ),
+    "agent_only": ConditionSpec(
+        condition_id="agent_only",
+        hierarchical=False,
+        rag=False,
+        channels=(),
+        active_learning=False,
+        test_goal=(
+            "Multi-round Scientist iteration with no KG access, no feature "
+            "tools, and no RAG; knowledge runtime fully ablated."
+        ),
+        kg=False,
     ),
 }
 ALLOWED_CONDITIONS = tuple(CONDITION_SPECS)
@@ -314,7 +339,7 @@ def apply_condition(
         physchem="physchem" in spec.channels,
         conservation="conservation" in spec.channels,
         structure="structure" in spec.channels,
-        kg=True,
+        kg=spec.kg,
         local_knowledge=local,
     )
     generation = replace(
@@ -330,6 +355,9 @@ def apply_condition(
         config,
         seed=seed,
         task=replace(config.task, fold_index=fold),
+        # A no-KG condition ablates the whole knowledge runtime so no provider,
+        # graph tool, or evidence scoring survives behind the disabled flags.
+        knowledge_enabled=spec.kg,
         knowledge=knowledge,
         kg_interaction=_interaction_for_spec(config, spec),
         generation=generation,
@@ -392,6 +420,8 @@ def required_tool_calls(
     variant_limit: int,
     feature_tool_strategy: str = "independent_and_joint",
 ) -> int:
+    if not spec.kg:
+        return 0
     count = 2  # hypothesis_context + query_assay_association
     if spec.channels:
         if feature_tool_strategy in {"independent", "independent_and_joint"}:
@@ -405,6 +435,20 @@ def required_tool_calls(
 
 
 def _interaction_for_spec(config: Any, spec: ConditionSpec) -> Any:
+    if not spec.kg:
+        # KGInteractionRuntimeConfig requires max_tool_calls >= 1 and a non-empty
+        # feature_channels subset even when disabled; the orchestrator never
+        # builds the controller because knowledge.kg is False.
+        return replace(
+            config.kg_interaction,
+            enabled=False,
+            enabled_operators=(),
+            feature_tool_strategy="context_only",
+            feature_channels=("physchem",),
+            truncation_audit_enabled=False,
+            truncation_audit_items=(),
+            max_tool_calls=1,
+        )
     if spec.channels:
         operators = tuple(
             item
@@ -598,6 +642,21 @@ def audit_hierarchical_run(
         [
             _check("hierarchy_enabled_matches", hierarchy.get("enabled") is spec.hierarchical, hierarchy),
             _check(
+                "knowledge_enabled_matches",
+                bool(config.get("knowledge_enabled")) is spec.kg,
+                config.get("knowledge_enabled"),
+            ),
+            _check(
+                "knowledge_channel_kg_matches",
+                bool(knowledge_channels.get("kg")) is spec.kg,
+                knowledge_channels.get("kg"),
+            ),
+            _check(
+                "kg_interaction_enabled_matches",
+                bool(interaction_cfg.get("enabled")) is spec.kg,
+                interaction_cfg.get("enabled"),
+            ),
+            _check(
                 "agent_uq_generation_predictors_disabled",
                 generation_cfg.get("use_fitness_predictors") is False,
                 generation_cfg.get("use_fitness_predictors"),
@@ -677,6 +736,12 @@ def audit_hierarchical_run(
             sorted(enabled_operators.intersection(rag_operators)),
         )
     )
+    # Cold-start campaigns may begin with only the wild type visible, which is
+    # below every dry validator's minimum training size; round 1 may then skip
+    # dry validation instead of scoring the draft batch.
+    allowed_dry_scopes = {"draft_selected_candidates_only"}
+    if (config.get("prior_schedule") or {}).get("mode") == "cold_start":
+        allowed_dry_scopes.add("skipped_insufficient_visible_data")
     for round_dir in protocol_round_dirs:
         scope_path = round_dir / "prediction_scope_receipt.json"
         checks.append(
@@ -709,8 +774,7 @@ def audit_hierarchical_run(
                 ),
                 _check(
                     f"{round_dir.name}_dry_validation_selected_only",
-                    scope.get("dry_validation_scope")
-                    == "draft_selected_candidates_only"
+                    scope.get("dry_validation_scope") in allowed_dry_scopes
                     and scope.get("all_dry_validation_targets_were_draft_selected")
                     is True
                     and all(
@@ -1130,7 +1194,9 @@ def parse_args() -> argparse.Namespace:
         default=",".join(DEFAULT_CONDITIONS),
         help=(
             "Comma-separated conditions in start order. Default: "
-            "kg_base,kg_base_rag,kg_base_al,kg_3features_rag"
+            "kg_base,kg_base_rag,kg_base_al,kg_3features_rag. Also available: "
+            "kg_3features_base (three channels + base KG, no RAG) and "
+            "agent_only (multi-round Agent iteration with the KG fully ablated)"
         ),
     )
     parser.add_argument("--seed", type=int)
@@ -1294,6 +1360,14 @@ def main() -> None:
         "expected_rounds": expected_rounds,
         "expected_budget": config.budget_per_round,
         "expected_candidate_pool": config.candidate_limit,
+        "prior_schedule": {
+            "mode": config.prior_schedule.mode,
+            "keep_wild_type": config.prior_schedule.keep_wild_type,
+        },
+        "mutation_order_schedule": {
+            str(round_id): list(orders)
+            for round_id, orders in config.generation.mutation_order_schedule.items()
+        },
         "placeholder_predictor": False,
         "fitness_predictor": config.model.name,
         "generation_predictor_models": [item.name for item in config.generation.predictor_models],
@@ -1318,6 +1392,7 @@ def main() -> None:
         ),
         "kg_tool_call_budget": {
             item: {
+                "enabled": CONDITION_SPECS[item].kg,
                 "required": required_tool_calls(
                     CONDITION_SPECS[item],
                     variant_limit=config.kg_interaction.feature_variant_limit,

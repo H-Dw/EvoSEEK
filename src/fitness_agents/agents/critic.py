@@ -23,6 +23,7 @@ from fitness_agents.contracts.hypothesis_pipeline import (
     COUPLED_REVIEW_CONTRACT,
     CRITIC_EXPLANATION_MAX,
     CRITIC_NESTED_TEXT_MAX,
+    CRITIC_RATIONALE_MAX,
     CriticRatingRegion,
     ReviewVerdictName,
     SAMPLE_REVIEW_PROSE_MAX,
@@ -491,6 +492,24 @@ def load_critic_profile_version(profile: str) -> str:
     return str(version)
 
 
+# Deterministic caps mirroring CritiqueDecisionBodyOutput so the rule client can
+# never emit a payload its own schema would reject.
+_RULE_SECTION_CAP = 8
+_RULE_CITED_CAP = 16
+_RULE_SAMPLE_CAP = 32
+_RULE_RISK_CANDIDATE_CAP = 32
+_RULE_SUMMARY_CAP = min(CRITIC_EXPLANATION_MAX, CRITIC_RATIONALE_MAX)
+
+
+def _clip_text(value: Any, limit: int) -> str:
+    text = str(value)
+    return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
+def _clip_ids(values: Sequence[str], limit: int) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(str(item) for item in values))[:limit]
+
+
 class RuleBasedCriticClient:
     """Deterministic critic used offline and as a fail-closed remote fallback."""
 
@@ -507,6 +526,14 @@ class RuleBasedCriticClient:
         draft: DraftBatch = context["draft"]
         report: ConflictReport = context["conflict_report"]
         evidence: Mapping[str, Sequence[Evidence]] = context["evidence"]
+        omitted: list[str] = []
+
+        def _cap_section(label: str, items: Sequence[Any]) -> list[Any]:
+            values = list(items)
+            if len(values) > _RULE_SECTION_CAP:
+                omitted.append(f"{label} omitted {len(values) - _RULE_SECTION_CAP}")
+            return values[:_RULE_SECTION_CAP]
+
         candidate_issues = tuple(
             CandidateIssue(
                 issue_id=f"I{index:02d}",
@@ -514,41 +541,61 @@ class RuleBasedCriticClient:
                 scope=item.scope,
                 severity=item.severity,
                 code=item.code,
-                claim=item.message,
-                evidence_ids=item.evidence_ids,
+                claim=_clip_text(item.message, CRITIC_NESTED_TEXT_MAX),
+                evidence_ids=_clip_ids(item.evidence_ids, _RULE_CITED_CAP),
                 conflict_ids=(item.conflict_id,),
-                suggested_action=(
-                    RequiredChangeAction.EXCLUDE_CANDIDATE
-                    if item.candidate_ids
-                    else RequiredChangeAction.ABORT_ROUND
-                ),
+                suggested_action=RequiredChangeAction.EXCLUDE_CANDIDATE,
             )
-            for index, item in enumerate(report.hard_conflicts, start=1)
-            if item.candidate_ids
+            for index, item in enumerate(
+                _cap_section(
+                    "candidate_issues",
+                    [item for item in report.hard_conflicts if item.candidate_ids],
+                ),
+                start=1,
+            )
         )
         risks = tuple(
             BatchRisk(
                 risk_id=f"R{index:02d}",
                 code=item.code,
                 severity=item.severity,
-                statement=item.message,
-                candidate_ids=item.candidate_ids,
-                evidence_ids=item.evidence_ids,
+                statement=_clip_text(item.message, CRITIC_NESTED_TEXT_MAX),
+                candidate_ids=_clip_ids(item.candidate_ids, _RULE_RISK_CANDIDATE_CAP),
+                evidence_ids=_clip_ids(item.evidence_ids, _RULE_CITED_CAP),
             )
-            for index, item in enumerate(report.conflicts, start=1)
-            if not item.hard
+            for index, item in enumerate(
+                _cap_section(
+                    "batch_level_risks",
+                    [item for item in report.conflicts if not item.hard],
+                ),
+                start=1,
+            )
         )
         evidence_conflicts: list[EvidenceConflict] = []
-        for item in report.conflicts:
-            if item.code != "EVIDENCE_POLARITY_CONFLICT" or not item.candidate_ids:
-                continue
+        for item in _cap_section(
+            "evidence_conflicts",
+            [
+                item
+                for item in report.conflicts
+                if item.code == "EVIDENCE_POLARITY_CONFLICT" and item.candidate_ids
+            ],
+        ):
             bundle = evidence.get(item.candidate_ids[0], ())
             evidence_conflicts.append(
                 EvidenceConflict(
                     conflict_id=item.conflict_id,
-                    topic=f"Evidence polarity for {item.candidate_ids[0]}",
-                    supporting_ids=tuple(entry.evidence_id for entry in bundle if entry.score > 0),
-                    opposing_ids=tuple(entry.evidence_id for entry in bundle if entry.score < 0),
+                    topic=_clip_text(
+                        f"Evidence polarity for {item.candidate_ids[0]}",
+                        CRITIC_NESTED_TEXT_MAX,
+                    ),
+                    supporting_ids=_clip_ids(
+                        [entry.evidence_id for entry in bundle if entry.score > 0],
+                        _RULE_CITED_CAP,
+                    ),
+                    opposing_ids=_clip_ids(
+                        [entry.evidence_id for entry in bundle if entry.score < 0],
+                        _RULE_CITED_CAP,
+                    ),
                     source_independence="not_established",
                     unresolved_reason="Deterministic evidence channels disagree.",
                     impact="Treat the candidate as uncertain; do not present one-sided support.",
@@ -594,13 +641,41 @@ class RuleBasedCriticClient:
             ReviewVerdict.APPROVE: 5,
         }[verdict]
         rating_suggestions = tuple(item.rationale for item in changes)
-        cited = tuple(
+        priority_ids = [
+            evidence_id
+            for issue in candidate_issues
+            for evidence_id in issue.evidence_ids
+        ]
+        priority_ids.extend(
+            evidence_id
+            for conflict in evidence_conflicts
+            for evidence_id in (*conflict.supporting_ids, *conflict.opposing_ids)
+        )
+        all_cited = tuple(
             dict.fromkeys(
-                evidence_id
-                for candidate_id in draft.candidate_ids
-                for evidence_id in (entry.evidence_id for entry in evidence.get(candidate_id, ()))
+                (
+                    *priority_ids,
+                    *(
+                        entry.evidence_id
+                        for candidate_id in draft.candidate_ids
+                        for entry in evidence.get(candidate_id, ())
+                    ),
+                )
             )
         )
+        if len(all_cited) > _RULE_CITED_CAP:
+            omitted.append(f"cited_evidence_ids omitted {len(all_cited) - _RULE_CITED_CAP}")
+        cited = all_cited[:_RULE_CITED_CAP]
+        sample_candidate_ids = draft.candidate_ids[:_RULE_SAMPLE_CAP]
+        if len(draft.candidate_ids) > _RULE_SAMPLE_CAP:
+            omitted.append(
+                f"sample_reviews omitted {len(draft.candidate_ids) - _RULE_SAMPLE_CAP}"
+            )
+        if omitted:
+            summary = _clip_text(
+                f"{summary} Deterministic caps applied: {'; '.join(omitted)}.",
+                _RULE_SUMMARY_CAP,
+            )
         decision = CritiqueDecision(
             decision_id="runtime-injected",
             draft_batch_id=draft.draft_batch_id,
@@ -626,7 +701,7 @@ class RuleBasedCriticClient:
                     "critic_explanation": summary,
                     "suggestions": list(rating_suggestions),
                 }
-                for candidate_id in draft.candidate_ids
+                for candidate_id in sample_candidate_ids
             ),
         )
         body_payload = {
@@ -1204,9 +1279,38 @@ class CriticAgent:
                 persist=True,
                 error_type=type(last_error).__name__ if last_error is not None else None,
             )
-            decision = _ensure_rating(
-                self.fallback.review(context=context, output_schema=CRITIQUE_DECISION_SCHEMA)
+            try:
+                decision = _ensure_rating(
+                    self.fallback.review(context=context, output_schema=CRITIQUE_DECISION_SCHEMA)
+                )
+                _validate_review_scope(decision)
+                self.validator.validate(
+                    decision,
+                    draft=draft,
+                    report=conflict_report,
+                    visible_evidence_ids=visible_ids,
+                    hypothesis=hypothesis,
+                    batch_review_context=context.get("batch_review_context"),
+                )
+                return decision
+            except Exception as error:  # noqa: BLE001 - fall through to the terminal abort
+                last_error = error
+                report_event(
+                    "critic_fallback_failed",
+                    message="rule fallback failed; issuing terminal abort decision",
+                    persist=True,
+                    error_type=type(error).__name__,
+                )
+        if isinstance(self.client, RuleBasedCriticClient) or self.fallback is not None:
+            # The deterministic path must never crash the loop with an opaque error:
+            # close the round with a minimal schema-valid REJECT that carries the cause.
+            report_event(
+                "critic_terminal_abort",
+                message="critic failed closed; issuing terminal abort decision",
+                persist=True,
+                error_type=type(last_error).__name__ if last_error is not None else None,
             )
+            decision = _ensure_rating(self._terminal_abort_decision(draft, last_error))
             _validate_review_scope(decision)
             self.validator.validate(
                 decision,
@@ -1217,4 +1321,50 @@ class CriticAgent:
                 batch_review_context=context.get("batch_review_context"),
             )
             return decision
-        raise RuntimeError("Critic failed without a configured safe fallback") from last_error
+        detail = (
+            f"{type(last_error).__name__}: {str(last_error)[:200]}"
+            if last_error is not None
+            else "unknown error"
+        )
+        raise RuntimeError(
+            f"Critic failed without a configured safe fallback ({detail})"
+        ) from last_error
+
+    @staticmethod
+    def _terminal_abort_decision(
+        draft: DraftBatch, error: BaseException | None
+    ) -> CritiqueDecision:
+        """Minimal schema-valid REJECT that always passes deterministic validation."""
+
+        detail = (
+            f"{type(error).__name__}: {str(error)[:200]}"
+            if error is not None
+            else "unknown error"
+        )
+        summary = _clip_text(
+            "Critic failed closed; aborting the round instead of approving an "
+            f"unreviewed batch. Cause: {detail}",
+            _RULE_SUMMARY_CAP,
+        )
+        return _decision_from_payload(
+            {
+                "verdict": ReviewVerdict.REJECT.value,
+                "falsification_readiness": FalsificationReadiness.UNTESTABLE.value,
+                "required_changes": [
+                    {
+                        "action": RequiredChangeAction.ABORT_ROUND.value,
+                        "rationale": summary,
+                        "priority": 1,
+                    }
+                ],
+                "confidence": 1.0,
+                "explanation": summary,
+                "rating": {
+                    "score": 1,
+                    "rationale": summary,
+                    "suggestions": [summary],
+                    "text_errors": [],
+                },
+            },
+            draft=draft,
+        )

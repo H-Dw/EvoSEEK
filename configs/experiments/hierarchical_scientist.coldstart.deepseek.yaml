@@ -1,13 +1,16 @@
-# Formal three-channel hierarchical Scientist on GB1 AL96.
+# Cold-start hierarchical Scientist on GB1 AL96 v2 (wild-type-only prior).
 # Protocol: 3 rounds x budget 16, Agent-UQ 8/3/3/2, DeepSeek V4 Flash.
-# Real LLM calls plus Kermut for post-selection dry validation. Agent-UQ does not
-# use fitness predictions for acquisition; the active-learning condition owns its
-# explicit Kermut posterior. Role output budgets are 20k tokens.
-# Launch same-task folds in parallel with scripts/run_hierarchical_scientist.py.
-# Default matrix: kg_base, kg_base_rag, kg_base_al, kg_3features_rag x 3 folds.
-# Opt-in conditions via --conditions: kg_3features_base (three channels + base
-# KG, no RAG) and agent_only (multi-round Agent iteration with the KG ablated).
-# --max-parallel 6 runs them in two waves in that condition order.
+# Differences from hierarchical_scientist.deepseek.yaml:
+#   - task points at the GB1-AL96-5CV-v2 split whose initial prior is WT only;
+#     all 76 singles and 2091 doubles are oracle-queryable candidates.
+#   - prior_schedule cold_start withholds mutation-bearing priors so round 1
+#     runs without prior mutation measurements (defence in depth: v2 already
+#     has none) and never injects them later.
+#   - generation.mutation_order_schedule restricts the round-1 candidate pool
+#     to single mutations, so the first batch measures 16 singles; rounds 2+
+#     are unrestricted and follow the standard iteration rules.
+# Launch same-task folds in parallel with scripts/run_hierarchical_scientist.py
+# via --config configs/experiments/hierarchical_scientist.coldstart.deepseek.yaml.
 mode: knowledge_agent
 seed: 11
 rounds: 3
@@ -17,7 +20,7 @@ scientist_prompt_evidence_limit: 32
 acquisition: greedy
 ucb_beta: 1.5
 diversity_lambda: 0.10
-task_config: configs/task/gb1_binding_reasoning_routes.yaml
+task_config: configs/task/gb1_binding_reasoning_routes_al96wt.yaml
 model_config: configs/model/kermut.yaml
 knowledge_config: configs/knowledge/gb1_features.example.yaml
 output_root: artifacts/runs/hierarchical-scientist
@@ -27,6 +30,9 @@ knowledge_enabled: true
 score_shuffle: false
 evidence_deletion: false
 condition: hierarchical
+prior_schedule:
+  mode: cold_start
+  keep_wild_type: true
 generation:
   selection_driver: agent_uq
   use_fitness_predictors: false
@@ -38,6 +44,8 @@ generation:
   predictor_weight: 0.0
   gp_length_scale: 1.0
   hypothesis_recency_decay: 0.85
+  mutation_order_schedule:
+    1: [1]
   quota_allocation:
     enabled: true
     hypothesis_target: 8

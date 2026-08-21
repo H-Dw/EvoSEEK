@@ -1067,12 +1067,19 @@ trace 证明 LLM 在语义上依赖某条 evidence，也不能证明某路线提
 走 DeepSeek；RAG embedding / reranker 走 Qwen；fitness 为 Kermut。Agent-UQ 条件不把 fitness
 混进 acquisition；`kg_base_al` 使用显式 Kermut posterior。`--placeholder-predictor` 会被拒绝。
 
-| 条件 | 层级 | 文档 RAG | 三通道特征工具 | 采集 |
-|---|---|---|---|---|
-| `kg_base` | 否 | 否 | 否 | Agent-UQ |
-| `kg_base_rag` | 否 | 是 | 否 | Agent-UQ |
-| `kg_base_al` | 否 | 否 | 否 | Kermut active learning |
-| `kg_3features_rag` | 是（三路子 Scientist） | 是 | physchem / conservation / structure | Agent-UQ |
+| 条件 | 层级 | 文档 RAG | 三通道特征工具 | KG | 采集 |
+|---|---|---|---|---|---|
+| `kg_base` | 否 | 否 | 否 | 基础 KG | Agent-UQ |
+| `kg_base_rag` | 否 | 是 | 否 | 基础 KG | Agent-UQ |
+| `kg_base_al` | 否 | 否 | 否 | 基础 KG | Kermut active learning |
+| `kg_3features_rag` | 是（三路子 Scientist） | 是 | physchem / conservation / structure | 基础 KG | Agent-UQ |
+| `kg_3features_base`（可选） | 是（三路子 Scientist） | 否 | physchem / conservation / structure | 基础 KG | Agent-UQ |
+| `agent_only`（可选） | 否 | 否 | 否 | 完全关闭（knowledge runtime 消融） | Agent-UQ |
+
+`kg_3features_base` 与 `agent_only` 不在默认 12-job 矩阵中，通过 `--conditions`
+显式调度，例如 `--conditions kg_3features_base,agent_only`。`agent_only` 关闭
+`knowledge_enabled` / `knowledge.kg` / `kg_interaction.enabled`，Scientist 不挂任何
+KG 工具，纯靠 LLM 做多轮假设-选择迭代；审计会校验 KG runtime 未泄露。
 
 前置：第 2.1 节 split、第 1.7 节 `DEEPSEEK_API_KEY` 与 `DASHSCOPE_API_KEY`、第 9.2 节 Kermut
 资源。只要 `--conditions` 含 RAG 项，必须先完成第 4.3 节共享 Qwen 索引，否则调度器 fail-closed。

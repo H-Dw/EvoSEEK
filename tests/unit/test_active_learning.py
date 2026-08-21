@@ -9,7 +9,9 @@ from fitness_agents.active_learning import (
     HybridBatchAcquisition,
     VisibleHoldoutCalibratedPosterior,
 )
+from fitness_agents.active_learning.module import LightweightCalibratedHybridModule
 from fitness_agents.config import (
+    ActiveLearningConfig,
     CalibratedPosteriorConfig,
     GenerationConfig,
     HybridBatchAcquisitionConfig,
@@ -145,3 +147,54 @@ def test_active_learning_config_is_explicit_and_sample_config_loads(experiment_c
             experiment_config,
             generation=GenerationConfig(selection_driver="active_learning"),
         )
+
+
+def test_active_learning_module_warmup_when_visible_data_below_minimum():
+    model = ModelConfig(ridge_members=2, extra_trees_estimators=12, bootstrap_fraction=0.8)
+    config = ActiveLearningConfig(
+        enabled=True,
+        posterior=CalibratedPosteriorConfig(
+            predictor_models=(model,),
+            calibration_fraction=0.25,
+            min_calibration_size=4,
+            min_training_size=8,
+        ),
+        acquisition=HybridBatchAcquisitionConfig(
+            exploitation_fraction=0.50,
+            exploration_fraction=0.25,
+            knowledge_fraction=0.25,
+            ucb_beta=1.0,
+            diversity_lambda=0.10,
+        ),
+    )
+    module = LightweightCalibratedHybridModule(
+        config,
+        fallback_model=model,
+        predictor_factory=create_predictor,
+        seed=17,
+    )
+    wild_type = _variant("wt", "VDGV")
+    observations = [
+        FitnessObservation("wt", 1.0, "initial_observed", 0, "fold_initial_observed")
+    ]
+    candidates = [
+        _variant("cand-a", "ADGV", "oracle_pool"),
+        _variant("cand-b", "VDGA", "oracle_pool"),
+        _variant("cand-c", "AAAA", "oracle_pool"),
+        _variant("cand-d", "FFFF", "oracle_pool"),
+    ]
+
+    result = module.fit_predict([wild_type], observations, candidates)
+
+    assert result.calibration.status == "warmup_insufficient_data"
+    assert result.calibration.visible_observations == 1
+    assert len(result.predictions) == 4
+    assert all(item.fitness_mean == 1.0 for item in result.predictions)
+    assert all(item.fitness_std > 0 for item in result.predictions)
+    # Budget 3 splits 1/1/1 across arms, so the knowledge arm must claim cand-b.
+    knowledge = {"cand-b": 5.0}
+    scores = module.score(result, knowledge)
+    selection = module.select(candidates, scores, 3, knowledge_scores=knowledge)
+    assert selection.quotas == {"exploitation": 1, "exploration": 1, "knowledge": 1}
+    assert selection.selected_by_arm["knowledge"] == ("cand-b",)
+    assert len(selection.selected_ids) == 3

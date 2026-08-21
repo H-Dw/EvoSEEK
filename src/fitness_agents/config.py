@@ -728,6 +728,29 @@ class AgentQuotaAllocationConfig:
         return sum(self.quotas().values())
 
 
+@dataclass(frozen=True)
+class PriorScheduleConfig:
+    """Controls when the fold's initial observations enter the campaign.
+
+    ``upfront`` keeps the historical behaviour: every initial observation is
+    injected before round 1. ``cold_start`` withholds mutation-bearing initial
+    observations so round 1 runs without prior mutation measurements; withheld
+    variants are never injected later. On splits whose low-order variants are
+    not part of the oracle pool (e.g. AL96 v1) withheld variants leave the
+    experiment entirely; on cold-start splits (initial budget = WT only) the
+    low-order variants remain queryable through the candidate pool.
+    """
+
+    mode: str = "upfront"
+    keep_wild_type: bool = True
+
+    def __post_init__(self) -> None:
+        if self.mode not in {"upfront", "cold_start"}:
+            raise ValueError(
+                "prior_schedule.mode must be 'upfront' or 'cold_start'"
+            )
+
+
 @dataclass
 class GenerationConfig:
     """Mutation-selection controls for Agent modes.
@@ -750,6 +773,9 @@ class GenerationConfig:
     quota_allocation: AgentQuotaAllocationConfig | dict[str, Any] = field(
         default_factory=AgentQuotaAllocationConfig
     )
+    # Round id (1-based) -> allowed mutation orders for that round's candidate
+    # pool. Rounds not listed are unrestricted; empty dict is the status quo.
+    mutation_order_schedule: dict[int, tuple[int, ...]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if isinstance(self.quota_allocation, dict):
@@ -770,6 +796,18 @@ class GenerationConfig:
             raise ValueError("generation.hypothesis_recency_decay must be in (0, 1]")
         if self.predictor_weight < 0:
             raise ValueError("generation.predictor_weight must be non-negative")
+        normalized: dict[int, tuple[int, ...]] = {}
+        for raw_round, raw_orders in (self.mutation_order_schedule or {}).items():
+            round_id = int(raw_round)
+            orders = tuple(sorted({int(order) for order in raw_orders}))
+            if round_id < 1:
+                raise ValueError("generation.mutation_order_schedule rounds must be >= 1")
+            if not orders or any(order < 1 for order in orders):
+                raise ValueError(
+                    "generation.mutation_order_schedule orders must be positive"
+                )
+            normalized[round_id] = orders
+        self.mutation_order_schedule = normalized
 
 
 @dataclass(frozen=True)
@@ -1403,6 +1441,7 @@ class ExperimentConfig:
     hierarchical_hypothesis: HierarchicalHypothesisConfig = field(
         default_factory=HierarchicalHypothesisConfig
     )
+    prior_schedule: PriorScheduleConfig = field(default_factory=PriorScheduleConfig)
     llm_provider: str = "mock"
     knowledge_enabled: bool = False
     score_shuffle: bool = False
@@ -1844,6 +1883,9 @@ def load_experiment_config(
         if runtime != "chat_completions":
             raise ValueError(f"Removed Agents SDK runtime is not supported: {runtime!r}")
     llm = _dataclass_from_mapping(LLMConfig, llm_raw)
+    prior_schedule = _dataclass_from_mapping(
+        PriorScheduleConfig, dict(raw.get("prior_schedule", {}) or {})
+    )
     return ExperimentConfig(
         mode=raw["mode"],
         seed=int(raw["seed"]),
@@ -1866,6 +1908,7 @@ def load_experiment_config(
         output=output,
         kg_interaction=kg_interaction,
         hierarchical_hypothesis=hierarchical_hypothesis,
+        prior_schedule=prior_schedule,
         output_root=root / raw.get("output_root", "artifacts/runs"),
         llm_provider=llm.provider,
         knowledge_enabled=bool(raw.get("knowledge_enabled", False)),

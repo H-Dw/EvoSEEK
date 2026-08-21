@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from fitness_agents.agents.critic import CRITIQUE_DECISION_SCHEMA, RuleBasedCriticClient
+from fitness_agents.agents.remote_llm import resolve_api_key
 from fitness_agents.config import ExperimentConfig, load_experiment_config
 from fitness_agents.contracts.design import ResolvedDesignSpace
 from fitness_agents.contracts.interaction import (
@@ -12,10 +14,12 @@ from fitness_agents.contracts.interaction import (
     EvolutionRunResult,
     OpenDesignRequestPreview,
 )
+from fitness_agents.contracts.schemas import ConflictReport, Evidence, Prediction, Variant
 from fitness_agents.loop.open_design import OpenDesignRunner
 from fitness_agents.models.capabilities import predictor_capabilities
 from fitness_agents.mutation import resolve_design_space
 from fitness_agents.protein_features import ProteinTaskContext
+from fitness_agents.validation.batch import CritiqueDecisionValidator, build_draft_batch
 
 from .intent import DeterministicEvolutionIntentParser
 
@@ -25,6 +29,14 @@ class _PreparedRequest:
     config: ExperimentConfig
     design_space: ResolvedDesignSpace
     preview: OpenDesignRequestPreview
+
+
+class OpenDesignRunError(RuntimeError):
+    """Runner failure that carries the run directory for UI diagnostics."""
+
+    def __init__(self, error: BaseException, *, run_dir: Path) -> None:
+        super().__init__(f"{type(error).__name__}: {error}")
+        self.run_dir = str(run_dir)
 
 
 class EvolutionApplicationService:
@@ -37,6 +49,125 @@ class EvolutionApplicationService:
             raise ValueError("Interaction service requires a trusted open_design config")
         self.parser = DeterministicEvolutionIntentParser()
         self._prepared: dict[str, _PreparedRequest] = {}
+        self._preview_seq = 0
+        self.preflight_report = self._preflight()
+
+    def _preflight(self) -> tuple[str, ...]:
+        """Fail-closed startup checks mirroring the batch runner's preflight."""
+
+        checks: list[str] = []
+        failures: list[str] = []
+        config = self.base_config
+        posterior_models = (
+            config.active_learning.posterior.predictor_models or (config.model,)
+        )
+        capabilities = [predictor_capabilities(item) for item in posterior_models]
+        if all(item.supports_full_sequence for item in capabilities) and all(
+            item.supports_generated_sequences for item in capabilities
+        ):
+            checks.append("posterior predictor 支持完整生成序列")
+        else:
+            failures.append("配置的 posterior predictor 不支持完整生成序列。")
+
+        smoke_error = self._critic_smoke_check(config)
+        if smoke_error is None:
+            checks.append("规则 Critic 冒烟决策通过 schema 与确定性校验")
+        else:
+            failures.append(f"规则 Critic 冒烟测试失败：{smoke_error}")
+
+        if config.critic.mode == "remote" and config.critic.enabled:
+            try:
+                resolve_api_key(config.critic.api_key)
+            except Exception as error:  # noqa: BLE001 - preflight aggregates failures
+                failures.append(f"remote critic API key 不可解析：{error}")
+            else:
+                checks.append("remote critic API key 可解析")
+            if isinstance(config.critic.max_tokens, int) and config.critic.max_tokens > 0:
+                checks.append(f"critic max_tokens 已封顶为 {config.critic.max_tokens}")
+            else:
+                failures.append("remote critic 需要正整数 max_tokens 预算。")
+        if failures:
+            raise ValueError("交互服务启动预检失败：" + "；".join(failures))
+        return tuple(checks)
+
+    @staticmethod
+    def _critic_smoke_check(config: ExperimentConfig) -> str | None:
+        """Run the deterministic critic over a synthetic full-size batch."""
+
+        candidate_ids = tuple(f"smoke:{index}" for index in range(config.budget_per_round))
+        variants = {
+            item: Variant(
+                variant_id=item,
+                variant=item,
+                sequence="A",
+                mutation_notation="WT",
+                mutation_count=0,
+                split_role="generated",
+            )
+            for item in candidate_ids
+        }
+        predictions = {
+            item: Prediction(
+                variant_id=item,
+                fitness_mean=0.0,
+                fitness_std=1.0,
+                interval_90=(-1.0, 1.0),
+                ood_score=0.0,
+                component_scores={},
+                model_version="smoke",
+            )
+            for item in candidate_ids
+        }
+        channels = ("physchem", "conservation", "structure", "kg")
+        evidence = {
+            item: [
+                Evidence(
+                    evidence_id=f"smoke:{channel}:{item}",
+                    variant_id=item,
+                    channel=channel,
+                    statement="smoke",
+                    score=0.0,
+                    source_id="smoke",
+                    confidence=0.0,
+                    round_id=1,
+                )
+                for channel in channels
+            ]
+            for item in candidate_ids
+        }
+        draft = build_draft_batch(
+            round_id=1,
+            review_attempt=0,
+            candidate_ids=candidate_ids,
+            variants=variants,
+            predictions=predictions,
+            evidence=evidence,
+            hypothesis_id=None,
+            falsification_spec=None,
+        )
+        report = ConflictReport(
+            report_id="smoke",
+            round_id=1,
+            conflicts=(),
+            validator_version="smoke",
+            draft_batch_id=draft.draft_batch_id,
+        )
+        try:
+            decision = RuleBasedCriticClient().review(
+                context={"draft": draft, "conflict_report": report, "evidence": evidence},
+                output_schema=CRITIQUE_DECISION_SCHEMA,
+            )
+            CritiqueDecisionValidator().validate(
+                decision,
+                draft=draft,
+                report=report,
+                visible_evidence_ids={
+                    entry.evidence_id for entries in evidence.values() for entry in entries
+                },
+            )
+        except Exception as error:  # noqa: BLE001 - preflight reports, never raises raw
+            return f"{type(error).__name__}: {error}"
+        return None
 
     @property
     def configured_reference(self) -> str:
@@ -124,7 +255,8 @@ class EvolutionApplicationService:
                 )
                 for position in positions
             )
-        preview_id = "PV01"
+        self._preview_seq += 1
+        preview_id = f"PV{self._preview_seq:02d}"
         ready = not blockers and config is not None and design_space is not None
         preview = OpenDesignRequestPreview(
             preview_id=preview_id,
@@ -157,13 +289,19 @@ class EvolutionApplicationService:
         if not confirmed:
             raise PermissionError("必须确认结构化 preview 后才能创建运行任务。")
         try:
-            prepared = self._prepared.pop(preview_id)
+            prepared = self._prepared[preview_id]
         except KeyError as error:
             raise ValueError("preview 不存在、未通过预检，或已经提交。") from error
-        summary = OpenDesignRunner(
+        runner = OpenDesignRunner(
             prepared.config,
             resolved_design_space=prepared.design_space,
-        ).run()
+        )
+        try:
+            summary = runner.run()
+        except Exception as error:
+            # Keep the prepared request so the user can adjust inputs and retry.
+            raise OpenDesignRunError(error, run_dir=runner.writer.run_dir) from error
+        del self._prepared[preview_id]
         run_dir = Path(str(summary["run_dir"])).resolve()
         allowed_names = (
             "selected_candidates.fasta",
@@ -182,7 +320,10 @@ class EvolutionApplicationService:
             preview_id=preview_id,
             status="completed",
             run_id=str(summary["run_id"]),
-            public_message="开放设计完成；最终候选已通过 hard validation、Critic 和 Approval。",
+            public_message=(
+                "开放设计完成；最终候选已通过 hard validation、Critic 和 Approval。"
+                f"\nrun_id: {summary['run_id']}\nrun_dir: {run_dir}"
+            ),
             summary=summary,
             artifact_paths=artifacts,
         )

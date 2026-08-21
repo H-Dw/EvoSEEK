@@ -48,7 +48,12 @@ from fitness_agents.mutation import (
     resolve_design_space,
 )
 from fitness_agents.protein_features import ProteinTaskContext
-from fitness_agents.utils import JsonArtifactWriter, seed_everything
+from fitness_agents.utils import (
+    JsonArtifactWriter,
+    bind_progress,
+    reset_progress,
+    seed_everything,
+)
 from fitness_agents.validation import ApprovalGateway, OpenDesignHardValidator, build_draft_batch
 
 from .review import BoundedReviewLoop, RevisionConstraintInfeasible
@@ -326,18 +331,22 @@ class OpenDesignRunner:
         )
 
     def run(self) -> dict[str, Any]:
+        token = bind_progress(self.writer)
         try:
             return self._run()
-        except Exception:
+        except Exception as error:
             with contextlib.suppress(Exception):
                 self.writer.report(
                     "open_design_failed",
                     message="open design failed",
                     phase="failed",
                     round_id=1,
+                    error_type=type(error).__name__,
+                    error_message=str(error)[:500],
                 )
             raise
         finally:
+            reset_progress(token)
             with contextlib.suppress(Exception):
                 self.knowledge.close()
 

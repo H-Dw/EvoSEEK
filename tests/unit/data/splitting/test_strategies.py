@@ -118,3 +118,32 @@ def test_writer_outputs_capability_views_and_loader_enforces_them(
     assert evaluator.final_labels is not None
     assert evaluator.queryable_labels is None
     assert len(list(output.glob("fold_*"))) == 5
+
+
+def test_al_closed_loop_initial_budget_one_keeps_only_wild_type(synthetic_landscape):
+    dataset = synthetic_landscape
+    options = {
+        "test_depth_min": 3,
+        "validation_size": 20,
+        "validation_strata": ("mutation_count", "backbone_id"),
+    }
+    base = build_split(dataset, SplitRequest("al96_closed_loop", options={**options, "initial_budget": 26}))
+    cold = build_split(dataset, SplitRequest("al96_closed_loop", options={**options, "initial_budget": 1}))
+
+    depth = dataset.features.set_index("variant_id")["mutation_count"]
+    single_count = int((depth == 1).sum())
+    for fold in cold.folds:
+        initial = fold.assignments.query("split_role == 'initial_observed'")
+        assert len(initial) == 1
+        assert depth[initial["variant_id"].iloc[0]] == 0
+        pool_depths = fold.assignments.query("split_role == 'candidate_pool'")["variant_id"].map(depth)
+        # A WT-only prior leaves every single mutant in the queryable pool.
+        assert int((pool_depths == 1).sum()) == single_count
+    # The smaller prior never touches the HD>=3 deployable population, so the
+    # test and validation composition matches the full-prior build exactly.
+    for cold_fold, base_fold in zip(cold.folds, base.folds, strict=True):
+        for role in ("final_test", "benchmark_validation"):
+            cold_ids = set(cold_fold.assignments.query("split_role == @role")["variant_id"])
+            base_ids = set(base_fold.assignments.query("split_role == @role")["variant_id"])
+            assert cold_ids == base_ids
+    assert audit_split(dataset, cold)["valid"] is True

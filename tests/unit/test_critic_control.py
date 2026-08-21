@@ -12,12 +12,16 @@ from fitness_agents.agents.critic import (
 )
 from fitness_agents.contracts.batch_review import BatchReviewContext
 from fitness_agents.contracts.schemas import (
+    ConflictReport,
     CritiqueDecision,
     Evidence,
     FalsificationReadiness,
     FitnessObservation,
     Hypothesis,
     HypothesisStatus,
+    IssueScope,
+    IssueSeverity,
+    MutationConflict,
     Prediction,
     RequiredChange,
     RequiredChangeAction,
@@ -31,7 +35,11 @@ from fitness_agents.evaluation.hypotheses import (
 from fitness_agents.loop.backends import ApprovalEnforcingBackend
 from fitness_agents.loop.review import BoundedReviewLoop
 from fitness_agents.mutation.conflicts import detect_pairwise_epistasis
-from fitness_agents.validation.batch import BatchHardValidator, build_draft_batch
+from fitness_agents.validation.batch import (
+    BatchHardValidator,
+    CritiqueDecisionValidator,
+    build_draft_batch,
+)
 
 
 def _variant(code: str, variant_id: str) -> Variant:
@@ -136,6 +144,185 @@ class _AlwaysApprove:
             falsification_readiness=FalsificationReadiness.READY,
             confidence=1.0,
             summary="Approve regardless of deterministic validation.",
+        )
+
+
+def _channel_evidence(evidence_id: str, variant_id: str, channel: str) -> Evidence:
+    return Evidence(
+        evidence_id=evidence_id,
+        variant_id=variant_id,
+        channel=channel,
+        statement=f"{channel} context for {variant_id}",
+        score=0.1,
+        source_id=f"{channel}:test",
+        confidence=0.5,
+        round_id=1,
+    )
+
+
+def _multi_channel_evidence(candidate_ids: tuple[str, ...]) -> dict[str, list[Evidence]]:
+    channels = ("physchem", "conservation", "structure", "kg")
+    return {
+        candidate_id: [
+            _channel_evidence(f"E:{channel}:{candidate_id}", candidate_id, channel)
+            for channel in channels
+        ]
+        for candidate_id in candidate_ids
+    }
+
+
+def _empty_report(draft) -> ConflictReport:
+    return ConflictReport(
+        report_id="report:test",
+        round_id=draft.round_id,
+        conflicts=(),
+        validator_version="test",
+        draft_batch_id=draft.draft_batch_id,
+    )
+
+
+def test_rule_critic_caps_cited_evidence_for_large_batches(experiment_config) -> None:
+    candidate_ids = tuple(f"c{index}" for index in range(8))
+    variants = {item: _variant("VDGA", item) for item in candidate_ids}
+    predictions = {item: _prediction(item, 1.0) for item in candidate_ids}
+    evidence = _multi_channel_evidence(candidate_ids)
+    draft = build_draft_batch(
+        round_id=1,
+        review_attempt=0,
+        candidate_ids=candidate_ids,
+        variants=variants,
+        predictions=predictions,
+        evidence=evidence,
+        hypothesis_id=None,
+        falsification_spec=None,
+    )
+    report = _empty_report(draft)
+    decision = RuleBasedCriticClient().review(
+        context={"draft": draft, "conflict_report": report, "evidence": evidence},
+        output_schema={},
+    )
+    assert decision.verdict is ReviewVerdict.APPROVE
+    assert len(decision.cited_evidence_ids) == 16
+    assert "caps applied" in decision.summary
+    visible = {entry.evidence_id for entries in evidence.values() for entry in entries}
+    CritiqueDecisionValidator().validate(
+        decision,
+        draft=draft,
+        report=report,
+        visible_evidence_ids=visible,
+    )
+
+
+def test_rule_critic_caps_issue_sections_with_many_hard_conflicts(experiment_config) -> None:
+    candidate_ids = tuple(f"c{index}" for index in range(12))
+    variants = {item: _variant("VDGA", item) for item in candidate_ids}
+    predictions = {item: _prediction(item, 1.0) for item in candidate_ids}
+    conflicts = tuple(
+        MutationConflict(
+            conflict_id=f"conflict:{index:02d}",
+            code="UNKNOWN_CANDIDATE",
+            scope=IssueScope.SEQUENCE,
+            severity=IssueSeverity.BLOCKER,
+            message=f"Synthetic hard conflict {index}",
+            candidate_ids=(candidate_ids[index],),
+            evidence_ids=(f"ev:{index:02d}",),
+            hard=True,
+            detector="test",
+        )
+        for index in range(12)
+    )
+    draft = build_draft_batch(
+        round_id=1,
+        review_attempt=0,
+        candidate_ids=candidate_ids,
+        variants=variants,
+        predictions=predictions,
+        evidence={},
+        hypothesis_id=None,
+        falsification_spec=None,
+    )
+    report = ConflictReport(
+        report_id="report:test",
+        round_id=1,
+        conflicts=conflicts,
+        validator_version="test",
+        draft_batch_id=draft.draft_batch_id,
+    )
+    decision = RuleBasedCriticClient().review(
+        context={"draft": draft, "conflict_report": report, "evidence": {}},
+        output_schema={},
+    )
+    assert decision.verdict is ReviewVerdict.REJECT
+    assert len(decision.candidate_issues) == 8
+    assert "caps applied" in decision.summary
+    CritiqueDecisionValidator().validate(
+        decision,
+        draft=draft,
+        report=report,
+        visible_evidence_ids={f"ev:{index:02d}" for index in range(12)},
+    )
+
+
+class _BrokenRuleClient(RuleBasedCriticClient):
+    provider_name = "broken_rule"
+
+    def review(self, *, context, output_schema, validator=None):
+        raise ValueError("synthetic rule failure")
+
+
+class _BrokenRemoteClient:
+    provider_name = "broken_remote"
+
+    def review(self, *, context, output_schema, validator=None):
+        raise ConnectionError("remote down")
+
+
+def _single_candidate_review_kwargs():
+    variants = {"a": _variant("VDGA", "a")}
+    predictions = {"a": _prediction("a", 1.0)}
+    draft = build_draft_batch(
+        round_id=1,
+        review_attempt=0,
+        candidate_ids=("a",),
+        variants=variants,
+        predictions=predictions,
+        evidence={},
+        hypothesis_id=None,
+        falsification_spec=None,
+    )
+    return {
+        "draft": draft,
+        "variants": variants,
+        "predictions": predictions,
+        "evidence": {},
+        "conflict_report": _empty_report(draft),
+    }
+
+
+def test_rule_client_failure_closes_with_terminal_abort_decision(experiment_config) -> None:
+    decision = CriticAgent(_BrokenRuleClient(), max_retries=0).review(
+        **_single_candidate_review_kwargs()
+    )
+    assert decision.verdict is ReviewVerdict.REJECT
+    assert decision.required_changes[0].action is RequiredChangeAction.ABORT_ROUND
+    assert "synthetic rule failure" in decision.summary
+
+
+def test_broken_rule_fallback_still_closes_with_terminal_abort(experiment_config) -> None:
+    agent = CriticAgent(
+        _BrokenRemoteClient(), max_retries=0, fallback=_BrokenRuleClient()
+    )
+    decision = agent.review(**_single_candidate_review_kwargs())
+    assert agent.fallback_count == 1
+    assert decision.verdict is ReviewVerdict.REJECT
+    assert decision.required_changes[0].action is RequiredChangeAction.ABORT_ROUND
+    assert "synthetic rule failure" in decision.summary
+
+
+def test_remote_failure_without_fallback_raises_with_cause(experiment_config) -> None:
+    with pytest.raises(RuntimeError, match=r"without a configured safe fallback \(ConnectionError"):
+        CriticAgent(_BrokenRemoteClient(), max_retries=0).review(
+            **_single_candidate_review_kwargs()
         )
 
 

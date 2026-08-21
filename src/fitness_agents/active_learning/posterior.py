@@ -38,6 +38,7 @@ class VisibleHoldoutCalibratedPosterior:
     """Small visible-label-only ensemble with deterministic holdout calibration."""
 
     name = "visible_holdout_ensemble"
+    min_visible_observations = 4
 
     def __init__(
         self,
@@ -184,8 +185,11 @@ class VisibleHoldoutCalibratedPosterior:
         self._conformal_radius = 0.0
         self._staging_predictors = ()
         aligned_variants, aligned_observations = self._align_visible(variants, observations)
-        if len(aligned_variants) < 4:
-            raise ValueError("Active-learning posterior requires at least four visible observations")
+        if len(aligned_variants) < self.min_visible_observations:
+            raise ValueError(
+                "Active-learning posterior requires at least "
+                f"{self.min_visible_observations} visible observations"
+            )
         train_count, calibration_count, status = self._fit_calibration(
             aligned_variants, aligned_observations
         )

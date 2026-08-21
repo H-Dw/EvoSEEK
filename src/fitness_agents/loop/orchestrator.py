@@ -807,6 +807,8 @@ class CampaignRunner:
         eligible: Sequence[Variant],
         remaining: Sequence[Variant],
         hypothesis: Hypothesis | None,
+        *,
+        required_controls_override: int | None = None,
     ) -> list[Variant]:
         quota = self.config.generation.quota_allocation
         if self._selection_driver() != "agent_uq" or not quota.enabled:
@@ -817,7 +819,11 @@ class CampaignRunner:
             hypothesis=hypothesis,
             position_to_index=self.task_context.position_to_variant_index,
             strong_threshold=quota.strong_hypothesis_threshold,
-            required_controls=quota.matched_control,
+            required_controls=(
+                quota.matched_control
+                if required_controls_override is None
+                else required_controls_override
+            ),
             candidate_limit=self.config.candidate_limit,
             reserve_multiplier=quota.matched_control_reserve_multiplier,
         )
@@ -1375,6 +1381,16 @@ class CampaignRunner:
                         self.config.generation.quota_allocation.strong_hypothesis_threshold
                     ),
                 },
+                "mutation_order_schedule": {
+                    str(round_id): list(orders)
+                    for round_id, orders in (
+                        self.config.generation.mutation_order_schedule.items()
+                    )
+                },
+            },
+            "prior_schedule": {
+                "mode": self.config.prior_schedule.mode,
+                "keep_wild_type": self.config.prior_schedule.keep_wild_type,
             },
             "active_learning": {
                 "enabled": self.config.active_learning.enabled,
@@ -1683,13 +1699,51 @@ class CampaignRunner:
         finally:
             reset_progress(self._progress_token)
 
+    def _apply_prior_schedule(self) -> tuple[list[Any], list[Any], tuple[str, ...]]:
+        """Partition the fold's initial observations according to prior_schedule.
+
+        Returns (variants, observations, withheld_ids). ``upfront`` injects the
+        full initial set (historical behaviour). ``cold_start`` keeps only the
+        wild-type reference (when keep_wild_type is set) and withholds every
+        mutation-bearing prior for the whole campaign; withheld variants are
+        never injected later and, on splits where they are not oracle-queryable,
+        simply leave the experiment.
+        """
+
+        initial_variants = list(self.bundle.initial_variants)
+        initial_observations = list(self.bundle.initial_observations)
+        schedule = self.config.prior_schedule
+        if schedule.mode != "cold_start":
+            return initial_variants, initial_observations, ()
+        keep_ids = (
+            {item.variant_id for item in initial_variants if item.mutation_count == 0}
+            if schedule.keep_wild_type
+            else set()
+        )
+        withheld_ids = tuple(
+            item.variant_id for item in initial_variants if item.variant_id not in keep_ids
+        )
+        kept_variants = [item for item in initial_variants if item.variant_id in keep_ids]
+        kept_observations = [
+            item for item in initial_observations if item.variant_id in keep_ids
+        ]
+        if not kept_observations:
+            raise ValueError(
+                "prior_schedule cold_start removed every initial observation; "
+                "keep_wild_type requires a wild-type row in the fold's initial set"
+            )
+        return kept_variants, kept_observations, withheld_ids
+
     def _run_campaign(self) -> dict[str, Any]:
         public_by_id = {
             variant.variant_id: variant
             for variant in (self.bundle.initial_variants + self.bundle.oracle_pool)
         }
-        observed_variants = list(self.bundle.initial_variants)
-        self.state.observed = list(self.bundle.initial_observations)
+        initial_variants, initial_observations, withheld_prior_ids = (
+            self._apply_prior_schedule()
+        )
+        observed_variants = initial_variants
+        self.state.observed = initial_observations
         self.state.revealed_variant_ids = {item.variant_id for item in self.state.observed}
         if self.config.knowledge_enabled:
             self.knowledge.update(observed_variants, self.state.observed)
@@ -1731,6 +1785,11 @@ class CampaignRunner:
                 "oracle_pool_count": len(remaining),
                 "final_test_count": self._final_test_count,
                 "data_source": self._data_source_record,
+                "prior_schedule": {
+                    "mode": self.config.prior_schedule.mode,
+                    "keep_wild_type": self.config.prior_schedule.keep_wild_type,
+                    "withheld_prior_count": len(withheld_prior_ids),
+                },
             },
         )
         self._progress(
@@ -2093,6 +2152,16 @@ class CampaignRunner:
                 hypothesis=hypothesis,
                 position_to_index=self.task_context.position_to_variant_index,
             )
+            hard_constraint_valid_count = len(constraint_valid_remaining)
+            allowed_mutation_orders = (
+                self.config.generation.mutation_order_schedule.get(round_id)
+            )
+            if allowed_mutation_orders:
+                constraint_valid_remaining = [
+                    item
+                    for item in constraint_valid_remaining
+                    if item.mutation_count in allowed_mutation_orders
+                ]
             eligible = self.generator.generate(
                 constraint_valid_remaining,
                 self.state,
@@ -2100,10 +2169,15 @@ class CampaignRunner:
                 evidence,
                 self.config.candidate_limit,
             )
+            # A mutation-order-restricted round is itself a depth-controlled
+            # design, so hypothesis-negative matched controls are not required
+            # (a broad hypothesis can leave no negative singles at all).
+            matched_control_override = 0 if allowed_mutation_orders else None
             eligible = self._reserve_agent_uq_controls(
                 eligible,
                 constraint_valid_remaining,
                 hypothesis,
+                required_controls_override=matched_control_override,
             )
             if len(eligible) > self.config.candidate_limit:
                 raise AssertionError("Round candidate set exceeded candidate_limit")
@@ -2121,7 +2195,11 @@ class CampaignRunner:
                     ),
                     "seed": self.config.seed,
                     "catalog_candidate_count": len(remaining),
-                    "hard_constraint_valid_count": len(constraint_valid_remaining),
+                    "hard_constraint_valid_count": hard_constraint_valid_count,
+                    "mutation_order_filter": (
+                        list(allowed_mutation_orders) if allowed_mutation_orders else None
+                    ),
+                    "mutation_order_valid_count": len(constraint_valid_remaining),
                     "planned_candidate_count": self.config.candidate_limit,
                     "actual_candidate_count": len(eligible),
                     "candidate_ids": round_candidate_ids,
@@ -2446,6 +2524,9 @@ class CampaignRunner:
                     ],
                     expected_batch_size,
                     diversity_lambda=self.config.diversity_lambda,
+                    quota_overrides=(
+                        {"matched_control": 0} if allowed_mutation_orders else None
+                    ),
                 )
                 selected_ids = list(agent_quota_selection.selected_ids)
                 self.writer.write_json(
@@ -2495,9 +2576,31 @@ class CampaignRunner:
             validation_prediction_sets: list[list[Prediction]] = []
             validation_predictors: list[Any] = []
             validation_targets = [public_by_id[item] for item in selected_ids]
+            # Every dry validator (one-hot ensemble and Kermut alike) needs at
+            # least four observed non-WT variants; cold-start round 1 may have
+            # only the wild type, in which case dry validation is skipped.
+            non_wt_observed = sum(
+                1 for item in observed_variants if item.mutation_count > 0
+            )
+            validation_skipped_reason = (
+                "insufficient_visible_data"
+                if self.config.validation.enabled and non_wt_observed < 4
+                else None
+            )
+            if validation_skipped_reason:
+                self._progress(
+                    "validation_model_fit_skipped",
+                    (
+                        f"round {round_id}/{self.config.rounds} dry validation skipped: "
+                        f"{non_wt_observed} non-WT observations (< 4)"
+                    ),
+                    phase=CampaignPhase.MODEL_FIT,
+                    n_train=len(observed_variants),
+                    reason=validation_skipped_reason,
+                )
             validation_configs = (
                 (self.config.model, *self.config.validation.predictor_models)
-                if self.config.validation.enabled
+                if self.config.validation.enabled and validation_skipped_reason is None
                 else ()
             )
             if validation_configs:
@@ -2850,6 +2953,9 @@ class CampaignRunner:
                             _context["expected_batch_size"],
                             diversity_lambda=diversity,
                             constraints=constraints,
+                            quota_overrides=(
+                                {"matched_control": 0} if allowed_mutation_orders else None
+                            ),
                             position_to_index=(
                                 self.task_context.position_to_variant_index
                             ),
@@ -3229,6 +3335,9 @@ class CampaignRunner:
                                 ],
                                 expected_batch_size,
                                 diversity_lambda=self.config.diversity_lambda,
+                                quota_overrides=(
+                                    {"matched_control": 0} if allowed_mutation_orders else None
+                                ),
                             )
                             selected_ids = list(agent_quota_selection.selected_ids)
                         else:
@@ -3673,7 +3782,11 @@ class CampaignRunner:
                     "dry_validation_scope": (
                         "draft_selected_candidates_only"
                         if validation_predictors
-                        else "disabled"
+                        else (
+                            "skipped_insufficient_visible_data"
+                            if validation_skipped_reason
+                            else "disabled"
+                        )
                     ),
                     "dry_validation_candidate_ids": dry_validation_ids,
                     "dry_validation_candidate_count": len(dry_validation_ids),
@@ -3791,8 +3904,10 @@ class CampaignRunner:
             )
             revealed = self.backend.collect(experiment_run_id)
             selected_variants = [public_by_id[variant_id] for variant_id in selected_ids]
-            pre_round_visible_baseline = float(
-                np.median([item.fitness for item in self.state.observed])
+            pre_round_visible_baseline = (
+                float(np.median([item.fitness for item in self.state.observed]))
+                if self.state.observed
+                else 0.0
             )
             self.state.observed.extend(revealed)
             observed_variants.extend(selected_variants)

@@ -76,21 +76,26 @@ def _write_campaign(
 ) -> dict:
     run_dir.mkdir(parents=True, exist_ok=True)
     spec = {
-        "hierarchical": {"channels": True, "rag": False, "al": False, "hierarchy": True},
-        "single": {"channels": True, "rag": False, "al": False, "hierarchy": False},
-        "kg_base": {"channels": False, "rag": False, "al": False, "hierarchy": False},
-        "kg_base_rag": {"channels": False, "rag": True, "al": False, "hierarchy": False},
-        "kg_base_al": {"channels": False, "rag": False, "al": True, "hierarchy": False},
-        "kg_3features_rag": {"channels": True, "rag": True, "al": False, "hierarchy": True},
+        "hierarchical": {"channels": True, "rag": False, "al": False, "hierarchy": True, "kg": True},
+        "single": {"channels": True, "rag": False, "al": False, "hierarchy": False, "kg": True},
+        "kg_base": {"channels": False, "rag": False, "al": False, "hierarchy": False, "kg": True},
+        "kg_base_rag": {"channels": False, "rag": True, "al": False, "hierarchy": False, "kg": True},
+        "kg_base_al": {"channels": False, "rag": False, "al": True, "hierarchy": False, "kg": True},
+        "kg_3features_base": {"channels": True, "rag": False, "al": False, "hierarchy": True, "kg": True},
+        "kg_3features_rag": {"channels": True, "rag": True, "al": False, "hierarchy": True, "kg": True},
+        "agent_only": {"channels": False, "rag": False, "al": False, "hierarchy": False, "kg": False},
     }[condition]
     enabled = spec["hierarchy"] if hierarchy_enabled is None else hierarchy_enabled
-    operators = ["hypothesis_context", "query_assay_association", "query_evidence_provenance"]
-    if spec["channels"]:
-        operators.append("query_feature_bundle")
-    operators.append("query_kg_truncation_audit")
-    if spec["rag"]:
-        operators.extend(["query_local_knowledge", "query_structured_claims"])
-    operators.extend(["explain_variant", "compare_variants"])
+    if spec["kg"]:
+        operators = ["hypothesis_context", "query_assay_association", "query_evidence_provenance"]
+        if spec["channels"]:
+            operators.append("query_feature_bundle")
+        operators.append("query_kg_truncation_audit")
+        if spec["rag"]:
+            operators.extend(["query_local_knowledge", "query_structured_claims"])
+        operators.extend(["explain_variant", "compare_variants"])
+    else:
+        operators = []
     (run_dir / "config.json").write_text(
         json.dumps(
             {
@@ -109,13 +114,15 @@ def _write_campaign(
                 "critic": {"max_tokens": 20000},
                 "model": "kermut",
                 "validation": {"enabled": True},
+                "knowledge_enabled": spec["kg"],
                 "knowledge_channels": {
                     "physchem": spec["channels"],
                     "conservation": spec["channels"],
                     "structure": spec["channels"],
-                    "kg": True,
+                    "kg": spec["kg"],
                 },
                 "kg_interaction": {
+                    "enabled": spec["kg"],
                     "feature_tool_strategy": (
                         "independent_and_joint" if spec["channels"] else "context_only"
                     ),
@@ -280,6 +287,10 @@ def test_parse_folds_and_conditions_reject_invalid_values() -> None:
         "kg_base_rag",
         "kg_base_al",
         "kg_3features_rag",
+    ]
+    assert runner._parse_conditions("kg_3features_base,agent_only") == [
+        "kg_3features_base",
+        "agent_only",
     ]
     with pytest.raises(ValueError, match="Unknown"):
         runner._parse_conditions("rag_kg_all")
@@ -643,6 +654,61 @@ def test_apply_condition_configures_base_kg_modes_without_feature_tools(tmp_path
         )
 
 
+def test_apply_condition_configures_3features_base_without_rag(tmp_path) -> None:
+    runner = _load_runner()
+    base = load_experiment_config("configs/experiments/hierarchical_scientist.deepseek.yaml")
+    spec = runner.CONDITION_SPECS["kg_3features_base"]
+    applied = runner.apply_condition(
+        base, "kg_3features_base", fold=1, seed=11, output_root=tmp_path / "runs"
+    )
+    assert applied.condition == "kg_3features_base"
+    assert applied.hierarchical_hypothesis.enabled is True
+    assert applied.knowledge_enabled is True
+    assert applied.knowledge.kg is True
+    assert applied.knowledge.physchem is True
+    assert applied.knowledge.conservation is True
+    assert applied.knowledge.structure is True
+    assert applied.knowledge.local_knowledge.enabled is False
+    assert applied.kg_interaction.enabled is True
+    assert applied.kg_interaction.feature_tool_strategy == "independent_and_joint"
+    assert set(applied.kg_interaction.enabled_operators).intersection(runner.FEATURE_OPERATORS)
+    assert not {"query_local_knowledge", "query_structured_claims"}.intersection(
+        applied.kg_interaction.enabled_operators
+    )
+    assert runner.required_tool_calls(
+        spec,
+        variant_limit=base.kg_interaction.feature_variant_limit,
+        feature_tool_strategy=base.kg_interaction.feature_tool_strategy,
+    ) == 13
+
+
+def test_apply_condition_configures_agent_only_without_kg(tmp_path) -> None:
+    runner = _load_runner()
+    base = load_experiment_config("configs/experiments/hierarchical_scientist.deepseek.yaml")
+    spec = runner.CONDITION_SPECS["agent_only"]
+    applied = runner.apply_condition(
+        base, "agent_only", fold=2, seed=11, output_root=tmp_path / "runs"
+    )
+    assert applied.condition == "agent_only"
+    assert applied.hierarchical_hypothesis.enabled is False
+    assert applied.knowledge_enabled is False
+    assert applied.knowledge.kg is False
+    assert applied.knowledge.physchem is False
+    assert applied.knowledge.conservation is False
+    assert applied.knowledge.structure is False
+    assert applied.knowledge.local_knowledge.enabled is False
+    assert applied.kg_interaction.enabled is False
+    assert applied.kg_interaction.enabled_operators == ()
+    assert applied.kg_interaction.feature_tool_strategy == "context_only"
+    assert applied.kg_interaction.truncation_audit_enabled is False
+    assert applied.generation.selection_driver == "agent_uq"
+    assert applied.active_learning.enabled is False
+    assert runner.required_tool_calls(
+        spec, variant_limit=base.kg_interaction.feature_variant_limit
+    ) == 0
+    assert "agent_only" in runner.ALLOWED_CONDITIONS
+
+
 def test_default_matrix_is_twelve_jobs_in_three_waves_of_four(
     tmp_path, monkeypatch, capsys
 ) -> None:
@@ -695,6 +761,7 @@ def test_default_matrix_is_twelve_jobs_in_three_waves_of_four(
     assert schedule["rag_backend"]["embedding"] == "text-embedding-v4"
     assert schedule["rag_backend"]["reranker"] == "qwen3-rerank"
     assert schedule["kg_tool_call_budget"]["kg_3features_rag"] == {
+        "enabled": True,
         "required": 15,
         "configured": 18,
     }
@@ -855,6 +922,74 @@ def test_audit_accepts_base_kg_without_feature_pipeline(tmp_path) -> None:
     )
     assert audit["passed"] is True
     assert audit["failed_checks"] == []
+
+
+def test_audit_accepts_3features_base_with_pipeline_and_no_rag(tmp_path) -> None:
+    runner = _load_runner()
+    summary = _write_campaign(
+        tmp_path / "run-3features-base",
+        fold_index=1,
+        condition="kg_3features_base",
+    )
+    audit = runner.audit_hierarchical_run(
+        summary,
+        condition="kg_3features_base",
+        expected_fold=1,
+        expected_rounds=3,
+        expected_budget=16,
+        expected_candidate_limit=32,
+    )
+    assert audit["passed"] is True
+    assert audit["failed_checks"] == []
+
+
+def test_audit_accepts_agent_only_without_kg(tmp_path) -> None:
+    runner = _load_runner()
+    summary = _write_campaign(
+        tmp_path / "run-agent-only",
+        fold_index=0,
+        condition="agent_only",
+        write_pipeline=False,
+    )
+    audit = runner.audit_hierarchical_run(
+        summary,
+        condition="agent_only",
+        expected_fold=0,
+        expected_rounds=3,
+        expected_budget=16,
+        expected_candidate_limit=32,
+    )
+    assert audit["passed"] is True
+    assert audit["failed_checks"] == []
+
+
+def test_audit_rejects_agent_only_when_kg_runtime_leaks(tmp_path) -> None:
+    runner = _load_runner()
+    run_dir = tmp_path / "run-agent-only-leak"
+    summary = _write_campaign(
+        run_dir,
+        fold_index=0,
+        condition="agent_only",
+        write_pipeline=False,
+    )
+    config_path = run_dir / "config.json"
+    config_payload = json.loads(config_path.read_text(encoding="utf-8"))
+    config_payload["knowledge_enabled"] = True
+    config_payload["knowledge_channels"]["kg"] = True
+    config_payload["kg_interaction"]["enabled"] = True
+    config_path.write_text(json.dumps(config_payload), encoding="utf-8")
+    audit = runner.audit_hierarchical_run(
+        summary,
+        condition="agent_only",
+        expected_fold=0,
+        expected_rounds=3,
+        expected_budget=16,
+        expected_candidate_limit=32,
+    )
+    assert audit["passed"] is False
+    assert "knowledge_enabled_matches" in audit["failed_checks"]
+    assert "knowledge_channel_kg_matches" in audit["failed_checks"]
+    assert "kg_interaction_enabled_matches" in audit["failed_checks"]
 
 
 def test_placeholder_predictor_flag_is_rejected(monkeypatch) -> None:

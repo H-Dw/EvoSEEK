@@ -28,6 +28,17 @@ def preview_callback(
     return message, preview.model_dump(mode="json"), preview.preview_id
 
 
+def _format_exception_chain(error: BaseException, *, max_depth: int = 4) -> str:
+    parts: list[str] = []
+    current: BaseException | None = error
+    while current is not None and len(parts) < max_depth:
+        rendered = f"{type(current).__name__}: {current}"
+        if not parts or rendered not in parts[-1]:
+            parts.append(rendered)
+        current = current.__cause__ or current.__context__
+    return "；".join(parts)
+
+
 def run_callback(
     service: EvolutionApplicationService,
     preview_id: str,
@@ -37,8 +48,19 @@ def run_callback(
 
     try:
         result = service.run(preview_id, confirmed=confirmed)
+    except (PermissionError, ValueError) as error:
+        return f"请求被拒绝：{error}", {}, []
     except Exception as error:  # noqa: BLE001 - UI boundary returns a public failure state.
-        return f"未启动或运行失败：{error}", {}, []
+        message = f"运行失败：{_format_exception_chain(error)}"
+        artifacts: list[str] = []
+        run_dir = getattr(error, "run_dir", None)
+        if run_dir:
+            message += f"\n运行目录：{run_dir}"
+            for name in ("status.json", "trace.jsonl"):
+                path = Path(run_dir) / name
+                if path.is_file():
+                    artifacts.append(str(path))
+        return message, {}, artifacts
     return (
         result.public_message,
         result.summary,
@@ -57,10 +79,15 @@ def build_app(config_path: str | Path):
         ) from error
 
     service = EvolutionApplicationService(config_path)
+    print("启动预检通过：")
+    for item in service.preflight_report:
+        print(f"  - {item}")
+    preflight_lines = "\n".join(f"- {item}" for item in service.preflight_report)
     with gr.Blocks(title="Fitness Agents 开放序列定向进化") as app:
         gr.Markdown(
             "# 开放序列定向进化\n"
-            "用自然语言描述目标；系统先生成结构化预览，确认后才会启动计算。"
+            "用自然语言描述目标；系统先生成结构化预览，确认后才会启动计算。\n"
+            f"启动预检：\n{preflight_lines}"
         )
         preview_state = gr.State("")
         with gr.Row():

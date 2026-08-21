@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 
 from fitness_agents.agents.output_guards import RevisionConstraints
@@ -103,6 +103,7 @@ class AgentQuotaBatchAcquisition:
         constraints: RevisionConstraints | None = None,
         position_to_index: dict[int, int] | None = None,
         wild_type_by_position: dict[int, str] | None = None,
+        quota_overrides: Mapping[str, int] | None = None,
     ) -> AgentQuotaSelection:
         if budget < 0:
             raise ValueError("Agent quota acquisition budget must be non-negative")
@@ -165,6 +166,16 @@ class AgentQuotaBatchAcquisition:
                 quotas["coverage_exploration"] = quotas["coverage_exploration"] + 2
             if constraints.increase_diversity:
                 diversity_lambda = max(diversity_lambda, diversity_lambda + 0.15, 0.25)
+        # Round-scoped overrides (e.g. mutation-order-restricted rounds run
+        # without matched controls) win over constraint escalation: a critic
+        # cannot demand controls that the restricted design space lacks.
+        if quota_overrides:
+            for arm, value in quota_overrides.items():
+                if arm not in ARMS:
+                    raise ValueError(f"Unknown quota arm in overrides: {arm!r}")
+                if value < 0:
+                    raise ValueError("Quota overrides must be non-negative")
+                quotas[arm] = int(value)
         selected: list[str] = []
         selected_by_arm: dict[str, list[str]] = {arm: [] for arm in ARMS}
         matched_control_pairs: dict[str, str] = {}
