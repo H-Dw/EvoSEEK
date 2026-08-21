@@ -1,4 +1,4 @@
-name: fitness-agents
+name: EvoSEEK
 channels:
   - conda-forge
 dependencies:

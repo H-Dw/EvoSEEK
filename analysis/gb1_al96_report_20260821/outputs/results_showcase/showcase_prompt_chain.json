@@ -1,0 +1,215 @@
+{
+  "approved_channel_cards": {
+    "conservation": {
+      "contribution_modes": [
+        "constraint_counterevidence",
+        "analysis_only"
+      ],
+      "critic_verdict": "APPROVE",
+      "selected_findings": [
+        "The low Neff/L (0.270) suggests limited evolutionary information, so single-site log-odds should be interpreted cautiously.",
+        "Single-site log-odds for mutations at position 41 (G41Y, G41Q, G41A, G41S) are consistently -2.1593, indicating poor conservation support.",
+        "Pairwise analysis is disabled and ineligible in both profiles, so only independent single-site effects are available."
+      ],
+      "uncertainty": "The bounded aggregate retains 8 findings and 0 candidate hypotheses; 4 additional batch-local items remain in typed artifacts. Low Neff/L (0.270) and disabled pairwise analysis limit confidence in conservation-based inferences. Single-site log-odds may not capture epistatic effects. The evolutionary profile is not assay fitness. Low mutant frequencies and moderate Neff reduce confidence in log-odds estimates. Pairwise interactions are not assessed, so combined effects may differ from the sum of single-site contributions."
+    },
+    "physchem": {
+      "contribution_modes": [
+        "constraint_counterevidence",
+        "analysis_only"
+      ],
+      "critic_verdict": "APPROVE",
+      "selected_findings": [
+        "S111 (D40F): hydropathy delta 6.3, nominal_charge delta 1, residue_mass delta 32.088, side_chain_volume delta 78.8.",
+        "S111 (G41R): hydropathy delta -4.1, nominal_charge delta 1, residue_mass delta 99.1356, side_chain_volume delta 113.3."
+      ],
+      "uncertainty": "The bounded aggregate retains 7 findings and 0 candidate hypotheses; 9 additional batch-local items remain in typed artifacts. Descriptor direction alone does not establish assay performance or mechanism. The absence of descriptor facts for S109 limits comparison. Nominal charge and hydropathy are approximations that may not reflect local environment or pH-dependent behavior. Descriptor direction alone does not establish assay performance or mechanism; charge values are nominal and pH-dependent."
+    },
+    "structure": {
+      "contribution_modes": [
+        "constraint_counterevidence",
+        "analysis_only"
+      ],
+      "critic_verdict": "APPROVE",
+      "selected_findings": [
+        "Position 54 is buried in the static structure with relative SASA 0.0 and contact count 15 across all variants with evidence.",
+        "Position 40 is solvent-exposed with relative SASA approximately 0.63 and contact count 7 across all variants with evidence.",
+        "Mutant side chains were not modelled or relaxed, so the reported relative SASA and contact counts reflect the wild-type backbone environment and cannot capture side-chain-specific effects."
+      ],
+      "uncertainty": "The bounded aggregate retains 8 findings and 0 candidate hypotheses; 3 additional batch-local items remain in typed artifacts. The static structure provides only backbone-level context. Without side-chain modelling or relaxation, the impact of mutations on local packing, hydrogen bonding, or solvent exposure cannot be reliably inferred. Sample S109 lacks structure evidence entirely. No dynamic or fitness conclusions are possible. Static structure cannot establish dynamics, stability, or fitness effects. Missing coordinates for S110 and unmodelled side chains limit interpretation."
+    }
+  },
+  "batch_critic": {
+    "summary": "The batch aligns with the hypothesis's soft preferences and includes matched controls and exploration arms. Deterministic conflicts are evidence-polarity warnings, not hard failures. Control feasibility and diversity thresholds are met. Falsification spec is complete and ready.",
+    "verdict": "APPROVE"
+  },
+  "core_system_prompt": [
+    "The main Scientist alone owns cross-channel fusion and the final residue preferences.",
+    "`preferred_residues` is always a soft directional prior and every position must carry a matching `preference_strength_by_position` value of `soft` or `exploratory`."
+  ],
+  "core_user_prompt": {
+    "design_space": "closed_pool",
+    "fitness_predictors_used_for_generation": false,
+    "kg_tool_results_present": true,
+    "previous_hypothesis_assessment": {
+      "decisive_criterion_ids": [
+        "criterion:H01-01:batch_median"
+      ],
+      "hypothesis_id": "H01-01",
+      "status": "SUPPORTED",
+      "unresolved_criterion_ids": []
+    },
+    "round_id": 2,
+    "selection_driver": "agent_uq",
+    "task": "maximize assay fitness for protein GB1; allowed mutation positions are 39,40,41,54",
+    "top_visible_observations": [
+      {
+        "measured_fitness": 5.15691840607,
+        "mutation_notation": "D40Y;G41A;V54A",
+        "round_revealed": 1,
+        "variant_id": "S109"
+      },
+      {
+        "measured_fitness": 4.7131222101,
+        "mutation_notation": "V39I;D40H;G41A;V54A",
+        "round_revealed": 1,
+        "variant_id": "S110"
+      },
+      {
+        "measured_fitness": 4.07312564853,
+        "mutation_notation": "V39C;D40Y",
+        "round_revealed": 0,
+        "variant_id": "S080"
+      },
+      {
+        "measured_fitness": 3.90146075608,
+        "mutation_notation": "D40W",
+        "round_revealed": 0,
+        "variant_id": "S005"
+      },
+      {
+        "measured_fitness": 3.89146109067,
+        "mutation_notation": "D40Y",
+        "round_revealed": 0,
+        "variant_id": "S032"
+      }
+    ],
+    "wild_type_sites": "VDGV"
+  },
+  "draft_and_revision": {
+    "attempt_0": {
+      "critic_verdict": "REVISE",
+      "preferred_residues": {
+        "39": [
+          "I",
+          "L",
+          "C",
+          "V"
+        ],
+        "40": [
+          "Y",
+          "W",
+          "F",
+          "H"
+        ],
+        "41": [
+          "A",
+          "G"
+        ],
+        "54": [
+          "A",
+          "C"
+        ]
+      },
+      "required_changes": [
+        "MAKE_FALSIFIABLE"
+      ],
+      "statement": "Round-2 synthesis of visible assay associations and approved channel constraints supports a soft assay-only direction. Position 40 favors Y/W/F/H, position 54 favors A/C, and position 41 favors A in high-scoring backgrounds while retaining G as wild-type contrast. Position 39 is exploratory among I/L/C/V because the best measured variant S109 retains V39, though I and L have single-mutant lift. Conservation E01,E02 and static structure E17,E18 oppose or do not support these substitutions; physicochemical descriptors E11,E12 remain analysis-only. The prior is therefore assay-only and not a conservation/structure claim."
+    },
+    "attempt_1": {
+      "critic_verdict": "APPROVE",
+      "expected_outcome": "Selected batch is defined as variants whose position 39 is I/C/V, position 40 is Y/H/W/F, position 41 is A/G, and position 54 is A/C. The selected-batch median fitness will exceed the pre-round visible observation median of 0.149 under the registered batch_median_lift criterion (greater than zero_lift).",
+      "preferred_residues": {
+        "39": [
+          "I",
+          "C",
+          "V"
+        ],
+        "40": [
+          "Y",
+          "H",
+          "W",
+          "F"
+        ],
+        "41": [
+          "A",
+          "G"
+        ],
+        "54": [
+          "A",
+          "C"
+        ]
+      },
+      "statement": "Named visible measurement associations E30 (S109: D40Y;G41A;V54A), E33 (S110: V39I;D40H;G41A;V54A), E32 (S102: V39C;D40Y;G41A;V54A), and E29 (S107: D40Y;V54A) support an assay-only directional prior for positions 40, 41, and 54. Conservation E01,E02 and structure E17,E18 remain counterevidence; no evolutionary/structural support is claimed. Position 39 is exploratory and context-dependent."
+    }
+  },
+  "hidden_reasoning_exported": false,
+  "negative_case": {
+    "dry_validation_fitness": 3.4049627780914307,
+    "fold": 0,
+    "mutation_notation": "V39L;D40Y;G41W;V54C",
+    "preferred_residues": {
+      "39": [
+        "I",
+        "L",
+        "C"
+      ],
+      "40": [
+        "Y",
+        "W",
+        "F",
+        "H"
+      ],
+      "41": [
+        "G"
+      ],
+      "54": [
+        "V",
+        "C",
+        "A"
+      ]
+    },
+    "prompt_statement": "Synthesize a soft four-position directional prior from visible measurement associations: position 39 favors I/L/C, position 40 favors Y/W/F/H, position 41 retains G because visible G41 substitutions collapse fitness, and position 54 favors V/C/A. This direction originates from named visible measurement associations and KG support, not from descriptor-only channel cards, and carries no hard residue constraints. Conservation log-odds and static-structure flags remain non-hard constraints.",
+    "round_id": 2,
+    "run_id": "knowledge_agent-s11-f00-GB1-hierarchical-kg_3features_base-f00-20260821T110701100360Z",
+    "selection_arm": "evidence_prior",
+    "source_top_k": "artifacts/hierarchical-scientist-kg_3features_base_agent_only/runs/knowledge_agent-s11-f00-GB1-hierarchical-kg_3features_base-f00-20260821T110701100360Z/top_k_all_rounds.csv",
+    "variant": "LYWC",
+    "wet_fitness": 0.0197537538603
+  },
+  "positive_case": {
+    "dry_validation_fitness": 3.548892974853516,
+    "fold": 2,
+    "mutation_notation": "D40W;G41A;V54A",
+    "round_id": 2,
+    "run_id": "knowledge_agent-s11-f02-GB1-hierarchical-kg_3features_base-f02-20260821T111821854847Z",
+    "selection_arm": "hypothesis_target",
+    "variant": "VWAA",
+    "wet_fitness": 6.12380479492
+  },
+  "post_measurement_assessment": {
+    "decisive_criterion_ids": [
+      "criterion:H02-01:batch_median"
+    ],
+    "hypothesis_id": "H02-01",
+    "status": "SUPPORTED"
+  },
+  "scope_note": "Only model-visible messages, typed channel cards, final structured responses, Critic verdicts, acquisition receipts, and revealed outcomes are exported. Provider reasoning_content is excluded.",
+  "source_conversation": "artifacts/hierarchical-scientist-kg_3features_base_agent_only/runs/knowledge_agent-s11-f02-GB1-hierarchical-kg_3features_base-f02-20260821T111821854847Z/round_02/llm/scientist/conversations/00089_reasoning_draft_attempt-00.json",
+  "source_paths": {
+    "assessment": "artifacts/hierarchical-scientist-kg_3features_base_agent_only/runs/knowledge_agent-s11-f02-GB1-hierarchical-kg_3features_base-f02-20260821T111821854847Z/round_02/hypothesis_assessment.json",
+    "batch_critic": "artifacts/hierarchical-scientist-kg_3features_base_agent_only/runs/knowledge_agent-s11-f02-GB1-hierarchical-kg_3features_base-f02-20260821T111821854847Z/round_02/critique_attempt_0.json",
+    "main_review_attempt_0": "artifacts/hierarchical-scientist-kg_3features_base_agent_only/runs/knowledge_agent-s11-f02-GB1-hierarchical-kg_3features_base-f02-20260821T111821854847Z/round_02/main_reviews/attempt_01.json",
+    "main_review_attempt_1": "artifacts/hierarchical-scientist-kg_3features_base_agent_only/runs/knowledge_agent-s11-f02-GB1-hierarchical-kg_3features_base-f02-20260821T111821854847Z/round_02/main_reviews/attempt_02.json"
+  }
+}

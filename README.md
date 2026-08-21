@@ -1,191 +1,87 @@
-# fitness-agents
+# EvoSEEK
 
-`fitness-agents` 是一个可审计、可消融、接口可替换的虚拟蛋白质定向进化系统。当前 MVP
-以 GB1 四位点 IgG-binding landscape 为主任务，在隐藏真实 fitness 的条件下运行
-Design → Score → Select → Test → Learn 闭环。
+<img src="EvoSEEK.png">
 
-需求定位：项目主目标不是单独建设一个 fitness 知识图谱，而是验证知识增强 Agent 能否在相同
-实验预算下提高候选发现效率。知识图谱承担统一的知识、模型证据、历史记忆和审计层；fitness
-predictor 仍是数值预测组件，Agent 则基于图谱查询结果生成和修订可检验假设。
+`EvoSEEK` is an auditable, ablatable, and interface-swappable virtual protein directed-evolution system. The current MVP targets the GB1 four-site IgG-binding landscape as its main task and runs the Design → Score → Select → Test → Learn loop while keeping the true fitness hidden.
 
-核心原则：LLM 负责提出可检验假设、组织证据和批判决策；专用 fitness 模型负责数值预测；
-实验后端只在候选被正式提交后揭示标签。LLM 永远收不到未揭示 oracle 或 final-test 标签。
+## 1. Environment Setup
 
-当前版本特意不包含 EVOLVEpro 的轻量 PLM+RF 架构。默认模型是 CPU 可运行的
-one-hot 加性/成对上位性特征 + bootstrap Ridge + ExtraTrees 异质集成，并输出校准区间、
-epistemic uncertainty 和 OOD 分数。
-
-## 1. Linux 本地环境配置
-
-本节说明如何在 Linux 上从源码部署并运行本仓库脚本。GitHub Actions 在 Ubuntu 24.04 上测试
-Python 3.10–3.13；Debian/Ubuntu 可直接按下面的 `apt` 步骤操作。推荐 Python 3.11。
-
-不需要 GPU 即可运行默认 CPU ensemble、单元测试和 mock LLM 路径。默认 `run_demo.py`
-（DeepSeek + Kermut）还需要第 1.6 节的可选 extras、第 1.7 节的 `.env`，以及第 2、3、9 节的
-数据与模型资源。
-
-### 1.1 系统要求
-
-| 项目 | 要求 |
-|---|---|
-| 操作系统 | Linux（推荐 Ubuntu 22.04/24.04 或同等发行版） |
-| Python | 3.10–3.13，推荐 3.11 |
-| 系统工具 | `git`、`curl`、`sha256sum`、`python3-venv` |
-| 编译工具 | `build-essential` 与 `python3-dev`（缺少预编译 wheel 时需要） |
-| 磁盘 | 代码本身很小；完整 GB1 landscape、ESM-2 650M 与本地 RAG 模型会各占数 GB |
-
-### 1.2 安装系统软件包
-
-Debian / Ubuntu：
+### 1.1 Clone the repository
 
 ```bash
-sudo apt-get update
-sudo apt-get install -y \
-  git curl ca-certificates \
-  python3 python3-venv python3-pip python3-dev \
-  build-essential
-python3 --version   # 应为 3.10–3.13
+git clone https://github.com/H-Dw/EvoSEEK.git EvoSEEK
+cd EvoSEEK
 ```
 
-若系统默认 Python 不在 3.10–3.13，请安装对应版本（例如 `python3.11`），并用
-`PYTHON_BIN=python3.11` 调用第 1.4 节的安装脚本。
-
-Fedora / RHEL：
-
-```bash
-sudo dnf install -y git curl ca-certificates python3 python3-pip python3-devel gcc gcc-c++ make
-```
-
-### 1.3 克隆仓库
-
-```bash
-git clone <your-repository-url> fitness-agents
-cd fitness-agents
-```
-
-### 1.4 创建虚拟环境并安装 Python 依赖（推荐）
-
-一键创建 `.venv`、安装开发依赖并自检：
-
-```bash
-bash scripts/setup_linux.sh dev
-source .venv/bin/activate
-```
-
-`scripts/setup_linux.sh` 会在仓库根目录创建 `.venv`，升级 pip，按 profile 安装依赖，然后运行
-`scripts/check_environment.py`。可用 profile：
-
-| Profile | 安装内容 | 适用场景 |
-|---|---|---|
-| `base` | 核心运行时（numpy / pandas / scikit-learn / scipy / PyYAML / pydantic / httpx） | 仅跑 CPU ensemble 与 mock LLM |
-| `dev`（默认） | `base` + pytest、ruff | 本地开发、CI、单元测试 |
-| `llm` | `dev` + `openai` | 调用 DeepSeek 或 OpenAI 兼容的远程 Scientist / Critic |
-
-指定解释器：
-
-```bash
-PYTHON_BIN=python3.11 bash scripts/setup_linux.sh llm
-source .venv/bin/activate
-```
-
-等价的手动步骤：
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -e ".[dev]"
-python scripts/check_environment.py
-```
-
-也可用 Make：`make setup`（等同 `dev` profile）。
-
-每次新开 shell 都需要重新激活：
-
-```bash
-cd /path/to/fitness-agents
-source .venv/bin/activate
-```
-
-激活后，下文所有 `python` / `pip` 命令都使用该虚拟环境。未激活时可显式调用
-`.venv/bin/python`。
-
-### 1.5 使用 Conda（可选）
+### 1.2 Install with Conda
 
 ```bash
 conda env create -f environment.yml
-conda activate fitness-agents
+conda activate EvoSEEK
 python scripts/check_environment.py
 ```
 
-`environment.yml` 固定 Python 3.11，并安装核心依赖（含 `httpx>=0.27,<1`）与可编辑包。远程 LLM、RAG、Kermut、UI
-仍需在激活后按第 1.6 节补装 extras。
+`environment.yml` pins Python 3.11 and installs the core dependencies (including `httpx>=0.27,<1`) and the editable package. Remote LLM, RAG, Kermut, and UI still need their extras installed separately after activation, as described in §1.6.
 
-### 1.6 按用途安装可选 extras
+### 1.3 Install optional extras by use case
 
-核心环境不强制安装 PyTorch。按实际要跑的脚本再装：
+The core environment does not force-install PyTorch. Install extras according to the scripts you actually need to run:
 
 ```bash
-source .venv/bin/activate
+conda activate EvoSEEK
 
-# 远程 Scientist / Critic（DeepSeek 等 OpenAI 兼容 API）
+# Remote Scientist / Critic (DeepSeek or other OpenAI-compatible API)
 python -m pip install -e ".[llm]"
 
-# 本地 RAG 向量检索（sentence-transformers）
+# Local RAG vector retrieval (sentence-transformers)
 python -m pip install -e ".[rag]"
 
-# 科学文档解析入库
+# Scientific document parsing and ingestion
 python -m pip install -e ".[rag-docs]"
 
-# Kermut / ESM-2 fitness 后端（会安装 PyTorch、GPyTorch、fair-esm）
+# Kermut / ESM-2 fitness backend (installs PyTorch, GPyTorch, fair-esm)
 python -m pip install -e ".[kermut]"
 
-# 本地 Gradio 交互界面
+# Local Gradio interactive interface
 python -m pip install -e ".[ui]"
 ```
 
-常用组合可以一次装齐：
+Common combinations can be installed in one shot:
 
 ```bash
 python -m pip install -e ".[dev,llm,rag]"
 ```
 
-Kermut 默认走 CPU。若要用 GPU，**不要**直接 `pip install -e ".[kermut]"`：当前 PyPI 默认
-torch 是 CUDA 13.0 wheel，在 CUDA 12.1 驱动上会报 `NVIDIA driver too old` 并无法调用 GPU。
-应先安装与 `nvidia-smi` 中 CUDA Version 匹配的 PyTorch，再装其余 kermut 依赖；步骤见第 9.1 节。
+### 1.4 Configure secrets (`.env`)
 
-### 1.7 配置密钥（`.env`）
-
-密钥**不要**写入 YAML，也不要提交到 git。在仓库根目录创建 `.env`（已列入 `.gitignore`）：
+Do **not** write secrets into YAML, and do not commit them to git. Create a `.env` in the repository root (already listed in `.gitignore`):
 
 ```bash
 cat > .env <<'EOF'
-# Scientist / Critic（默认 DeepSeek V4）
+# Scientist / Critic (defaults to DeepSeek V4)
 DEEPSEEK_API_KEY='sk-...'
 
-# 若使用阿里云 DashScope / Qwen embedding 与 reranker，取消下一行注释
+# Uncomment the next line if using Alibaba DashScope / Qwen embedding and reranker
 # DASHSCOPE_API_KEY='sk-...'
 EOF
 ```
 
-运行时会读取项目根目录 `.env`，且**不会覆盖**已经存在的进程环境变量。默认
-`llm_agent` / `knowledge_agent*` 实验使用 `api_key: env:DEEPSEEK_API_KEY`。也可用
-`FITNESS_AGENTS_LLM_API_KEY` 或 `OPENAI_API_KEY` 作为通用覆盖。
+At runtime the project root `.env` is read, and it will **not** override already-existing process environment variables. By default the `llm_agent` / `knowledge_agent*` experiments use `api_key: env:DEEPSEEK_API_KEY`. You can also use `FITNESS_AGENTS_LLM_API_KEY` or `OPENAI_API_KEY` as a general override.
 
-离线复现不需要密钥：把实验 YAML 改回 `llm_provider: mock`（见第 10 节），或先跑单元测试。
+Offline reproduction needs no keys: change the experiment YAML back to `llm_provider: mock`, or run the unit tests first.
 
-常用环境变量：
+Common environment variables:
 
-| 变量 | 作用 |
+| Variable | Purpose |
 |---|---|
-| `DEEPSEEK_API_KEY` | 默认 Scientist / Critic 密钥 |
+| `DEEPSEEK_API_KEY` | Default Scientist / Critic key |
 | `DASHSCOPE_API_KEY` | Qwen embedding / reranker |
-| `FITNESS_AGENTS_LLM_API_KEY` | 通用 LLM 密钥覆盖 |
-| `FITNESS_AGENTS_LLM_BASE_URL` / `OPENAI_BASE_URL` / `DEEPSEEK_BASE_URL` | API 网关 |
-| `FITNESS_AGENTS_LOG_LEVEL` | 进度日志级别（默认 `INFO`） |
-| `FITNESS_AGENTS_FORCE_DOWNLOAD` | 设为 `1` 时强制重新下载数据压缩包 |
+| `FITNESS_AGENTS_LLM_API_KEY` | General LLM key override |
+| `FITNESS_AGENTS_LLM_BASE_URL` / `OPENAI_BASE_URL` / `DEEPSEEK_BASE_URL` | API gateway |
+| `FITNESS_AGENTS_LOG_LEVEL` | Progress log level (default `INFO`) |
+| `FITNESS_AGENTS_FORCE_DOWNLOAD` | Force re-download of the data archive when set to `1` |
 
-### 1.8 检查环境是否就绪
+### 1.5 Verify the environment is ready
 
 ```bash
 python scripts/check_environment.py
@@ -193,16 +89,13 @@ python -c "import fitness_agents; print('import ok')"
 python -m pytest tests/unit -q
 ```
 
-`check_environment.py` 会打印 Python 版本、平台和核心包版本。单元测试不需要 API 密钥，
-也不依赖外部数据下载。
+`check_environment.py` prints the Python version, platform, and core package versions. The unit tests need no API key and do not depend on external data downloads.
 
-Docker 替代方案见第 12 节。数据与模型资产仍按第 2、3 节准备；准备完成后可用第 4 节的
-demo 命令做端到端验证。默认 `python scripts/run_demo.py` 需要 `[llm]`、`[kermut]`、
-`.env` 中的 `DEEPSEEK_API_KEY`，以及 Kermut 的条件概率/坐标文件（第 9.2 节）。
+Data and model assets are still prepared per §2 and §3; the default `python scripts/run_demo.py` requires `[llm]`, `[kermut]`, `DEEPSEEK_API_KEY` in `.env`, and Kermut's conditional-probability / coordinate files.
 
-## 2. 数据下载与准备
+## 2. Data Download and Preparation
 
-下载脚本固定到已核验的 `J-SNACKKB/FLIP` commit，并检查压缩包 SHA-256；固定地址不可用时会回退到同一仓库的 `main`，但任何回退文件仍必须通过相同校验：
+The download script pins a verified `J-SNACKKB/FLIP` commit and checks the archive SHA-256; if the pinned address is unavailable it falls back to the same repo's `main`, but any fallback file must still pass the same verification:
 
 ```bash
 bash scripts/data/download_flip_gb1.sh
@@ -211,35 +104,32 @@ python scripts/data/prepare_gb1.py \
 python scripts/data/validate_data.py
 ```
 
-若曾使用旧版脚本并看到 GitHub Raw `404`，请确认脚本中的仓库为 `J-SNACKKB/FLIP`，然后强制重新下载：
+If you used an older script and saw a GitHub Raw `404`, confirm the repo in the script is `J-SNACKKB/FLIP`, then force a re-download:
 
 ```bash
 grep 'REPOSITORY=' scripts/data/download_flip_gb1.sh
 FITNESS_AGENTS_FORCE_DOWNLOAD=1 bash scripts/data/download_flip_gb1.sh
 ```
 
-成功时会显示 `Verified archive`；期望 SHA-256 为
-`85692d808dcd3ae54fa2ac31f4e590858d4582369b6c7b05df299b9b6c383bff`。
+On success it prints `Verified archive`; the expected SHA-256 is
+`85692d808dcd3ae54fa2ac31f4e590858d4582369b6c7b05df299b9b6c383bff`.
 
-生成两套数据：
+Two datasets are produced:
 
-| 数据 | 划分 | 用途 |
+| Data | Split | Purpose |
 |---|---|---|
-| `data/demo/gb1_demo_*` | 64 initial + 32 validation + 352 oracle pool + 64 final | CPU demo、CI、快速消融 |
-| `data/processed/gb1_full_*` | 96 initial + 96 validation + 147121 oracle pool + 2048 final | 完整 landscape 实验 |
+| `data/demo/gb1_demo_*` | 64 initial + 32 validation + 352 oracle pool + 64 final | CPU demo, CI, quick ablation |
+| `data/processed/gb1_full_*` | 96 initial + 96 validation + 147121 oracle pool + 2048 final | Full landscape experiment |
 
-每套数据都拆成 `*_public.csv` 和 `*_oracle.csv`。public 文件不包含任何 fitness；oracle
-文件只能交给 `ExperimentBackend`。这种拆分用于防泄露测试，不是密码学安全边界。
+Each dataset is split into `*_public.csv` and `*_oracle.csv`. The public file contains no fitness; the oracle file may only be handed to `ExperimentBackend`. This split is for leak-prevention testing, not a cryptographic security boundary.
 
-原始 GB1 测量为 CC BY 4.0，FLIP 派生文件及 split 为 AFL-3.0。来源和统计写入
-`data/demo/data_manifest.json`。
+The raw GB1 measurements are CC BY 4.0; the FLIP derivative files and splits are AFL-3.0. Sources and statistics are written to `data/demo/data_manifest.json`.
 
-### 2.1 正式五折数据集拆分
+### 2.1 Official five-fold dataset splits
 
-上面的 `prepare_gb1.py` 保留给旧 demo。正式闭环与 OOD 实验使用 manifest-driven split，
-一次命令必须生成 `fold_00` 至 `fold_04`，而不是把五个随机 seed 当作五折。
+The `prepare_gb1.py` above is retained for the old demo. The official closed loop and OOD experiments use a manifest-driven split; a single command must generate `fold_00` through `fold_04`, rather than treating five random seeds as five folds.
 
-构建 GB1-AL96 closed-loop：
+Build the GB1-AL96 closed-loop:
 
 ```bash
 python scripts/data/build_splits.py \
@@ -251,11 +141,9 @@ python scripts/data/build_splits.py \
   --output-root data/processed/splits
 ```
 
-该配置的 96 条初始实验由 WT 1 条、全部单点 76 条和标签盲选择的双点 19 条组成。
-HD3/HD4 deployable universe 被分成五个互斥 outer final-test shard；每折还有独立的
-benchmark validation 和只可通过 oracle 查询的 candidate pool。
+The 96 initial experiments for this config consist of 1 WT, all 76 single-point mutations, and 19 double-point mutations chosen blind to labels. The HD3/HD4 deployable universe is divided into five mutually exclusive outer final-test shards; each fold also has its own benchmark validation and a candidate pool queryable only through the oracle.
 
-构建 FLIP-compatible static OOD：
+Build the FLIP-compatible static OOD:
 
 ```bash
 python scripts/data/build_splits.py \
@@ -267,7 +155,7 @@ python scripts/data/build_splits.py \
   --protocol-version FLIP-two-vs-rest-5CV-v1
 ```
 
-构建 Mutation-identity OOD：
+Build the mutation-identity OOD:
 
 ```bash
 python scripts/data/build_splits.py \
@@ -279,7 +167,7 @@ python scripts/data/build_splits.py \
   --protocol-version Mutation-OOD-5CV-v1
 ```
 
-一次生成三种策略：
+Generate all three strategies at once:
 
 ```bash
 python scripts/data/build_splits.py \
@@ -289,7 +177,7 @@ python scripts/data/build_splits.py \
   --protocol-version v1
 ```
 
-检查某一折的 manifest、文件哈希和角色数量：
+Inspect a fold's manifest, file hashes, and role counts:
 
 ```bash
 python scripts/data/validate_data.py \
@@ -297,149 +185,28 @@ python scripts/data/validate_data.py \
   --fold-index 0
 ```
 
-输出按能力隔离为 `agent/`、`controller/`、`oracle/` 和 `evaluator/`。candidate 文件没有
-target；queryable labels 不含 final-test ID；相同 source/config/code 才允许复用已有目录。
-更完整的数据 spec、PDZ3 paired-sequence 配置和 label-dependent split 注意事项见
-[`数据集分割与处理使用指南.md`](数据集分割与处理使用指南.md)。
+Output is capability-isolated into `agent/`, `controller/`, `oracle/`, and `evaluator/`. Candidate files have no target; queryable labels exclude final-test IDs; an existing directory is reused only when source/config/code match.
 
-### 2.2 单折闭环与五折 agents 并行启动
+## 3. Model and Structure Assets
 
-标准闭环 task 直接配置 `split_root + fold_index`，不再把 manifest 数据重新拼成旧的
-public/oracle 文件：
-
-```yaml
-# configs/task/gb1_binding_al96.yaml
-split_root: data/processed/splits/GB1/al96_closed_loop/GB1-AL96-5CV-v1
-fold_index: 0
-expected_split_strategy: al96_closed_loop
-expected_protocol_version: GB1-AL96-5CV-v1
-```
-
-运行单折：
-
-```bash
-python -m fitness_agents.cli \
-  configs/experiments/knowledge_agent_al96.yaml \
-  --fold-index 0 \
-  --seed 11
-```
-
-五折应是五个相互隔离的 campaign 进程，而不是同一 agent 的五轮。使用 fold scheduler
-同时启动五折，并通过 `--max-parallel` 限制并行 agent 数量：
-
-```bash
-python scripts/run_fold_campaigns.py \
-  --config configs/experiments/knowledge_agent_al96.yaml \
-  --folds all \
-  --max-parallel 2 \
-  --seed 11
-```
-
-常用调度示例：
-
-```bash
-# 顺序运行，适合单 GPU 或内存较小的机器
-python scripts/run_fold_campaigns.py --folds all --max-parallel 1
-
-# 只运行尚未完成的折或先做小范围验证
-python scripts/run_fold_campaigns.py --folds 0,2,4 --max-parallel 2
-
-# 只检查将要启动的命令，不创建 campaign
-python scripts/run_fold_campaigns.py --folds all --max-parallel 3 --dry-run
-
-# 为每个 fold 设置最长运行时间；超时记为失败，但其他 fold 继续
-python scripts/run_fold_campaigns.py \
-  --folds all --max-parallel 2 --timeout-seconds 21600
-```
-
-调度器的设计约束：
-
-- 每折通过独立 Python 子进程启动，因此不共享模型权重、随机状态、replay buffer、LLM memory、
-  KG 写回或已揭示标签；
-- `--max-parallel N` 表示任意时刻最多运行 N 个 fold；单 GPU 通常设为 1，CPU/多 GPU 环境再按
-  实际内存和显存提高；
-- 所有 fold 默认使用同一 paired seed；fold 由 `--fold-index` 决定，seed 不参与重新拆分数据；
-- 单折失败、超时或输出无法解析时会写入失败记录，其他已启动/排队 fold 仍会完成；只要任一折失败，
-  调度命令最终返回非零状态；
-- 不允许把一个 fold 的 checkpoint、KG 或查询结果作为下一 fold 的初始状态。
-
-每次调度写入 `artifacts/fold-campaigns-<timestamp>/`：
-
-```text
-schedule.json                    实际配置、manifest、fold 和启动命令
-fold_logs/fold_XX-seed_Y.stdout.log
-fold_logs/fold_XX-seed_Y.stderr.log
-fold_results.json                每折退出状态、run_id、run_dir 和错误
-aggregate/run_comparison.csv     五折逐折指标与 manifest/assignment hash
-aggregate/run_comparison.json
-report.json                      成功/失败数量及聚合文件位置
-```
-
-`run_comparison.csv` 保留每个 fold 的结果，不先把候选行混在一起计算指标。统计分析应以 fold 为
-一级重复，使用配对 fold/seed 差值比较不同 agent 或消融条件。
-
-## 3. 模型与结构资产
-
-默认模型从可见 GB1 标签现场训练，没有外部预训练权重。仍应执行模型准备脚本来生成可追踪
-manifest：
+The default model is trained in-place from visible GB1 labels; there are no external pretrained weights. You should still run the model preparation script to generate a traceable manifest:
 
 ```bash
 python scripts/models/download_models.py --profile baseline
 ```
 
-若要准备结构证据所需的 GB1 参考结构：
+To prepare the GB1 reference structure needed for structural evidence:
 
 ```bash
 python scripts/models/download_models.py --profile structure
-# 或：bash scripts/models/download_models.sh --profile all
+# or: bash scripts/models/download_models.sh --profile all
 ```
 
-这会下载 RCSB 5LDE、记录来源与 SHA-256。AlphaFold、Boltz、Rosetta、SaProt 或 Kermut
-可以在后续通过 `EvidenceProvider` / `FitnessPredictor` 注册表接入。当前 structure 通道是版本化的
-5LDE 位点风险先验；它不把 ipTM 等同于结合亲和力或实验 fitness。
+This downloads RCSB 5LDE and records the source and SHA-256. AlphaFold, Boltz, Rosetta, SaProt, or Kermut can later be plugged in through the `EvidenceProvider` / `FitnessPredictor` registries. The current structure channel is a versioned 5LDE site-risk prior; it does not equate ipTM with binding affinity or experimental fitness.
 
-## 4. 运行 demo
+### 4.1 Local RAG vector retrieval and KG materialization diagnostics
 
-默认运行 Knowledge-enhanced LLM Agent。实验配置已接到 DeepSeek-v4-flash
-（`configs/llm/deepseek.yaml`，密钥只从 `.env` 的 `DEEPSEEK_API_KEY` 读取）和
-KERMUT（`configs/model/kermut.yaml`）：
-
-```bash
-python scripts/run_demo.py
-```
-
-快速烟雾测试：
-
-```bash
-python scripts/run_demo.py --rounds 1 --budget 4
-```
-
-指定其他实验配置：
-
-```bash
-python scripts/run_demo.py --config configs/experiments/fitness_direct.yaml --seed 42
-```
-
-每轮都会在 `artifacts/runs/<run_id>/round_XX/selection.csv` 记录：
-
-- 候选在全部未观测候选中的 predictor mean 排名 `model_rank_all`；
-- 候选在全部未观测候选中的 acquisition 排名 `acquisition_rank_all`；
-- 候选在 Agent 过滤后集合中的排名 `eligible_rank`；
-- mean、uncertainty、knowledge score、证据 ID、假设 ID、干预标签和选择理由。
-
-`trace.jsonl` 是追加式事件日志；`status.json` 覆盖写入当前 phase / 轮次 / 耗时，便于 `watch`
-或 `tail` 查看卡在哪一步。长步骤（模型 fit/predict、Scientist/Critic LLM）还会把进度打到
-**stderr**（`[fitness-agents] ...`），stdout 仍只输出最终 JSON。可用 `--quiet` 或
-`FITNESS_AGENTS_LOG_LEVEL=WARNING` 关闭进度行。`state.json`、`summary.json`、SQLite KG、图谱边导出和
-`knowledge_graph_queries.json` 支持重放与审计。KG 将实验 observation、模型 prediction、
-理化/保守性/结构 evidence 与 hypothesis 分开存储，避免把计算输出误写成实验事实。
-
-### 4.1 本地 RAG 向量检索与 KG 物化诊断
-
-默认配置使用英文原子事实语料、FTS5 + BGE dense hybrid 检索。通用 corpus/vector index 位于
-`artifacts/local_knowledge/corpus/directed_evolution-v4.sqlite`；GB1 泄漏策略与查询审计单独位于
-`artifacts/local_knowledge/overlays/gb1.sqlite`，不会把目标状态写回通用向量库。首次运行前显式
-安装依赖并下载固定 revision；campaign runtime 不联网：
+The default config uses an English atomic-fact corpus with FTS5 + BGE dense hybrid retrieval. The general corpus/vector index lives at `artifacts/local_knowledge/corpus/directed_evolution-v4.sqlite`; the GB1 leak policy and query audit live separately in `artifacts/local_knowledge/overlays/gb1.sqlite` and never write target state back to the general vector store. Explicitly install dependencies and download a pinned revision before the first run; the campaign runtime does not touch the network:
 
 ```bash
 python -m pip install -e ".[rag]"
@@ -459,12 +226,9 @@ python -m pytest -q \
   tests/integration/test_local_rag_real_embedding_to_kg.py
 ```
 
-诊断会输出 `diagnostic.json`、`summary.md`、真实向量 SQLite 和 structured KG SQLite，并比较
-lexical、dense、hybrid 的 gold-query 命中率。`--strict` 还会检查 chunk token budget、模型截断、
-embedding 覆盖率、no-answer 阈值以及从既有 lexical 索引启用 dense 时是否完成向量回填。查询和
-目标数据库统一为英文；模型实际 tokenizer 控制 chunk 上限，禁止静默截断。
+The diagnostics output `diagnostic.json`, `summary.md`, a real-vector SQLite, and a structured-KG SQLite, and compare gold-query hit rates for lexical, dense, and hybrid retrieval. `--strict` also checks chunk token budget, model truncation, embedding coverage, no-answer threshold, and whether vector backfill completed when enabling dense on top of an existing lexical index. The query and target databases are uniformly English; the model's actual tokenizer controls the chunk cap, and silent truncation is forbidden.
 
-新增外部知识时使用项目 skill 并执行 bundle 校验：
+When adding external knowledge, use the project skill and run bundle validation:
 
 ```bash
 python \
@@ -473,17 +237,11 @@ python \
   --embedding-model models/embeddings/bge-small-en-v1.5
 ```
 
-检索 chunk 只生成 `context:<protein>` 的非排序上下文。若以后开启
-`contributes_to_selection=true`，还必须同时使用 `calibrated_candidate_projection` 和一个
-`status: validated` 的候选级校准文件；draft 示例位于
-`configs/knowledge/local_rag_selection.example.yaml`，默认会被拒绝。
+Retrieval chunks only generate an unsorted `context:<protein>` context. If you later enable `contributes_to_selection=true`, you must also use `calibrated_candidate_projection` and a `status: validated` candidate-level calibration file; a draft example is at `configs/knowledge/local_rag_selection.example.yaml` and is rejected by default.
 
-### 4.2 API embedding 与 reranker
+### 4.2 API embedding and reranker
 
-远程向量化通过独立 YAML 配置，不在仓库中保存密钥。默认示例是 Qwen
-`text-embedding-v4`；另有 Jina v5、TEI 托管 BGE-M3/E5，以及 Qwen/Jina/BGE reranker
-示例，均位于 `configs/knowledge/api/`。先复制示例、替换 endpoint 中的 workspace/host，
-再通过环境变量提供密钥：
+Remote vectorization goes through a standalone YAML config; no keys are stored in the repo. The default example is Qwen `text-embedding-v4`; there are also Jina v5, TEI-hosted BGE-M3/E5, and Qwen/Jina/BGE reranker examples, all under `configs/knowledge/api/`. Copy the example first, replace the workspace/host in the endpoint, then supply the key via environment variable:
 
 ```bash
 export DASHSCOPE_API_KEY="<YOUR_API_KEY>"
@@ -499,42 +257,31 @@ python scripts/rag_api_embeddings.py index \
   --index-path artifacts/local_knowledge/corpus/directed_evolution-qwen-v4.sqlite
 ```
 
-`probe` 分别调用 query/document 编码，并只输出向量维度、范数、哈希与八维预览；`index`
-复用生产解析、原子 chunk、manifest 和 SQLite 写入流程。若需要重排，在两个命令中增加
-`--reranker-config configs/knowledge/api/reranker.qwen3.example.yaml`。默认 20 条原子事实
-语料仍不启用 reranker；先用项目查询集校准 Recall@K、MRR/nDCG、no-answer 和阈值，再决定上线。
+`probe` calls query/document encoding separately and prints only vector dimension, norm, hash, and an eight-dimensional preview; `index` reuses the production parsing, atomic chunking, manifest, and SQLite write flow. To rerank, add `--reranker-config configs/knowledge/api/reranker.qwen3.example.yaml` to both commands. The default 20-atomic-fact corpus still does not enable a reranker; calibrate Recall@K, MRR/nDCG, no-answer, and thresholds against the project query set before going live.
 
-若希望 campaign 直接使用 API，在 knowledge YAML 的 `retrieval` 中配置：
+If you want the campaign to use the API directly, configure it in the `retrieval` block of the knowledge YAML:
 
 ```yaml
 embedding_backend: api
 embedding_model_path: null
 embedding_api_config: configs/knowledge/api/embedding.default-qwen.example.yaml
-reranker_backend: api  # 或 none
+reranker_backend: api  # or none
 reranker_api_config: configs/knowledge/api/reranker.qwen3.example.yaml
 ```
 
-API 返回向量会检查数量、顺序、维度、有限值与零向量，并在本地做 L2 归一化；请求禁止服务端
-静默截断。manifest 记录 provider、模型家族、模型/部署版本、endpoint 哈希、task/instruction、
-维度和 tokenizer 策略，但不会记录 API key。
+Returned API vectors are checked for count, order, dimension, finiteness, and zero vectors, and L2-normalized locally; silent server-side truncation is forbidden. The manifest records provider, model family, model/deployment version, endpoint hash, task/instruction, dimension, and tokenizer policy, but never the API key.
 
-第 4.2 节的 `directed_evolution-qwen-v4.sqlite` 只覆盖 directed_evolution 语料，供
-`knowledge_agent_qwen_rag` 使用。Hierarchical Scientist 的 RAG 条件需要另一份含 binding
-claims 的共享索引，见第 4.3 节。
+The `directed_evolution-qwen-v4.sqlite` from §4.2 only covers the directed_evolution corpus and is used by `knowledge_agent_qwen_rag`. The Hierarchical Scientist's RAG condition needs a separate shared index containing binding claims — see §4.3.
 
-### 4.3 正式矩阵的共享 Qwen corpus index
+### 4.3 Shared Qwen corpus index for the official matrix
 
-并行 RAG worker 只读一份预构建的 Qwen 语料索引，各自写入 per-condition/fold overlay，禁止
-边跑边建。密钥从 `.env` 的 `DASHSCOPE_API_KEY` 读取（第 1.7 节）。
+Parallel RAG workers read a single prebuilt Qwen corpus index and each write their own per-condition/fold overlay; building on the fly is forbidden. The key is read from `DASHSCOPE_API_KEY` in `.env` (§1.7).
 
-Hierarchical Scientist 的 `kg_base_rag` 与 `kg_3features_rag` 要求文件：
+The Hierarchical Scientist's `kg_base_rag` and `kg_3features_rag` require the file:
 
 `artifacts/local_knowledge/corpus/gb1-reasoning-routes-qwen-v4.sqlite`
 
-该路径由 `configs/knowledge/gb1_reasoning_routes.yaml` 给出，语料同时包含
-`resources/local_knowledge/directed_evolution` 与 `resources/local_knowledge/binding` 的英文
-claims。启动含 RAG 条件的 `scripts/run_hierarchical_scientist.py` 前必须先构建；缺文件时
-调度器会立即退出，12 个 job 都不会启动。
+This path is given by `configs/knowledge/gb1_reasoning_routes.yaml`; the corpus contains English claims from both `resources/local_knowledge/directed_evolution` and `resources/local_knowledge/binding`. It must be built before launching `scripts/run_hierarchical_scientist.py` with RAG conditions; if the file is missing the scheduler exits immediately and none of the 12 jobs start.
 
 ```bash
 python -m fitness_agents.cli knowledge index \
@@ -543,11 +290,9 @@ python -m fitness_agents.cli knowledge inspect \
   configs/experiments/gb1_reasoning_routes_base.yaml
 ```
 
-`inspect` 应打印 corpus 统计。不要把第 4.2 节的 `directed_evolution-qwen-v4.sqlite` 拷贝或改名
-成 `gb1-reasoning-routes-qwen-v4.sqlite`：两份索引的 roots、chunk 与 embedding manifest 不同。
+`inspect` should print corpus statistics. Do not copy or rename the §4.2 `directed_evolution-qwen-v4.sqlite` into `gb1-reasoning-routes-qwen-v4.sqlite`: the two indexes differ in roots, chunks, and embedding manifest.
 
-Qwen knowledge-agent AL96（`run_agent_baselines.py --modes knowledge_agent_qwen_rag`）仍使用
-第 4.2 节的 `directed_evolution-qwen-v4.sqlite`。若该文件尚不存在，用同一套 DashScope 密钥构建：
+The Qwen knowledge-agent AL96 (`run_agent_baselines.py --modes knowledge_agent_qwen_rag`) still uses the §4.2 `directed_evolution-qwen-v4.sqlite`. If that file does not yet exist, build it with the same DashScope key:
 
 ```bash
 python -m fitness_agents.cli knowledge index \
@@ -556,52 +301,22 @@ python -m fitness_agents.cli knowledge inspect \
   configs/experiments/knowledge_agent_qwen_al96.yaml
 ```
 
-## 5. 四种规定 baseline
+## 5. Baselines
 
-四种模式共享相同 initial/validation/oracle/final split、查询预算、fitness predictor 和 seed。
-主比较均使用 greedy predictor mean，避免把 UQ 策略增益错误归因给 Agent；UCB 单独在消融实验中评估。
+All baselines share the same initial/validation/oracle/final split, query budget, fitness predictor, and seed. Main comparisons use the greedy predictor mean to avoid mis-attributing UQ-strategy gains to the Agent; UCB is evaluated separately in ablation.
 
-| 模式 | 候选生成 | 选择 |
+| Mode | Candidate generation | Selection |
 |---|---|---|
-| Random | 全部未观测候选 | 随机 |
-| Fitness model direct | 全部未观测候选 | predictor top-μ |
-| LLM Agent | 可检验假设过滤候选 | 同一 predictor top-μ |
-| Knowledge-enhanced LLM Agent | 假设 + 理化/保守/结构/KG | 同一 predictor top-μ + 配置化软证据 |
+| Random | All unobserved candidates | Random |
+| Fitness model direct | All unobserved candidates | predictor top-μ |
 
-运行默认五个 paired seeds：
+### 5.1 GB1-AL96 parallel baselines (`run_agent_baselines.py`)
 
-```bash
-python scripts/run_baselines.py --seeds 11,22,33,44,55
-```
+`scripts/run_baselines.py` runs the demo/full four-mode serially by seed. For the official AL96 five-fold loop use `scripts/run_agent_baselines.py`: each `(mode, seed, fold)` is an independent process and can be parallelized with `--max-parallel`. First generate `GB1-AL96-5CV-v1` per §2.1 and install `[llm]` and `[kermut]`.
 
-快速验证四条路径：
+`random` / `fitness_direct` do not call the LLM and do not enable RAG or KG tools. Scientist-style modes need `DEEPSEEK_API_KEY`. `knowledge_agent_qwen_rag` additionally needs `DASHSCOPE_API_KEY` and the §4.2 Qwen index.
 
-```bash
-python scripts/run_baselines.py --seeds 101 --rounds 1 --budget 4
-```
-
-完整 149,361-variant landscape 可使用分批预测和 5,000 条无标签 UCB evidence prefilter。
-四种 baseline 实验 YAML 已指向 KERMUT；LLM/Knowledge 模式同时使用 DeepSeek：
-
-```bash
-python scripts/run_demo.py --config configs/experiments/knowledge_agent_full.yaml
-python scripts/run_baselines.py --seeds 11,22,33 \
-  --task-config configs/task/gb1_binding_full.yaml
-```
-
-比较表写入 `artifacts/baseline-comparison-*/run_comparison.{csv,json}`。
-
-### 5.1 GB1-AL96 并行 baseline（`run_agent_baselines.py`）
-
-`scripts/run_baselines.py` 按 seed 串行跑 demo/full 四模式。正式 AL96 五折闭环请用
-`scripts/run_agent_baselines.py`：每个 `(mode, seed, fold)` 是独立进程，可用
-`--max-parallel` 并行。先按第 2.1 节生成 `GB1-AL96-5CV-v1`，并安装 `[llm]` 与 `[kermut]`。
-
-`random` / `fitness_direct` 不调用 LLM、不启用 RAG 或 KG 工具。Scientist 类模式需要
-`DEEPSEEK_API_KEY`。`knowledge_agent_qwen_rag` 另外需要 `DASHSCOPE_API_KEY` 和第 4.2 节的
-Qwen 索引。
-
-检查调度表（不启动 campaign）：
+Inspect the schedule (no campaign launch):
 
 ```bash
 python scripts/run_agent_baselines.py \
@@ -613,7 +328,7 @@ python scripts/run_agent_baselines.py \
   --dry-run
 ```
 
-后台跑 random 与 fitness_direct（6 个 job；`--max-parallel 3` 分两波）：
+Run random and fitness_direct in the background (6 jobs; `--max-parallel 3` in two waves):
 
 ```bash
 nohup python scripts/run_agent_baselines.py \
@@ -626,170 +341,37 @@ nohup python scripts/run_agent_baselines.py \
   > random_fitness_direct_b16.log 2>&1 &
 ```
 
-默认 `--modes` 为 `random,fitness_direct,knowledge_agent`。加上 Knowledge Agent：
+`--preset al96` available modes:
 
-```bash
-nohup python scripts/run_agent_baselines.py \
-  --preset al96 \
-  --modes random,fitness_direct,knowledge_agent \
-  --seeds 42 \
-  --folds 0,1,2 \
-  --max-parallel 3 \
-  --cuda-devices 0,1,2 \
-  > agent_baselines.log 2>&1 &
-```
-
-`--preset al96` 可用模式：
-
-| `--modes` | 作用 |
+| `--modes` | Purpose |
 |---|---|
-| `random` | 在配置的 `candidate_limit` 池内随机选湿实验 batch |
-| `fitness_direct` | 同一池内 Kermut greedy |
-| `llm_agent` | DeepSeek Scientist，无 KG / RAG |
-| `knowledge_agent` | observation KG，无文档 RAG |
-| `knowledge_agent_rag` | 本地 BGE RAG（第 4.1 节） |
-| `knowledge_agent_qwen_rag` | Qwen embedding / rerank RAG（第 4.2 节索引） |
+| `random` | Randomly select wet-lab batches within the configured `candidate_limit` pool |
+| `fitness_direct` | Kermut greedy within the same pool |
 
-`--comparison rag`、`agents`、`llm_vs_qwen_rag` 等命名集合见脚本内 `COMPARISON_SETS`。产物写入
-`artifacts/agent-baselines-<时间戳>/`（`schedule.json`、`job_logs/`、`report.json`、`aggregate/`）。
-`--folds config`（默认）沿用各 YAML 的 `fold_index`；正式三折比较请显式传 `--folds 0,1,2`。
+Named sets such as `--comparison rag`, `agents`, `llm_vs_qwen_rag` are defined in `COMPARISON_SETS` inside the script. Artifacts are written to `artifacts/agent-baselines-<timestamp>/` (`schedule.json`, `job_logs/`, `report.json`, `aggregate/`). `--folds config` (default) follows each YAML's `fold_index`; for official three-fold comparison pass `--folds 0,1,2` explicitly.
 
-Kermut 配置见 `configs/model/kermut.yaml`（`device: cuda:0`）。请在 conda 环境
-`fitness-agents` 中启动（第 9.1 节）。`--max-parallel 3` 或 `4` 时加上
-`--cuda-devices 0,1,2,3`（默认 `auto` 也会按可见卡数分配），让并发 job 各占一张卡。
-不要与第 16 节 Hierarchical Scientist 同时打满同一组 GPU。
+Kermut config is at `configs/model/kermut.yaml` (`device: cuda:0`). Launch inside the conda env `EvoSEEK` (§6.1). With `--max-parallel 3` or `4`, add `--cuda-devices 0,1,2,3` (the default `auto` also allocates by visible card count) so concurrent jobs each occupy one card. Do not saturate the same GPUs simultaneously with the §16 Hierarchical Scientist.
 
-## 6. 模块消融
+### 6.1 Install the Kermut backend
 
-所有知识证据通道均是独立开关。提供的单因素配置包括：
+The core environment does not force-install PyTorch. When Kermut is needed, first check the **CUDA Version** in the top-right of `nvidia-smi` (this is the highest toolkit the driver supports, not the `nvcc` version), then install a matching PyTorch. Then install GPyTorch and `fair-esm`. Kermut's composite kernel and Exact-GP core are already included in the project; no upstream Kermut wheel needs to be installed separately.
 
-- `no_physchem`、`no_conservation`、`no_structure`、`no_kg`；
-- `no_knowledge`、`no_uq`、`no_llm`。
-
-```bash
-python scripts/run_ablation.py --seed 17
-```
-
-仅测试选定模块：
-
-```bash
-python scripts/run_ablation.py \
-  --seed 17 --rounds 1 --budget 4 \
-  --ablations no_structure,no_kg,no_uq
-```
-
-参考条件使用 UCB；`no_uq` 将 acquisition 改为 greedy。不要把完整笛卡尔积作为默认实验；应先做
-单因素，再对最重要的 `LLM × KG × UQ` 做 paired factorial test。
-
-## 7. 科学思维测试
-
-科学思维测试不评价文字“像不像科学家”，而检查 Agent 是否：提出可证伪假设、引用可追踪证据、
-记录全局候选排名、根据新观察更新假设，并对因果干预产生可解释的行为变化。
-
-```bash
-python scripts/run_scientific_thinking.py --seed 23
-```
-
-该命令固定同一 seed、数据和预算，自动运行四个条件：
-
-1. 完整 Knowledge-enhanced Agent；
-2. Knowledge ablation；
-3. Score-shuffle test：打乱 predictor mean 与候选的对应关系，并在 trace 中显式标记；
-4. Evidence deletion test：删除提供给 Agent 和 acquisition 的证据 bundle。
-
-输出为 `artifacts/scientific-thinking-*/report.{json,md}`。判据包括假设可证伪率、假设更新率、
-证据引用率、排名记录完整率、三个干预下的 batch Jaccard change，以及 score shuffle 是否在理由中披露。
-正面 verdict 只说明此 benchmark 中观察到科学型行为，不等同于证明具有人类科学理解。
-
-## 8. 测试
-
-测试代码按目的拆分：
-
-```bash
-bash scripts/tests/run_unit.sh
-bash scripts/tests/run_integration.sh
-bash scripts/tests/run_leakage.sh
-bash scripts/tests/run_e2e.sh
-bash scripts/tests/run_all.sh
-```
-
-也可直接执行：
-
-```bash
-python -m pytest tests -q
-python -m pytest tests/unit -q
-python -m pytest -m leakage -q
-```
-
-当前测试覆盖数据 schema、mutation canonicalization、特征、ensemble/UQ、acquisition、多样性、
-知识通道、四 baseline、oracle 单次揭示、final gate、prompt 泄露、全候选排名，以及三类科学思维干预。
-
-## 9. 可插拔接口
-
-核心 Protocol 位于 `src/fitness_agents/contracts/interfaces.py`：
-
-- `FeatureProvider.fit/transform`
-- `FitnessPredictor.fit/predict`
-- `CandidateGenerator.generate`
-- `EvidenceProvider.evaluate`
-- `KnowledgeGraphTool.hypothesis_context/explain_variant`
-- `AcquisitionPolicy.score/select`
-- `ExperimentBackend.submit/collect/open_final_test`
-- `LLMClient.generate_hypothesis`
-
-特征、predictor、candidate generator 和 acquisition 均提供注册函数。例如：
-
-```python
-from fitness_agents.models import register_predictor
-
-register_predictor("my_kermut_adapter", my_predictor_factory)
-```
-
-内置 predictor 可直接在 model YAML 中选择：`onehot_heterogeneous_ensemble`、`kermut`、
-`proteinnpt`、`prosst`、`pythia_ppi`。其中 Kermut 已接入真实的 ESM-2 + ProteinMPNN +
-结构复合核 Exact-GP 后端；后三者保留同一插件契约，未配置 backend 时会显式报错而不是生成伪分数。
-
-### 9.1 安装 Kermut 后端
-
-核心环境不强制安装 PyTorch。需要 Kermut 时，先看 `nvidia-smi` 右上角的 **CUDA Version**（这是驱动
-最高支持的 toolkit，不是 `nvcc` 版本），再安装匹配的 PyTorch。然后装 GPyTorch 与 `fair-esm`。
-Kermut 的复合核与 Exact-GP 核心已经包含在项目中，不需要另外安装上游 Kermut wheel。
-
-本机当前是驱动 530.41.03 / CUDA 12.1、4× RTX 3090。请使用 `fitness-agents` conda 环境，**不要**
-用仓库 `.venv`（其中是 `torch 2.13+cu130`，GPU 不可用）。cu121 官方 wheel 的最高版本是 2.5.1：
-
-```bash
-conda activate fitness-agents
-cd /path/to/fitness-agents
-
-python -m pip install \
-  --index-url https://download.pytorch.org/whl/cu121 \
-  --extra-index-url https://pypi.org/simple \
-  "torch==2.5.1" \
-  "gpytorch>=1.11,<2" \
-  "fair-esm>=2.0,<3"
-
-python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"
-# 期望：2.5.1+cu121  12.1  True
-```
-
-若只跑 CPU，或驱动已支持 CUDA 12.4+，才可以直接：
+You may install directly only if you run CPU-only, or if the driver already supports CUDA 12.4+:
 
 ```bash
 python -m pip install -e ".[kermut]"
 ```
 
-`pip install -e ".[kermut]"` 会从 PyPI 拉最新默认 torch（目前为 cu130）。在 CUDA 12.1 驱动上
-`torch.cuda.is_available()` 为 false，日志出现 `NVIDIA driver too old`，进程会继续在 CPU 上跑。
+`pip install -e ".[kermut]"` pulls the latest default torch from PyPI (currently cu130). On a CUDA 12.1 driver `torch.cuda.is_available()` is false, the log shows `NVIDIA driver too old`, and the process continues on CPU.
 
-Kermut 还需要两个 assay/蛋白特异的外部资源，项目不会用占位数据替代：
+Kermut also needs two assay/protein-specific external resources that the project will not substitute with placeholder data:
 
-- ProteinMPNN 条件氨基酸概率，形状为 `L × 20`；
-- 蛋白质 C-alpha 坐标，形状为 `L × 3`。
+- ProteinMPNN conditional amino-acid probabilities, shaped `L × 20`;
+- Protein C-alpha coordinates, shaped `L × 3`.
 
-### 9.2 配置 GB1 fitness 打分
+### 6.2 Configure GB1 fitness scoring
 
-编辑 [`configs/model/kermut.yaml`](configs/model/kermut.yaml)，至少设置两个资源路径：
+Edit [`configs/model/kermut.yaml`](configs/model/kermut.yaml) and set at least the two resource paths:
 
 ```yaml
 name: kermut
@@ -816,56 +398,46 @@ options:
   n_steps: 150
 ```
 
-GB1 候选表可以使用 `VDGV` 这样的四位点序列，而结构资源仍可保留完整蛋白长度；
-`resource_positions` 会从完整资源中抽取第 39、40、41、54 位。反过来，完整蛋白候选序列也可以
-使用仅包含这四个位点的裁剪资源。
+The GB1 candidate table can use a four-site sequence such as `VDGV`, while the structure resources can keep the full protein length; `resource_positions` extracts positions 39, 40, 41, 54 from the full resource. Conversely, a full-protein candidate sequence can use a cropped resource containing only those four sites.
 
-在实验 YAML 中选择该模型：
+Select this model in the experiment YAML:
 
 ```yaml
 model_config: configs/model/kermut.yaml
 ```
 
-本仓库 `configs/model/kermut.yaml` 已按本机 GPU 设为 `device: cuda:0`。GB1 候选是 265 残基
-FLIP fusion，ESM-2 650M 在独占 24GB 3090 上可以把 `batch_size` 提到 16–32；多进程或与其它作业
-共享显存时保持 8。`allow_device_fallback: false` 表示 GPU 不可用时直接报错，避免再静默落到 CPU。
+This repo's `configs/model/kermut.yaml` already sets `device: cuda:0` for the local GPU. GB1 candidates are 265-residue FLIP fusions; ESM-2 650M on a dedicated 24GB 3090 can raise `batch_size` to 16–32; keep it at 8 when multiprocessing or sharing memory with other jobs. `allow_device_fallback: false` means it errors out directly when the GPU is unavailable, avoiding a silent fall back to CPU.
 
 ```yaml
 device: cuda:0
-allow_device_fallback: false  # GPU 不可用时直接报错
-# allow_device_fallback: true # 明确允许回退到 CPU
-batch_size: 8                 # 共享 3090 时的安全值；独占时可改为 16 或 32
+allow_device_fallback: false  # error out directly when GPU is unavailable
+# allow_device_fallback: true # explicitly allow fallback to CPU
+batch_size: 8                 # safe value when sharing the 3090; 16 or 32 when dedicated
 ```
 
-不要把 YAML 改成 `cuda:0` / `cuda:1` / `cuda:2` / `cuda:3` 来做四卡并行：所有 worker 读同一份
-配置，会一起挤在 `cuda:0` 上。正确做法是保持 `device: cuda:0`，由调度器给每个子进程设置
-`CUDA_VISIBLE_DEVICES`，让该进程只看见一张卡（在进程内仍叫 `cuda:0`）。
+Do not change the YAML to `cuda:0` / `cuda:1` / `cuda:2` / `cuda:3` for four-card parallelism: all workers read the same config and would pile onto `cuda:0`. The correct approach is to keep `device: cuda:0` and let the scheduler set `CUDA_VISIBLE_DEVICES` for each child process so that process sees only one card (still called `cuda:0` inside the process).
 
-`scripts/run_hierarchical_scientist.py` 与 `scripts/run_agent_baselines.py` 提供
-`--cuda-devices`：
+`scripts/run_hierarchical_scientist.py` and `scripts/run_agent_baselines.py` provide `--cuda-devices`:
 
-| 值 | 行为 |
+| Value | Behavior |
 |---|---|
-| `auto`（默认） | 发现可见 GPU；`--max-parallel` 不能超过卡数 |
-| `0,1,2,3` | 四卡池，并发 job 各占一张 |
-| `none` | 不隔离，所有 worker 继承父进程设备（多进程会争用 GPU 0） |
-
-四卡同时跑 4 个 Kermut 进程（conda 环境 `fitness-agents`，不要用 `.venv` 的 cu130 torch）：
+| `auto` (default) | Discover visible GPUs; `--max-parallel` must not exceed card count |
+| `0,1,2,3` | Four-card pool, concurrent jobs each occupy one card |
+| `none` | No isolation; all workers inherit the parent process device (multiprocessing contends for GPU 0) |
 
 ```bash
-conda activate fitness-agents
+conda activate EvoSEEK
 python scripts/run_hierarchical_scientist.py \
   --max-parallel 4 \
   --cuda-devices 0,1,2,3 \
   --dry-run
 ```
 
-单 GPU 或显存紧张时用 `--max-parallel 1`。卡数少于并行度时调度器会直接退出，而不是让两份
-ESM-2 650M 挤在同一张 3090 上。
+Use `--max-parallel 1` on a single GPU or when memory is tight. When the card count is below the parallelism, the scheduler exits directly rather than letting two ESM-2 650M models crowd the same 3090.
 
-### 9.3 实时序列与固定候选池
+### 6.3 Live sequences and fixed candidate pools
 
-开放序列空间使用实时模式。系统会缓存 ESM-2 embedding，并按 WT 位点缓存 masked-marginal：
+The open sequence space uses live mode. The system caches the ESM-2 embedding and, per WT site, the masked-marginal:
 
 ```yaml
 options:
@@ -873,7 +445,7 @@ options:
   cache_dir: artifacts/model_cache/kermut_esm2
 ```
 
-固定 GB1 benchmark 可先生成不含 fitness 标签的特征文件：
+For the fixed GB1 benchmark you can first generate a feature file without fitness labels:
 
 ```bash
 python scripts/models/build_kermut_feature_store.py \
@@ -883,7 +455,7 @@ python scripts/models/build_kermut_feature_store.py \
   --device cpu
 ```
 
-然后切换为预计算模式：
+Then switch to precomputed mode:
 
 ```yaml
 options:
@@ -891,200 +463,61 @@ options:
   precomputed_features_path: models/kermut/gb1_features.npz
 ```
 
-NPZ 必须包含 `variant_ids` 或 `sequences`，以及 `embeddings` 和 `zero_shot`。无论选择哪种
-特征模式，都仍然需要 `conditional_probs_path` 和 `coords_path`。如果资源缺失，后端会在加载
-650M ESM-2 权重前终止并报告缺少的配置。更完整的插件契约和其他模型接入方法见
-[`docs/predictor-plugins.md`](docs/predictor-plugins.md)。
+The NPZ must contain `variant_ids` or `sequences`, plus `embeddings` and `zero_shot`. Regardless of feature mode, `conditional_probs_path` and `coords_path` are still required. If the resources are missing, the backend terminates before loading the 650M ESM-2 weights and reports the missing config. For the fuller plugin contract and other model-integration methods see [`docs/predictor-plugins.md`](docs/predictor-plugins.md).
 
-`CampaignRunner` 也允许构造时注入 `ExperimentBackend`、predictor factory 和 `ScientistAgent`，
-因此可以把 CSV oracle 换成 LIMS/机器人队列，而不修改闭环状态机。真实实验 backend 必须保证：提交幂等、
-QC 状态显式、重复测量保留、失败可重试，并且 final test gate 不可逆。
+`CampaignRunner` also allows injecting `ExperimentBackend`, a predictor factory, and `ScientistAgent` at construction time, so the CSV oracle can be swapped for a LIMS/robotics queue without modifying the loop state machine. A real experiment backend must guarantee: idempotent submission, explicit QC status, retained repeat measurements, retryable failures, and an irreversible final-test gate.
 
-Knowledge-enhanced Agent 默认通过受控的 `AgentKnowledgeGraphTool` 查询 KG，而不是执行任意 SQL。
-`hypothesis_context` 只返回当前轮之前已揭示的 observation，以及明确标记为 prediction/evidence 的
-当前轮计算结果；每次查询都会写入 `agent_queries`，从而支持轮次历史、推理追溯和消融。未来的
-Mutation Designer 或 Scientific Critic 可复用 `explain_variant` 获取单个候选的序列、预测与证据上下文。
+The knowledge-enhanced Agent queries the KG by default through the controlled `AgentKnowledgeGraphTool` rather than executing arbitrary SQL. `hypothesis_context` returns only observations revealed before the current round, plus current-round results explicitly marked as prediction/evidence; every query is written to `agent_queries`, enabling round history, reasoning traceability, and ablation. A future Mutation Designer or Scientific Critic can reuse `explain_variant` to obtain a single candidate's sequence, prediction, and evidence context.
 
-## 10. LLM API
-
-Scientist / Critic 的实验配置在 `configs/llm/deepseek.yaml` 与
-`configs/critic/deepseek_remote.yaml`。密钥**不要**写进 YAML，只放在 gitignored 的 `.env`：
-
-```bash
-# .env
-DEEPSEEK_API_KEY='...'
-```
-
-`llm_agent` 与 `knowledge_agent*` 实验会读取 `api_key: env:DEEPSEEK_API_KEY`。
-`random` 与 `fitness_direct` 仍使用 mock LLM，但共享同一 KERMUT 预测器。
-
-离线复现可把实验 YAML 改回：
-
-```yaml
-llm_provider: mock
-model_config: configs/model/baseline.yaml
-```
-
-并删掉 `llm_config` / `critic_config`。API context 仅包含已揭示 observation、当前轮次、上轮假设和带来源 evidence。API key 不写入 prompt 或 trace。LLM 不负责生成数值 fitness，也不能执行任意 shell。
-
-### 10.1 Scientific Critic 控制流
-
-所有 campaign 提交现在都经过 `DraftBatch → hard validation → CriticAgent → ApprovedBatch`。
-`CampaignRunner` 使用审批网关包装实验后端，因此裸候选 ID、被修改的审批凭证或仍含 hard conflict 的
-batch 都无法进入提交路径。`REVISE` 最多执行两次；`REJECT` 与循环耗尽默认中止本轮，也可显式配置
-`safe_fallback`，回退批次仍须重新验证和审批。
-
-默认离线配置位于 `configs/critic/scientific_v1.yaml`。要启用独立远程 Critic，可在 experiment YAML
-中设置：
-
-```yaml
-critic:
-  enabled: true
-  mode: remote
-  provider: openai
-  model: gpt-5-mini
-  profile: scientific_v1
-  max_revision_attempts: 2
-  fallback_policy: rule
-  on_reject: abort_round
-  on_exhausted: abort_round
-```
-
-Critic 的审查方法位于
-`src/fitness_agents/agents/critic_profiles/scientific_v1/SKILL.md`，使用结构化英文编写；它只定义
-evidence audit、epistasis、batch design 和 falsification 四种审查视角。实际权限、schema、循环上限、
-审批哈希和提交 gate 均由 Python 代码强制执行。
-
-## 11. 项目结构
+## 7. Project Structure
 
 ```text
-configs/                  task/model/experiment/knowledge/ablation 配置
-data/                     raw、processed、demo 与数据许可说明
+configs/                  task/model/experiment/knowledge/ablation configs
+data/                     raw, processed, demo, and data licensing notes
 src/fitness_agents/
-  contracts/              typed schemas 与 Protocol
-  data/                    下载后清洗、split、公开/oracle 隔离
-  features/                one-hot/pairwise 特征及注册表
-  models/                  ensemble、校准、UQ 及 predictor 注册表
-  mutation/                全枚举、假设过滤、知识过滤
+  contracts/              typed schemas and Protocol
+  data/                    download, clean, split, public/oracle isolation
+  features/                one-hot/pairwise features and registry
+  models/                  ensemble, calibration, UQ, and predictor registry
+  mutation/                 full enumeration, hypothesis filter, knowledge filter
   acquisition/             Random/Greedy/UCB/Thompson + batch diversity
-  knowledge/               理化、保守、结构、observation-centric KG
-  agents/                  Mock/remote LLM、hypothesis、critic、sanitizer
-  loop/                    状态机、CSV oracle、依赖注入
+  knowledge/               physchem, conservation, structure, observation-centric KG
+  agents/                  Mock/remote LLM, hypothesis, critic, sanitizer
+  loop/                     state machine, CSV oracle, dependency injection
   evaluation/              prediction/loop/scientific-thinking metrics
-  reporting/               baseline、消融与干预报告
-scripts/data/              数据下载、准备、验证
-scripts/models/            模型/结构资产准备
-scripts/run_*.py           demo、四 baseline、AL96 并行 baseline、Hierarchical Scientist、消融、科学思维测试
-scripts/tests/             分层测试命令
+  reporting/               baseline, ablation, and intervention reports
+scripts/data/              data download, preparation, validation
+scripts/models/            model/structure asset preparation
+scripts/run_*.py           demo, four baselines, AL96 parallel baseline, Hierarchical Scientist, ablation, scientific-thinking tests
+scripts/tests/             layered test commands
 tests/                     unit/integration/leakage/e2e
-services/structure/        可选 GPU sidecar 接口约定
+services/structure/        optional GPU sidecar interface contract
 ```
 
-## 12. Docker 与 CI
+## 8. Known Limitations
 
-```bash
-docker build -t fitness-agents:local .
-docker run --rm -v "$PWD/artifacts:/workspace/artifacts" fitness-agents:local
-# 或
-docker compose run --rm fitness-agents
-```
+- Demo results are hidden-label simulations, not new wet-lab conclusions;
+- The 5LDE site-risk is a lightweight prior and does not replace variant structure prediction or free-energy calculation;
+- Ensemble uncertainty must be evaluated together with coverage/NLL and closed-loop acquisition utility;
+- Small-sample KG residue aggregates may be confounded by epistasis, so fitness is always bound to the full variant, assay, and observation;
+- Official conclusions should use paired seeds, bootstrap confidence intervals, and multiple-comparison correction.
 
-GitHub Actions 在 Ubuntu 24.04 上测试 Python 3.10、3.11、3.12 和 3.13，并运行 pytest 与 Ruff。
+## 9. Hierarchical Scientist Official Matrix
 
-## 13. 迁移来源与边界
+`scripts/run_hierarchical_scientist.py` runs four condition groups on the first three folds of GB1-AL96. Scientist / Critic go through DeepSeek; RAG embedding / reranker go through Qwen; fitness is Kermut. The Agent-UQ condition does not mix fitness into acquisition; `kg_base_al` uses the explicit Kermut posterior. `--placeholder-predictor` is rejected.
 
-除已明确标注并保留 MIT 许可证的 Kermut 计算核心外，本实现没有直接打包第三方源码。它借鉴了
-ALDE 的离散 batch acquisition/UQ 分层、FLIP 的 GB1 数据语义、BioDesignBench 的 typed trace
-与 intervention test、Virtual Lab 的 hypothesis/critic 职责，以及 protein-design-mcp 的小工具边界。
-详细 commit、许可证和不可直接复制的项目见
-[`THIRD_PARTY.md`](THIRD_PARTY.md)。
-
-## 14. 已知限制
-
-- demo 结果是隐藏标签模拟，不是新的湿实验结论；
-- 5LDE 位点风险是轻量先验，不替代变体结构预测或自由能计算；
-- ensemble uncertainty 必须同时用 coverage/NLL 和闭环 acquisition utility 评估；
-- 小样本 KG residue aggregate 可能受上位性混杂，故 fitness 始终绑定完整 variant、assay 和 observation；
-- 正式结论应使用 paired seeds、bootstrap 置信区间和多重比较校正。
-
-
-## 15. RAG/KG/三通道/主动学习路线验证
-
-路线矩阵位于 `configs/experiments/gb1_reasoning_routes.matrix.yaml`，公共实验参数位于
-`configs/experiments/gb1_reasoning_routes_base.yaml`。矩阵固定使用五折中的前三折
-`[0, 1, 2]`，并行进程数默认是 2。所有路线共享同一 fold manifest、seed、候选预算、
-Scientist LLM 和本地规则 Critic，避免把资源差异误当成路线差异。
-
-| route ID | RAG | physchem | conservation | structure | 主动学习 | 测试目标 |
-|---|:---:|:---:|:---:|:---:|:---:|---|
-| `rag_kg_none` | ✓ |  |  |  |  | RAG 检索和 observation-KG 能进入 LLM，上述三类 feature evidence 均不出现 |
-| `rag_kg_all` | ✓ | ✓ | ✓ | ✓ |  | 三类 provider 均 ready、联合 tool 被调用、evidence/KG/RAG 进入 LLM 上下文 |
-| `rag_kg_physchem` | ✓ | ✓ |  |  |  | 只出现理化 evidence，排除 MSA 与结构 evidence |
-| `rag_kg_physchem_structure` | ✓ | ✓ |  | ✓ |  | 理化与坐标结构联合出现，MSA evidence 缺席 |
-| `rag_kg_physchem_conservation` | ✓ | ✓ | ✓ |  |  | 理化与 A3M 单位点保守性联合出现，结构 evidence 缺席 |
-| `kg_all` |  | ✓ | ✓ | ✓ |  | 在没有本地文档 RAG 时验证 KG 与三通道到 LLM 的路径 |
-| `kg_none` |  |  |  |  |  | 纯 observation-centric KG 到 LLM 的对照路线 |
-| `rag_kg_all_active_learning` | ✓ | ✓ | ✓ | ✓ | ✓ | 除完整 evidence 路径外，验证 posterior 与 acquisition 产物及 selection driver |
-
-首次运行前先按第 2.1 节生成 `GB1-AL96-5CV-v1`。检查 24 个任务及有效配置而不调用 LLM：
-
-```bash
-python scripts/run_reasoning_routes.py --dry-run
-```
-
-执行全部 8 条路线 × 前 3 折；`--max-parallel` 可覆盖默认值 2：
-
-```bash
-python scripts/run_reasoning_routes.py --max-parallel 2
-```
-
-只验证一条或若干路线：
-
-```bash
-python scripts/run_reasoning_routes.py \
-  --routes rag_kg_all,kg_all,rag_kg_all_active_learning \
-  --folds 0,1,2 \
-  --max-parallel 2
-```
-
-Linux 已 `source .venv/bin/activate` 后直接使用 `python`。Windows PowerShell 使用仓库虚拟环境时，
-将 `python` 换为 `.\.venv\Scripts\python.exe`。DeepSeek key 只通过 `DEEPSEEK_API_KEY` 环境变量提供。
-
-调度器不仅检查进程退出码，还逐折审计：effective config、provider ready/disabled 状态、
-`evidence_contract.json` 的通道集合、`structured_kg.sqlite`、`kg_interaction.json`、RAG 产物、
-LLM hypothesis、主动学习 posterior/acquisition，以及 `kg_truncation_audit.json` 中对
-`MutationEffectEstimate`、关系类型和已启用 feature 关系的关键词查询。汇总写入
-`route_validation.json`；其中 `any_max_rows_truncation` 显式报告 `max_rows` 截断，而不是静默忽略。
-
-该测试能证明“组件执行、evidence 生成、KG 注入、上下文交付和选择器切换”。它不能单凭一次
-trace 证明 LLM 在语义上依赖某条 evidence，也不能证明某路线提高 fitness。后者应在相同 fold/seed
-上增加 evidence 删除或置换干预、多个 seed 和置信区间；三通道与未校准 RAG evidence 默认不直接
-升级为测量或 fitness 选择证据。
-
-## 16. Hierarchical Scientist 正式矩阵
-
-`scripts/run_hierarchical_scientist.py` 在 GB1-AL96 前三折上跑四组条件。Scientist / Critic
-走 DeepSeek；RAG embedding / reranker 走 Qwen；fitness 为 Kermut。Agent-UQ 条件不把 fitness
-混进 acquisition；`kg_base_al` 使用显式 Kermut posterior。`--placeholder-predictor` 会被拒绝。
-
-| 条件 | 层级 | 文档 RAG | 三通道特征工具 | KG | 采集 |
+| Condition | Hierarchy | Doc RAG | Three-channel feature tools | KG | Acquisition |
 |---|---|---|---|---|---|
-| `kg_base` | 否 | 否 | 否 | 基础 KG | Agent-UQ |
-| `kg_base_rag` | 否 | 是 | 否 | 基础 KG | Agent-UQ |
-| `kg_base_al` | 否 | 否 | 否 | 基础 KG | Kermut active learning |
-| `kg_3features_rag` | 是（三路子 Scientist） | 是 | physchem / conservation / structure | 基础 KG | Agent-UQ |
-| `kg_3features_base`（可选） | 是（三路子 Scientist） | 否 | physchem / conservation / structure | 基础 KG | Agent-UQ |
-| `agent_only`（可选） | 否 | 否 | 否 | 完全关闭（knowledge runtime 消融） | Agent-UQ |
+| `kg_base` | No | No | No | Base KG | Agent-UQ |
+| `kg_base_rag` | No | Yes | No | Base KG | Agent-UQ |
+| `kg_base_al` | No | No | No | Base KG | Kermut active learning |
+| `kg_3features_rag` | Yes (three-path Scientist) | Yes | physchem / conservation / structure | Base KG | Agent-UQ |
+| `kg_3features_base` | Yes (three-path Scientist) | No | physchem / conservation / structure | Base KG | Agent-UQ |
+| `agent_only` | No | No | No | Fully off (knowledge runtime ablation) | Agent-UQ |
 
-`kg_3features_base` 与 `agent_only` 不在默认 12-job 矩阵中，通过 `--conditions`
-显式调度，例如 `--conditions kg_3features_base,agent_only`。`agent_only` 关闭
-`knowledge_enabled` / `knowledge.kg` / `kg_interaction.enabled`，Scientist 不挂任何
-KG 工具，纯靠 LLM 做多轮假设-选择迭代；审计会校验 KG runtime 未泄露。
+`kg_3features_base` and `agent_only` are not in the default 12-job matrix; schedule them explicitly via `--conditions`, e.g. `--conditions kg_3features_base,agent_only`. `agent_only` turns off `knowledge_enabled` / `knowledge.kg` / `kg_interaction.enabled`; the Scientist attaches no KG tools and relies purely on the LLM for multi-round hypothesis-selection iteration; the audit verifies the KG runtime did not leak.
 
-前置：第 2.1 节 split、第 1.7 节 `DEEPSEEK_API_KEY` 与 `DASHSCOPE_API_KEY`、第 9.2 节 Kermut
-资源。只要 `--conditions` 含 RAG 项，必须先完成第 4.3 节共享 Qwen 索引，否则调度器 fail-closed。
-
-只检查调度表：
+Inspect only the schedule:
 
 ```bash
 python scripts/run_hierarchical_scientist.py \
@@ -1096,14 +529,10 @@ python scripts/run_hierarchical_scientist.py \
   --dry-run
 ```
 
-正式 12-job 矩阵（4 条件 × 3 折）。默认 `--max-parallel 4` 分三波，每波恰好一个
-`kg_3features_rag`（内部再扇出三路子 Scientist）。DeepSeek 争用时改用 `--max-parallel 2`。
-四张 3090 上同时跑 Kermut 时加 `--cuda-devices 0,1,2,3`（默认 `auto` 等价于发现全部可见卡）；
-YAML 保持 `device: cuda:0`，由调度器按 job 设置 `CUDA_VISIBLE_DEVICES`。必须用 conda 环境
-`fitness-agents`，不要用 `.venv`。
+Official 12-job matrix (4 conditions × 3 folds). Default `--max-parallel 4` runs in three waves, each wave containing exactly one `kg_3features_rag` (which fans out three-path Scientists internally). Switch to `--max-parallel 2` under DeepSeek contention. Add `--cuda-devices 0,1,2,3` when running Kermut on four 3090s simultaneously (default `auto` is equivalent to discovering all visible cards); the YAML keeps `device: cuda:0` and the scheduler sets `CUDA_VISIBLE_DEVICES` per job.
 
 ```bash
-conda activate fitness-agents
+conda activate EvoSEEK
 nohup python scripts/run_hierarchical_scientist.py \
   --config configs/experiments/hierarchical_scientist.deepseek.yaml \
   --conditions kg_base,kg_base_rag,kg_base_al,kg_3features_rag \
@@ -1113,11 +542,9 @@ nohup python scripts/run_hierarchical_scientist.py \
   > hierarchical_scientist.log 2>&1 &
 ```
 
-产物写入 `artifacts/hierarchical-scientist-<时间戳>/`（`schedule.json`、`fold_logs/`、
-`report.json`、`aggregate/`）。总控看 `hierarchical_scientist.log`；单 job 看
-`fold_logs/<condition>-fXX-sYY.stderr.log`。
+Artifacts are written to `artifacts/hierarchical-scientist-<timestamp>/` (`schedule.json`, `fold_logs/`, `report.json`, `aggregate/`). Watch the overall log at `hierarchical_scientist.log`; watch a single job at `fold_logs/<condition>-fXX-sYY.stderr.log`.
 
-只跑不依赖 RAG 的两组时可以暂缓第 4.3 节索引：
+If you only run the two RAG-independent groups, you can defer the §4.3 index:
 
 ```bash
 nohup python scripts/run_hierarchical_scientist.py \
@@ -1126,3 +553,20 @@ nohup python scripts/run_hierarchical_scientist.py \
   --max-parallel 2 \
   > hierarchical_scientist_base.log 2>&1 &
 ```
+
+## 10. Interactive Interface
+
+Install the local Gradio UI extra (referenced in §1.3):
+
+```bash
+conda activate EvoSEEK
+python -m pip install -e ".[ui]"
+```
+
+Launch the interactive web interface backed by a knowledge-agent experiment config:
+
+```bash
+fitness-agents serve configs/experiments/knowledge_agent_open_design.yaml --host 127.0.0.1 --port 7860
+```
+
+This starts a Gradio server bound to `127.0.0.1:7860`. Open the printed URL in your browser to drive the Design → Score → Select → Test → Learn loop through the UI. The served experiment must define a valid `model_config` and knowledge/RAG settings; see §6.2 and §4 for configuration details.

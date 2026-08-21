@@ -1,0 +1,7 @@
+condition,fold,knowledge_enabled,kg_interaction_enabled,hierarchical_hypothesis_enabled,local_rag_enabled,allow_remote_context,active_learning_enabled,enabled_channels,kg_entity_count,kg_relation_count,selected_evidence_records,condition_contract_ok
+agent_only,0,False,False,False,False,False,False,,0,0,0,True
+agent_only,1,False,False,False,False,False,False,,0,0,0,True
+agent_only,2,False,False,False,False,False,False,,0,0,0,True
+kg_3features_base,0,True,True,True,False,False,False,"conservation,kg,physchem,structure",1471,3537,48,True
+kg_3features_base,1,True,True,True,False,False,False,"conservation,kg,physchem,structure",1402,3214,48,True
+kg_3features_base,2,True,True,True,False,False,False,"conservation,kg,physchem,structure",1456,3488,48,True

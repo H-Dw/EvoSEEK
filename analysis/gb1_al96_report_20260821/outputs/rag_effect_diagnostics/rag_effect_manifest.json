@@ -1,0 +1,46 @@
+{
+  "analysis_id": "rag_effect_diagnostics",
+  "conditions": [
+    "kg_base",
+    "kg_base_rag"
+  ],
+  "folds": 3,
+  "generated_at_utc": "2026-08-21T10:27:14.641907+00:00",
+  "outputs": [
+    {
+      "path": "evidence_cases/largest_negative_batch_delta.json",
+      "sha256": "db9ad1359f4c4a327773110821a52dc20c9aafb3d7c18e904f89cb9ae4b9b11e"
+    },
+    {
+      "path": "evidence_cases/largest_positive_batch_delta.json",
+      "sha256": "facb3a69835968307f260478f2984b6ef8721443760c8256e1ebb3b4ef440eca"
+    },
+    {
+      "path": "rag_effect_analysis.md",
+      "sha256": "a19576d60c91384c4cc17a442393405a20f9322b8d0350d6a0143e03bb246b6a"
+    },
+    {
+      "path": "source_data/kg_base_vs_rag_matched_impact.csv",
+      "sha256": "5b33f64ece4c818600eec28d0cefcf0d4ca26da123430cfb2112ffec247d44e6"
+    },
+    {
+      "path": "source_data/rag_prompt_claims.csv",
+      "sha256": "688c8b6c14e12eb2c880ee7003f8cac68b2b3d8c108cb03b7ce0be81f07b0c59"
+    },
+    {
+      "path": "source_data/rag_retrieval_claims.csv",
+      "sha256": "1d08e5f8ee826206030287d7e6e53c6638d4aca964d9932f3ca5f08c94ae2bc7"
+    },
+    {
+      "path": "source_data/rag_selected_candidate_preference_audit.csv",
+      "sha256": "d75b000712bbb60a812e6d2de4da873a37c834e06aa9b849a281d437c856df71"
+    },
+    {
+      "path": "source_data/scientist_prompt_audit.csv",
+      "sha256": "750b18a3efe7e28ba6e1e10fa5fba86547ef56d0e11ba273ace4964d4572ea16"
+    }
+  ],
+  "prompt_claim_rows": 108,
+  "retrieval_claim_rows": 72,
+  "rounds": 3
+}

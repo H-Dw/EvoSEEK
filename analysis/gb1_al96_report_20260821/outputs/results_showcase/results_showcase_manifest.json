@@ -1,0 +1,97 @@
+{
+  "analysis": "GB1 AL96 standalone Attachment D results showcase",
+  "eligible_run_count": 24,
+  "hidden_reasoning_exported": false,
+  "inputs": [
+    {
+      "path": "artifacts/hierarchical-scientist-kg_3features_base_agent_only/runs/knowledge_agent-s11-f02-GB1-hierarchical-kg_3features_base-f02-20260821T111821854847Z/completion_manifest.json",
+      "sha256": "79d90a70e1013264ca8341b1a8203c1dc0435be00b55d9a15ba63d2cab8ab0c5"
+    },
+    {
+      "path": "artifacts/hierarchical-scientist-kg_3features_base_agent_only/runs/knowledge_agent-s11-f02-GB1-hierarchical-kg_3features_base-f02-20260821T111821854847Z/summary.json",
+      "sha256": "50b0f300df58cbb840aa08422ad152cd56753b1f2b49f0762d6f1a933a28857b"
+    },
+    {
+      "path": "artifacts/hierarchical-scientist-kg_3features_base_agent_only/runs/knowledge_agent-s11-f02-GB1-hierarchical-kg_3features_base-f02-20260821T111821854847Z/state.json",
+      "sha256": "3fa7544c36f9216eabc55859a6f68d2baee6bb3dae3f8a2d99e5aa23bf3bf9a0"
+    },
+    {
+      "path": "artifacts/hierarchical-scientist-kg_3features_base_agent_only/runs/knowledge_agent-s11-f02-GB1-hierarchical-kg_3features_base-f02-20260821T111821854847Z/wild_type.json",
+      "sha256": "dd39d901ac19e217d82619291905076599748b6fc967a3247d69026e256ecfd9"
+    },
+    {
+      "path": "artifacts/hierarchical-scientist-kg_3features_base_agent_only/runs/knowledge_agent-s11-f02-GB1-hierarchical-kg_3features_base-f02-20260821T111821854847Z/top_k_all_rounds.csv",
+      "sha256": "9a33f1f95448ffc4dacecde8cf8676e9994ab120376be16a3ba2b6eb86364544"
+    },
+    {
+      "path": "artifacts/hierarchical-scientist-kg_3features_base_agent_only/runs/knowledge_agent-s11-f02-GB1-hierarchical-kg_3features_base-f02-20260821T111821854847Z/round_02/llm/scientist/conversations/00089_reasoning_draft_attempt-00.json",
+      "sha256": "1e9c11515ccce69a9f886929dcc7d875059c0beb2cb186aa9dcd411945a86706"
+    },
+    {
+      "path": "artifacts/hierarchical-scientist-kg_3features_base_agent_only/runs/knowledge_agent-s11-f02-GB1-hierarchical-kg_3features_base-f02-20260821T111821854847Z/round_02/main_reviews/attempt_01.json",
+      "sha256": "7098158933797a06293a9b357c692b54331d6f2d4b70e1461302156e623ca989"
+    },
+    {
+      "path": "artifacts/hierarchical-scientist-kg_3features_base_agent_only/runs/knowledge_agent-s11-f02-GB1-hierarchical-kg_3features_base-f02-20260821T111821854847Z/round_02/main_reviews/attempt_02.json",
+      "sha256": "75f49df4fa490b786f4b87201dcf602f851210f6a789ffe915491fe078048573"
+    },
+    {
+      "path": "artifacts/hierarchical-scientist-kg_3features_base_agent_only/runs/knowledge_agent-s11-f02-GB1-hierarchical-kg_3features_base-f02-20260821T111821854847Z/round_02/critique_attempt_0.json",
+      "sha256": "73f42711bc236830a2f0371c1dfeece63d9d6b357c9ff278cdf055a938024b19"
+    },
+    {
+      "path": "artifacts/hierarchical-scientist-kg_3features_base_agent_only/runs/knowledge_agent-s11-f02-GB1-hierarchical-kg_3features_base-f02-20260821T111821854847Z/round_02/hypothesis_assessment.json",
+      "sha256": "59ef8de41beb19f683b3824c58611abf2f3d99c7b2d858015287f27c6149ab94"
+    },
+    {
+      "path": "artifacts/hierarchical-scientist-kg_3features_base_agent_only/runs/knowledge_agent-s11-f00-GB1-hierarchical-kg_3features_base-f00-20260821T110701100360Z/top_k_all_rounds.csv",
+      "sha256": "49676ae3c2a57dfe6ff8212314f59cfb1f3ca1a94db609d32c92e83551725352"
+    }
+  ],
+  "outputs": [
+    {
+      "path": "analysis/gb1_al96_report_20260821/outputs/results_showcase/figures/kg_3features_base_fold2_fitness_trajectory.pdf",
+      "sha256": "116cc165536a676d3e655ad22907c53cb627846c662304030e83bb6cc7877664"
+    },
+    {
+      "path": "analysis/gb1_al96_report_20260821/outputs/results_showcase/figures/kg_3features_base_fold2_fitness_trajectory.png",
+      "sha256": "2ed8fa015626fc9ec32e08a72349f8b82dd7384c8c774c3a1d243d43377f88ae"
+    },
+    {
+      "path": "analysis/gb1_al96_report_20260821/outputs/results_showcase/figures/kg_3features_base_fold2_fitness_trajectory.svg",
+      "sha256": "787879b43048600485b5b8dfb1210b0e76b426922fc59cdec3d860a63cd0542f"
+    },
+    {
+      "path": "analysis/gb1_al96_report_20260821/outputs/results_showcase/figures/kg_3features_base_fold2_fitness_trajectory.tiff",
+      "sha256": "3ea6721ae1d6ca1c291bc7e1975c984a13e2c1d5a01a2d0f340123e9489733f4"
+    },
+    {
+      "path": "analysis/gb1_al96_report_20260821/outputs/results_showcase/showcase_prompt_chain.json",
+      "sha256": "0c87bbbe5417b06b3d3b5016f30518591d00ae726608056acb120ca4e6ad88c8"
+    },
+    {
+      "path": "analysis/gb1_al96_report_20260821/outputs/results_showcase/source_data/showcase_fitness_trajectory.csv",
+      "sha256": "af9502dcefa55a5eef83af98c27baf7dc0d22897565f1ecf5907fe5b2e877802"
+    },
+    {
+      "path": "analysis/gb1_al96_report_20260821/outputs/results_showcase/source_data/showcase_sequences.csv",
+      "sha256": "de37d3932b7243d9e5cd7f041ab99278e1e2f48a786cf6f6513e71f8049d1f23"
+    },
+    {
+      "path": "analysis/gb1_al96_report_20260821/outputs/results_showcase/source_data/showcase_top5_by_round.csv",
+      "sha256": "f70804072404add557a83369b74c04ba098e8e6040666b546d1cce3f43b3243b"
+    },
+    {
+      "path": "docs/GB1实验报告-附件D-结果展示-20260821.md",
+      "sha256": "f266d2c27d38cc45dff24ff765624b214a67517697348cbb98cf4c0c74e4cd4e"
+    }
+  ],
+  "selected_condition": "kg_3features_base",
+  "selected_fold": 2,
+  "selected_run_id": "knowledge_agent-s11-f02-GB1-hierarchical-kg_3features_base-f02-20260821T111821854847Z",
+  "selection_rule": {
+    "condition": "highest three-fold mean final_best_seen among Agent conditions; best_seen_aulc tie-break",
+    "representative_fold": "highest final_best_seen within selected condition; best_seen_aulc tie-break",
+    "top_k": "first 5 final selection_order entries per round"
+  }
+}
