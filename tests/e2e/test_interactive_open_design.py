@@ -110,6 +110,95 @@ def _write_config(tmp_path: Path) -> Path:
     return experiment_path
 
 
+def _write_prior_free_config(tmp_path: Path) -> Path:
+    task_path = tmp_path / "task.yaml"
+    task_path.write_text(
+        yaml.safe_dump(
+            {
+                "task_id": "tiny_open_prior_free",
+                "protein_id": "tiny_open",
+                "assay_id": "tiny_assay",
+                "wild_type_sites": "CD",
+                "mutable_positions": [2, 3],
+                "objective": "提高目标结合能力",
+                "without_prior": True,
+                "reference_sequence": "ACDE",
+                "sequence_position_offset": 1,
+                "numbering_scheme": "one_based",
+            }
+        ),
+        encoding="utf-8",
+    )
+    model_path = tmp_path / "model.yaml"
+    model_path.write_text(
+        yaml.safe_dump(
+            {
+                "name": "onehot_heterogeneous_ensemble",
+                "feature_provider": "full_sequence_onehot",
+                "ridge_members": 2,
+                "extra_trees_estimators": 12,
+                "capabilities": {
+                    "supports_full_sequence": True,
+                    "supports_generated_sequences": True,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    knowledge_path = tmp_path / "knowledge.yaml"
+    knowledge_path.write_text(
+        yaml.safe_dump(
+            {"physchem": False, "conservation": False, "structure": False, "kg": False}
+        ),
+        encoding="utf-8",
+    )
+    experiment_path = tmp_path / "experiment.yaml"
+    experiment_path.write_text(
+        yaml.safe_dump(
+            {
+                "mode": "knowledge_agent",
+                "seed": 7,
+                "rounds": 1,
+                "budget_per_round": 8,
+                "candidate_limit": 0,
+                "acquisition": "greedy",
+                "ucb_beta": 1.0,
+                "diversity_lambda": 0.1,
+                "task_config": str(task_path),
+                "model_config": str(model_path),
+                "knowledge_config": str(knowledge_path),
+                "output_root": str(tmp_path / "runs"),
+                "llm_provider": "mock",
+                "knowledge_enabled": False,
+                "designer": {
+                    "space": "open_design",
+                    "position_policy": "all",
+                    "mutation_depth": 1,
+                },
+                "generation": {"selection_driver": "active_learning"},
+                "active_learning": {"enabled": False},
+            }
+        ),
+        encoding="utf-8",
+    )
+    return experiment_path
+
+
+def test_prior_free_config_runs_knowledge_only_via_service(tmp_path: Path) -> None:
+    service = EvolutionApplicationService(_write_prior_free_config(tmp_path))
+    preview = service.preview("希望提高结合能力，开放全部位置，输出 4 条", sequence_text="ACDE")
+
+    assert preview.ready_for_confirmation
+    assert preview.initial_data_source == "none_prior_free"
+
+    result = service.run(preview.preview_id, confirmed=True)
+
+    assert result.summary["posterior_enabled"] is False
+    assert result.summary["initial_data_source"] == "none_configured"
+    assert result.summary["selected_count"] == 4
+    assert result.summary["critic_verdict"] == "APPROVE"
+
+
 def test_intent_parser_understands_all_include_and_exclude() -> None:
     parser = DeterministicEvolutionIntentParser()
     all_intent = parser.parse("希望对 ACDEFG 进行定向进化，提高活性，开放全部位置")
