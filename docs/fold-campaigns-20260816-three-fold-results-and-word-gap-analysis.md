@@ -2,7 +2,7 @@
 
 > 分析日期：2026-08-17  
 > 测试产物：[fold-campaigns-20260816T140055Z](../artifacts/fold-campaigns-20260816T140055Z/)  
-> 目标材料：[张强-AI4S笔试.docx](../张强-AI4S笔试.docx)  
+> 目标基线：当前代码库（见 [README](../README.md) 与实验配置）  
 > 当前系统路径：KG-LLM + GP 覆盖不确定性生成 → Kermut 后置 dry validation → wet validation → ReThink → 更新 KG
 
 ## Material Passport
