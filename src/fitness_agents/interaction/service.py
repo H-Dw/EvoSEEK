@@ -274,7 +274,14 @@ class EvolutionApplicationService:
             initial_data_source=(
                 "initial_observations"
                 if self.base_config.task.initial_observations_path is not None
-                else "configured_visible_fold"
+                else (
+                    "configured_visible_fold"
+                    if (
+                        self.base_config.task.split_root is not None
+                        or self.base_config.task.public_data_path is not None
+                    )
+                    else "none_prior_free"
+                )
             ),
             ready_for_confirmation=ready,
             blockers=tuple(dict.fromkeys(blockers)),

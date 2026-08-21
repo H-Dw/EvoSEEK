@@ -1,0 +1,106 @@
+# Condition preset: three feature channels (physchem / conservation / structure)
+# on top of the base observation KG, without document RAG.
+#
+# Requirements on the task config:
+# - structure channel: uncomment and adapt structure_resources in the task YAML.
+# - conservation channel: set providers.conservation.a3m_path below to an MSA in
+#   A3M format aligned to the reference sequence (GB1 example:
+#   examples/gb1/gb1_precomputed.a3m). If no MSA is configured the channel reports
+#   unavailable evidence instead of failing (missing_policy: unavailable).
+physchem: true
+conservation: true
+structure: true
+kg: true
+soft_weight: 0.20
+legacy_mode: false
+legacy_contributes_to_selection: false
+fusion_mode: independent_features
+parameter_set_id: custom-protein-knowledge:v1
+local_knowledge:
+  enabled: false
+providers:
+  physchem:
+    kind: aaindex_delta
+    resource_path: configs/resources/aaindex_minimal.yaml
+    contributes_to_selection: true
+    calibration: visible_linear
+    minimum_calibration_samples: 8
+    missing_policy: fail
+  conservation:
+    kind: msa_profile
+    # a3m_path: examples/gb1/gb1_precomputed.a3m
+    contributes_to_selection: false
+    calibration: none
+    missing_policy: unavailable
+    options:
+      identity_threshold: 0.8
+      pseudocount: 0.5
+      minimum_neff: 16.0
+      minimum_sequence_coverage: 0.7
+      maximum_sequence_gap_fraction: 0.5
+  structure:
+    kind: static_structure
+    contributes_to_selection: false
+    calibration: none
+    missing_policy: unavailable
+    options:
+      contact_cutoff_angstrom: 5.0
+      interface_cutoff_angstrom: 5.0
+      hbond_cutoff_angstrom: 3.5
+      salt_bridge_cutoff_angstrom: 4.0
+      sasa_probe_radius_angstrom: 1.4
+      sasa_sphere_points: 96
+      dense_contact_count: 12
+      clash_distance_fraction: 0.75
+      disulfide_sg_cutoff_angstrom: 2.3
+  kg:
+    kind: observation_association
+    contributes_to_selection: true
+    calibration: none
+# The observation-KG scorer fails closed unless these four parameters are
+# explicitly configured and versioned; values mirror the GB1 presets.
+parameters:
+  kg.shrinkage_pseudocount:
+    value: 3.0
+    category: scientific
+    status: expert_prior
+    learnable: true
+    bounds: [0.1, 100.0]
+    transform: log
+    update_policy: round_boundary_only
+    min_evidence: 32
+    source: project_prior_pending_calibration
+    version: custom-protein-knowledge:v1
+  kg.confidence_base:
+    value: 0.25
+    category: policy
+    status: expert_prior
+    learnable: true
+    bounds: [0.0, 1.0]
+    transform: logit
+    update_policy: round_boundary_only
+    min_evidence: 32
+    source: project_prior_pending_calibration
+    version: custom-protein-knowledge:v1
+  kg.support_gain:
+    value: 0.03
+    category: policy
+    status: expert_prior
+    learnable: true
+    bounds: [0.0001, 0.5]
+    transform: log
+    update_policy: round_boundary_only
+    min_evidence: 32
+    source: project_prior_pending_calibration
+    version: custom-protein-knowledge:v1
+  kg.confidence_cap:
+    value: 0.85
+    category: policy
+    status: expert_prior
+    learnable: true
+    bounds: [0.01, 0.999]
+    transform: logit
+    update_policy: round_boundary_only
+    min_evidence: 32
+    source: project_prior_pending_calibration
+    version: custom-protein-knowledge:v1

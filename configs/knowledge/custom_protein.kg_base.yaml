@@ -1,0 +1,97 @@
+# Condition preset: kg_base (default). Base observation KG only: the knowledge
+# runtime exposes assay observations from the prior dataset, with the three
+# feature channels (physchem / conservation / structure) and document RAG off.
+#
+# This preset needs no structure file and no MSA. The inactive options are kept
+# below as commented placeholders: to activate one later, flip its channel flag
+# to true and uncomment the matching block, filling in the referenced file path.
+physchem: false
+conservation: false
+structure: false
+kg: true
+soft_weight: 0.20
+legacy_mode: false
+legacy_contributes_to_selection: false
+fusion_mode: independent_features
+parameter_set_id: custom-protein-knowledge:v1
+
+# Document RAG is off by default. To activate it, set enabled: true and provide
+# a prebuilt corpus index path (or pass --local-knowledge-index at the CLI);
+# configs/knowledge/custom_protein.kg_base_rag.yaml shows the full block.
+local_knowledge:
+  enabled: false
+  # corpus_mode: read_only_prebuilt
+  # corpus_index_path: /path/to/corpus.sqlite
+
+providers:
+  kg:
+    kind: observation_association
+    contributes_to_selection: true
+    calibration: none
+  # Inactive feature-channel providers; uncomment together with the channel
+  # flags above. See custom_protein.3channels.yaml for the complete versions.
+  # physchem:
+  #   kind: aaindex_delta
+  #   resource_path: configs/resources/aaindex_minimal.yaml
+  #   contributes_to_selection: true
+  #   calibration: visible_linear
+  #   minimum_calibration_samples: 8
+  #   missing_policy: fail
+  # conservation:
+  #   kind: msa_profile
+  #   a3m_path: /path/to/your.a3m  # MSA aligned to the reference sequence
+  #   contributes_to_selection: false
+  #   calibration: none
+  #   missing_policy: unavailable
+  # structure:
+  #   kind: static_structure  # also requires structure_resources in the task YAML
+  #   contributes_to_selection: false
+  #   calibration: none
+  #   missing_policy: unavailable
+# The observation-KG scorer fails closed unless these four parameters are
+# explicitly configured and versioned; values mirror the GB1 presets.
+parameters:
+  kg.shrinkage_pseudocount:
+    value: 3.0
+    category: scientific
+    status: expert_prior
+    learnable: true
+    bounds: [0.1, 100.0]
+    transform: log
+    update_policy: round_boundary_only
+    min_evidence: 32
+    source: project_prior_pending_calibration
+    version: custom-protein-knowledge:v1
+  kg.confidence_base:
+    value: 0.25
+    category: policy
+    status: expert_prior
+    learnable: true
+    bounds: [0.0, 1.0]
+    transform: logit
+    update_policy: round_boundary_only
+    min_evidence: 32
+    source: project_prior_pending_calibration
+    version: custom-protein-knowledge:v1
+  kg.support_gain:
+    value: 0.03
+    category: policy
+    status: expert_prior
+    learnable: true
+    bounds: [0.0001, 0.5]
+    transform: log
+    update_policy: round_boundary_only
+    min_evidence: 32
+    source: project_prior_pending_calibration
+    version: custom-protein-knowledge:v1
+  kg.confidence_cap:
+    value: 0.85
+    category: policy
+    status: expert_prior
+    learnable: true
+    bounds: [0.01, 0.999]
+    transform: logit
+    update_policy: round_boundary_only
+    min_evidence: 32
+    source: project_prior_pending_calibration
+    version: custom-protein-knowledge:v1

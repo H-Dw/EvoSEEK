@@ -91,9 +91,54 @@ python -m pytest tests/unit -q
 
 `check_environment.py` prints the Python version, platform, and core package versions. The unit tests need no API key and do not depend on external data downloads.
 
-Data and model assets are still prepared per §2 and §3; the default `python scripts/run_demo.py` requires `[llm]`, `[kermut]`, `DEEPSEEK_API_KEY` in `.env`, and Kermut's conditional-probability / coordinate files.
+Data and model assets are still prepared per §3 and §4; the default `python scripts/run_demo.py` requires `[llm]`, `[kermut]`, `DEEPSEEK_API_KEY` in `.env`, and Kermut's conditional-probability / coordinate files.
 
-## 2. Data Download and Preparation
+## 2. Quick Start: Single-Protein Inference
+
+To run inference on a single test protein you can skip data downloads, fold manifests, and the oracle entirely. The open-design runner enumerates every single substitution of a user-supplied reference sequence and ranks the generated sequences — from knowledge-graph evidence alone in the default kg_base preset, or with a calibrated posterior fitted on your prior labels when active-learning mode is enabled. All inputs — sequence, optional structure, optional MSA, prior knowledge, and the RAG corpus — are specified as paths inside YAML configs; the CLI takes no sequence input.
+
+Copy and edit the three template configs (GB1 values illustrate the expected format; replace them with your protein):
+
+| Config | Template | What you provide |
+|---|---|---|
+| Task | `configs/task/custom_protein.template.yaml` | `reference_sequence` / `reference_sequence_path` (exactly one), `mutable_positions` + `wild_type_sites`, optional `structure_resources`, and — when your condition consumes prior knowledge — `initial_observations_path` pointing to your prior-knowledge CSV |
+| Knowledge | `configs/knowledge/custom_protein.kg_base.yaml` (default) | Condition semantics via channel switches; `providers.conservation.a3m_path` for an optional MSA; the `local_knowledge` block for optional RAG |
+| Experiment | `configs/experiments/custom_protein_open_design.yaml` | The open-design constraints are pre-filled; select the knowledge preset via `knowledge_config` |
+
+No prior data is needed for the default kg_base preset (knowledge-only ranking): the task template sets `without_prior: true` (open_design only), which lets the config load with no measurement source, and combining it with `active_learning.enabled: true` is rejected at config load. Provide the prior-knowledge CSV only when your condition consumes priors — i.e. active-learning mode (`active_learning.enabled: true` in the experiment YAML, kg_base_al-style, with `without_prior` removed): then `initial_observations_path` must point to a CSV with at least 4 labeled rows (8 or more recommended for posterior calibration). The CSV needs the columns `variant_id,variant,fitness` (or `target`); `variant` may be a full-length sequence or a compact per-site code such as `VDGV`. A format example is at `examples/custom_protein/prior_observations.example.csv`.
+
+The templates ship as an unrestricted evolution-suggestion example: every position of the reference sequence is open (`position_policy: all`), and no prior labels, structure file, or MSA file are required. The Scientist calls the real DeepSeek API via `configs/llm/deepseek.yaml` (set `DEEPSEEK_API_KEY` in `.env` first):
+
+```bash
+python -m fitness_agents.cli configs/experiments/custom_protein_open_design.yaml \
+  --condition kg_base \
+  --output-root artifacts/runs
+```
+
+Use this command for unrestricted evolution suggestions. If you later need restrictions — a fixed mutable position set, a prior-knowledge CSV, a structure file, an MSA, or a RAG corpus — fill in the file paths at the corresponding commented locations in the configs instead of deleting anything: `designer.include_positions` in `configs/experiments/custom_protein_open_design.yaml`, `structure_resources` / `initial_observations_path` in `configs/task/custom_protein.template.yaml`, and the channel provider blocks / `local_knowledge` block in `configs/knowledge/custom_protein.kg_base.yaml` (plus `active_learning.enabled: true` for prior-based posterior fitting).
+
+The condition is chosen by the knowledge YAML, not by `--condition` (which only labels the run):
+
+| Knowledge preset | Condition semantics |
+|---|---|
+| `custom_protein.kg_base.yaml` | Base observation KG only (default) |
+| `custom_protein.kg_base_rag.yaml` | Base KG + document RAG |
+| `custom_protein.3channels.yaml` | Base KG + physchem/conservation/structure channels; requires `structure_resources` in the task YAML and an MSA at `providers.conservation.a3m_path` |
+| `knowledge_enabled: false` in the experiment YAML | agent_only: knowledge runtime fully ablated |
+
+For RAG, build the corpus index once (with `knowledge_config` switched to the RAG preset), then run against the prebuilt index; the index path can be overridden per run:
+
+```bash
+python -m fitness_agents.cli knowledge index configs/experiments/custom_protein_open_design.yaml
+python -m fitness_agents.cli configs/experiments/custom_protein_open_design.yaml \
+  --local-knowledge-index /path/to/corpus.sqlite
+```
+
+CLI parameters: `config` (experiment YAML, positional), `--condition` (run label), `--output-root`, `--seed`, `--local-knowledge-index` / `--local-knowledge-overlay` (RAG corpus/overlay override), `--output-top-k`. Each run writes a directory under the output root containing `ranked_candidates.csv`, `selected_candidates.csv`/`.fasta`, `knowledge_graph.sqlite`, `knowledge/evidence.json`, and `summary.json`.
+
+Limits of this path: one-shot ranking only (no multi-round oracle loop), single substitutions only (`mutation_depth: 1`), posterior fitness estimates are produced only in active-learning mode (`active_learning.enabled: true`, which requires at least 4 labeled priors; the default kg_base preset outputs knowledge-composite scores with fitness fields left as NaN), and the posterior predictor must support generated full sequences — the default `full_sequence_onehot` does, while a Kermut config requires an explicit `capabilities` declaration (see §7.2).
+
+## 3. Data Download and Preparation
 
 The download script pins a verified `J-SNACKKB/FLIP` commit and checks the archive SHA-256; if the pinned address is unavailable it falls back to the same repo's `main`, but any fallback file must still pass the same verification:
 
@@ -125,7 +170,7 @@ Each dataset is split into `*_public.csv` and `*_oracle.csv`. The public file co
 
 The raw GB1 measurements are CC BY 4.0; the FLIP derivative files and splits are AFL-3.0. Sources and statistics are written to `data/demo/data_manifest.json`.
 
-### 2.1 Official five-fold dataset splits
+### 3.1 Official five-fold dataset splits
 
 The `prepare_gb1.py` above is retained for the old demo. The official closed loop and OOD experiments use a manifest-driven split; a single command must generate `fold_00` through `fold_04`, rather than treating five random seeds as five folds.
 
@@ -187,7 +232,7 @@ python scripts/data/validate_data.py \
 
 Output is capability-isolated into `agent/`, `controller/`, `oracle/`, and `evaluator/`. Candidate files have no target; queryable labels exclude final-test IDs; an existing directory is reused only when source/config/code match.
 
-## 3. Model and Structure Assets
+## 4. Model and Structure Assets
 
 The default model is trained in-place from visible GB1 labels; there are no external pretrained weights. You should still run the model preparation script to generate a traceable manifest:
 
@@ -204,7 +249,7 @@ python scripts/models/download_models.py --profile structure
 
 This downloads RCSB 5LDE and records the source and SHA-256. AlphaFold, Boltz, Rosetta, SaProt, or Kermut can later be plugged in through the `EvidenceProvider` / `FitnessPredictor` registries. The current structure channel is a versioned 5LDE site-risk prior; it does not equate ipTM with binding affinity or experimental fitness.
 
-### 4.1 Local RAG vector retrieval and KG materialization diagnostics
+### 5.1 Local RAG vector retrieval and KG materialization diagnostics
 
 The default config uses an English atomic-fact corpus with FTS5 + BGE dense hybrid retrieval. The general corpus/vector index lives at `artifacts/local_knowledge/corpus/directed_evolution-v4.sqlite`; the GB1 leak policy and query audit live separately in `artifacts/local_knowledge/overlays/gb1.sqlite` and never write target state back to the general vector store. Explicitly install dependencies and download a pinned revision before the first run; the campaign runtime does not touch the network:
 
@@ -239,7 +284,7 @@ python \
 
 Retrieval chunks only generate an unsorted `context:<protein>` context. If you later enable `contributes_to_selection=true`, you must also use `calibrated_candidate_projection` and a `status: validated` candidate-level calibration file; a draft example is at `configs/knowledge/local_rag_selection.example.yaml` and is rejected by default.
 
-### 4.2 API embedding and reranker
+### 5.2 API embedding and reranker
 
 Remote vectorization goes through a standalone YAML config; no keys are stored in the repo. The default example is Qwen `text-embedding-v4`; there are also Jina v5, TEI-hosted BGE-M3/E5, and Qwen/Jina/BGE reranker examples, all under `configs/knowledge/api/`. Copy the example first, replace the workspace/host in the endpoint, then supply the key via environment variable:
 
@@ -271,9 +316,9 @@ reranker_api_config: configs/knowledge/api/reranker.qwen3.example.yaml
 
 Returned API vectors are checked for count, order, dimension, finiteness, and zero vectors, and L2-normalized locally; silent server-side truncation is forbidden. The manifest records provider, model family, model/deployment version, endpoint hash, task/instruction, dimension, and tokenizer policy, but never the API key.
 
-The `directed_evolution-qwen-v4.sqlite` from §4.2 only covers the directed_evolution corpus and is used by `knowledge_agent_qwen_rag`. The Hierarchical Scientist's RAG condition needs a separate shared index containing binding claims — see §4.3.
+The `directed_evolution-qwen-v4.sqlite` from §5.2 only covers the directed_evolution corpus and is used by `knowledge_agent_qwen_rag`. The Hierarchical Scientist's RAG condition needs a separate shared index containing binding claims — see §5.3.
 
-### 4.3 Shared Qwen corpus index for the official matrix
+### 5.3 Shared Qwen corpus index for the official matrix
 
 Parallel RAG workers read a single prebuilt Qwen corpus index and each write their own per-condition/fold overlay; building on the fly is forbidden. The key is read from `DASHSCOPE_API_KEY` in `.env` (§1.7).
 
@@ -290,9 +335,9 @@ python -m fitness_agents.cli knowledge inspect \
   configs/experiments/gb1_reasoning_routes_base.yaml
 ```
 
-`inspect` should print corpus statistics. Do not copy or rename the §4.2 `directed_evolution-qwen-v4.sqlite` into `gb1-reasoning-routes-qwen-v4.sqlite`: the two indexes differ in roots, chunks, and embedding manifest.
+`inspect` should print corpus statistics. Do not copy or rename the §5.2 `directed_evolution-qwen-v4.sqlite` into `gb1-reasoning-routes-qwen-v4.sqlite`: the two indexes differ in roots, chunks, and embedding manifest.
 
-The Qwen knowledge-agent AL96 (`run_agent_baselines.py --modes knowledge_agent_qwen_rag`) still uses the §4.2 `directed_evolution-qwen-v4.sqlite`. If that file does not yet exist, build it with the same DashScope key:
+The Qwen knowledge-agent AL96 (`run_agent_baselines.py --modes knowledge_agent_qwen_rag`) still uses the §5.2 `directed_evolution-qwen-v4.sqlite`. If that file does not yet exist, build it with the same DashScope key:
 
 ```bash
 python -m fitness_agents.cli knowledge index \
@@ -301,7 +346,7 @@ python -m fitness_agents.cli knowledge inspect \
   configs/experiments/knowledge_agent_qwen_al96.yaml
 ```
 
-## 5. Baselines
+## 6. Baselines
 
 All baselines share the same initial/validation/oracle/final split, query budget, fitness predictor, and seed. Main comparisons use the greedy predictor mean to avoid mis-attributing UQ-strategy gains to the Agent; UCB is evaluated separately in ablation.
 
@@ -310,11 +355,11 @@ All baselines share the same initial/validation/oracle/final split, query budget
 | Random | All unobserved candidates | Random |
 | Fitness model direct | All unobserved candidates | predictor top-μ |
 
-### 5.1 GB1-AL96 parallel baselines (`run_agent_baselines.py`)
+### 6.1 GB1-AL96 parallel baselines (`run_agent_baselines.py`)
 
-`scripts/run_baselines.py` runs the demo/full four-mode serially by seed. For the official AL96 five-fold loop use `scripts/run_agent_baselines.py`: each `(mode, seed, fold)` is an independent process and can be parallelized with `--max-parallel`. First generate `GB1-AL96-5CV-v1` per §2.1 and install `[llm]` and `[kermut]`.
+`scripts/run_baselines.py` runs the demo/full four-mode serially by seed. For the official AL96 five-fold loop use `scripts/run_agent_baselines.py`: each `(mode, seed, fold)` is an independent process and can be parallelized with `--max-parallel`. First generate `GB1-AL96-5CV-v1` per §3.1 and install `[llm]` and `[kermut]`.
 
-`random` / `fitness_direct` do not call the LLM and do not enable RAG or KG tools. Scientist-style modes need `DEEPSEEK_API_KEY`. `knowledge_agent_qwen_rag` additionally needs `DASHSCOPE_API_KEY` and the §4.2 Qwen index.
+`random` / `fitness_direct` do not call the LLM and do not enable RAG or KG tools. Scientist-style modes need `DEEPSEEK_API_KEY`. `knowledge_agent_qwen_rag` additionally needs `DASHSCOPE_API_KEY` and the §5.2 Qwen index.
 
 Inspect the schedule (no campaign launch):
 
@@ -350,9 +395,9 @@ nohup python scripts/run_agent_baselines.py \
 
 Named sets such as `--comparison rag`, `agents`, `llm_vs_qwen_rag` are defined in `COMPARISON_SETS` inside the script. Artifacts are written to `artifacts/agent-baselines-<timestamp>/` (`schedule.json`, `job_logs/`, `report.json`, `aggregate/`). `--folds config` (default) follows each YAML's `fold_index`; for official three-fold comparison pass `--folds 0,1,2` explicitly.
 
-Kermut config is at `configs/model/kermut.yaml` (`device: cuda:0`). Launch inside the conda env `EvoSEEK` (§6.1). With `--max-parallel 3` or `4`, add `--cuda-devices 0,1,2,3` (the default `auto` also allocates by visible card count) so concurrent jobs each occupy one card. Do not saturate the same GPUs simultaneously with the §16 Hierarchical Scientist.
+Kermut config is at `configs/model/kermut.yaml` (`device: cuda:0`). Launch inside the conda env `EvoSEEK` (§7.1). With `--max-parallel 3` or `4`, add `--cuda-devices 0,1,2,3` (the default `auto` also allocates by visible card count) so concurrent jobs each occupy one card. Do not saturate the same GPUs simultaneously with the §16 Hierarchical Scientist.
 
-### 6.1 Install the Kermut backend
+### 7.1 Install the Kermut backend
 
 The core environment does not force-install PyTorch. When Kermut is needed, first check the **CUDA Version** in the top-right of `nvidia-smi` (this is the highest toolkit the driver supports, not the `nvcc` version), then install a matching PyTorch. Then install GPyTorch and `fair-esm`. Kermut's composite kernel and Exact-GP core are already included in the project; no upstream Kermut wheel needs to be installed separately.
 
@@ -369,7 +414,7 @@ Kermut also needs two assay/protein-specific external resources that the project
 - ProteinMPNN conditional amino-acid probabilities, shaped `L × 20`;
 - Protein C-alpha coordinates, shaped `L × 3`.
 
-### 6.2 Configure GB1 fitness scoring
+### 7.2 Configure GB1 fitness scoring
 
 Edit [`configs/model/kermut.yaml`](configs/model/kermut.yaml) and set at least the two resource paths:
 
@@ -435,7 +480,7 @@ python scripts/run_hierarchical_scientist.py \
 
 Use `--max-parallel 1` on a single GPU or when memory is tight. When the card count is below the parallelism, the scheduler exits directly rather than letting two ESM-2 650M models crowd the same 3090.
 
-### 6.3 Live sequences and fixed candidate pools
+### 7.3 Live sequences and fixed candidate pools
 
 The open sequence space uses live mode. The system caches the ESM-2 embedding and, per WT site, the masked-marginal:
 
@@ -469,7 +514,7 @@ The NPZ must contain `variant_ids` or `sequences`, plus `embeddings` and `zero_s
 
 The knowledge-enhanced Agent queries the KG by default through the controlled `AgentKnowledgeGraphTool` rather than executing arbitrary SQL. `hypothesis_context` returns only observations revealed before the current round, plus current-round results explicitly marked as prediction/evidence; every query is written to `agent_queries`, enabling round history, reasoning traceability, and ablation. A future Mutation Designer or Scientific Critic can reuse `explain_variant` to obtain a single candidate's sequence, prediction, and evidence context.
 
-## 7. Project Structure
+## 8. Project Structure
 
 ```text
 configs/                  task/model/experiment/knowledge/ablation configs
@@ -494,7 +539,7 @@ tests/                     unit/integration/leakage/e2e
 services/structure/        optional GPU sidecar interface contract
 ```
 
-## 8. Known Limitations
+## 9. Known Limitations
 
 - Demo results are hidden-label simulations, not new wet-lab conclusions;
 - The 5LDE site-risk is a lightweight prior and does not replace variant structure prediction or free-energy calculation;
@@ -502,7 +547,7 @@ services/structure/        optional GPU sidecar interface contract
 - Small-sample KG residue aggregates may be confounded by epistasis, so fitness is always bound to the full variant, assay, and observation;
 - Official conclusions should use paired seeds, bootstrap confidence intervals, and multiple-comparison correction.
 
-## 9. Hierarchical Scientist Official Matrix
+## 10. Hierarchical Scientist Official Matrix
 
 `scripts/run_hierarchical_scientist.py` runs four condition groups on the first three folds of GB1-AL96. Scientist / Critic go through DeepSeek; RAG embedding / reranker go through Qwen; fitness is Kermut. The Agent-UQ condition does not mix fitness into acquisition; `kg_base_al` uses the explicit Kermut posterior. `--placeholder-predictor` is rejected.
 
@@ -544,7 +589,7 @@ nohup python scripts/run_hierarchical_scientist.py \
 
 Artifacts are written to `artifacts/hierarchical-scientist-<timestamp>/` (`schedule.json`, `fold_logs/`, `report.json`, `aggregate/`). Watch the overall log at `hierarchical_scientist.log`; watch a single job at `fold_logs/<condition>-fXX-sYY.stderr.log`.
 
-If you only run the two RAG-independent groups, you can defer the §4.3 index:
+If you only run the two RAG-independent groups, you can defer the §5.3 index:
 
 ```bash
 nohup python scripts/run_hierarchical_scientist.py \
@@ -554,7 +599,7 @@ nohup python scripts/run_hierarchical_scientist.py \
   > hierarchical_scientist_base.log 2>&1 &
 ```
 
-## 10. Interactive Interface
+## 11. Interactive Interface
 
 Install the local Gradio UI extra (referenced in §1.3):
 
@@ -563,10 +608,10 @@ conda activate EvoSEEK
 python -m pip install -e ".[ui]"
 ```
 
-Launch the interactive web interface backed by a knowledge-agent experiment config:
+Launch the interactive web interface backed by the §2 unrestricted single-protein config:
 
 ```bash
-evoseek serve configs/experiments/knowledge_agent_open_design.yaml --host 127.0.0.1 --port 7860
+evoseek serve configs/experiments/custom_protein_open_design.yaml --host 127.0.0.1 --port 7860
 ```
 
-This starts a Gradio server bound to `127.0.0.1:7860`. Open the printed URL in your browser to drive the Design → Score → Select → Test → Learn loop through the UI. The served experiment must define a valid `model_config` and knowledge/RAG settings; see §6.2 and §4 for configuration details.
+The UI shares the CLI's open-design path and its configuration: the real DeepSeek API (no mock/placeholder calls; set `DEEPSEEK_API_KEY` in `.env`), all reference positions open, and no prior/structure/MSA files required. A natural-language request is compiled into a structured preview — reference check, resolved positions, budget, model capabilities — and the same `OpenDesignRunner` as the CLI executes only after you confirm. To serve restricted variants later, point `serve` at a copy of the config with the commented paths filled in (see §2). This starts a Gradio server bound to `127.0.0.1:7860`; open the printed URL in your browser. For model and knowledge/RAG settings see §7.2 and §5.

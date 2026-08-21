@@ -1,0 +1,96 @@
+# Single-protein open-design inference template. Runs one-shot inference for a
+# user-specified protein: the runner enumerates every single substitution of the
+# reference sequence and ranks the generated sequences. With active_learning
+# disabled (default) ranking uses knowledge evidence alone and needs no labeled
+# priors; enabling it fits a calibrated posterior on the prior CSV (>=4 labeled
+# rows required). There is no oracle, no fold split, and no candidate pool; all
+# inputs come from the referenced task/knowledge YAMLs.
+#
+# Condition semantics are selected by the knowledge_config preset:
+#   configs/knowledge/custom_protein.kg_base.yaml      (default: base KG only)
+#   configs/knowledge/custom_protein.kg_base_rag.yaml  (base KG + document RAG)
+#   configs/knowledge/custom_protein.3channels.yaml    (KG + physchem/conservation/structure)
+# For a fully ablated agent_only run, set knowledge_enabled: false below.
+mode: knowledge_agent
+seed: 11
+rounds: 1
+budget_per_round: 16
+# open_design requires candidate_limit: 0; the generated sequence space is never
+# truncated by a pool budget.
+candidate_limit: 0
+acquisition: greedy
+ucb_beta: 1.5
+diversity_lambda: 0.10
+task_config: configs/task/custom_protein.template.yaml
+# The posterior must support generated full sequences. The default below is the
+# CPU-friendly full-sequence one-hot ensemble; a Kermut config must explicitly
+# declare capabilities.supports_generated_sequences to be usable here.
+model_config: configs/model/full_sequence_onehot.yaml
+knowledge_config: configs/knowledge/custom_protein.kg_base.yaml
+output_root: artifacts/runs
+# Scientist runs through the real DeepSeek API. Set DEEPSEEK_API_KEY in .env
+# (never in YAML); model, budgets, and retry policy live in the referenced file.
+llm_config: configs/llm/deepseek.yaml
+knowledge_enabled: true
+condition: kg_base
+
+designer:
+  space: open_design
+  # Default is unrestricted: every position of the reference sequence is open.
+  # To restrict the mutable region later, switch to include and uncomment
+  # include_positions with your position list.
+  position_policy: all
+  # position_policy: include
+  # include_positions: [39, 40, 41, 54]
+  proposer: all_position_substitution
+  allowed_residues: [A, C, D, E, F, G, H, I, K, L, M, N, P, Q, R, S, T, V, W, Y]
+  # To forbid specific positions while keeping the rest open, uncomment:
+  # position_policy: all_except
+  # exclude_positions: [10, 11]
+  mutation_depth: 1
+  max_preferred_positions: 12
+  hypothesis_prior_weight: 0.20
+  structure_constraint_weight: 0.20
+
+generation:
+  # open_design requires the active_learning driver so posterior uncertainty
+  # participates in residue selection.
+  selection_driver: active_learning
+  use_fitness_predictors: false
+
+active_learning:
+  # Disabled by default (kg_base semantics): knowledge-only ranking, no labeled
+  # priors required. Set enabled: true for active-learning mode (kg_base_al-style)
+  # and provide a prior CSV via task initial_observations_path; the posterior
+  # then requires at least 4 labeled rows (8+ recommended for calibration).
+  enabled: false
+  module: lightweight_calibrated_hybrid
+  posterior:
+    plugin: visible_holdout_ensemble
+    predictor_models:
+      - configs/model/full_sequence_onehot.yaml
+    calibration_fraction: 0.20
+    # Lower min_training_size / min_calibration_size only for small prior sets.
+    min_calibration_size: 8
+    min_training_size: 8
+    conformal_alpha: 0.10
+    min_std: 1.0e-6
+    variance_scale_bounds: [0.25, 4.0]
+    refit_full: true
+  acquisition:
+    plugin: hybrid_batch
+    exploitation_fraction: 0.50
+    exploration_fraction: 0.25
+    knowledge_fraction: 0.25
+    ucb_beta: 1.0
+    diversity_lambda: 0.10
+    ood_penalty: 0.25
+    knowledge_fitness_weight: 0.25
+    validation_prior_weight: 0.0
+
+validation:
+  enabled: false
+
+output:
+  artifacts: [json, csv, reasoning]
+  top_k: 16

@@ -17,6 +17,7 @@ PredictionSourceKind = Literal[
     "dry_validation",
     "active_posterior",
     "real_model",
+    "not_fitted",
 ]
 PredictionStatus = Literal["evaluated", "not_evaluated"]
 CalibrationStatus = Literal[

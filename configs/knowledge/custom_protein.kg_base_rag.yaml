@@ -1,0 +1,131 @@
+# Condition preset: kg_base_rag. Base observation KG plus document RAG against a
+# prebuilt corpus index; the three feature channels stay off.
+#
+# Before running, build the corpus index once (see README section on local RAG):
+#   python -m fitness_agents.cli knowledge index <experiment-config>
+# The default retrieval below uses the local BGE embedding model; install the
+# [rag] extra and run scripts/setup_local_rag_models.py --model bge-small-en-v1.5
+# first, or switch embedding_backend/reranker_backend to api with a config from
+# configs/knowledge/api/. The corpus index path can also be overridden per run
+# with the CLI flag --local-knowledge-index /path/to/corpus.sqlite.
+physchem: false
+conservation: false
+structure: false
+kg: true
+soft_weight: 0.20
+legacy_mode: false
+legacy_contributes_to_selection: false
+fusion_mode: independent_features
+parameter_set_id: custom-protein-knowledge:v1
+local_knowledge:
+  enabled: true
+  corpus_mode: read_only_prebuilt
+  corpus_index_path: artifacts/local_knowledge/corpus/directed_evolution-v4.sqlite
+  retrieval_overlay_path: artifacts/local_knowledge/overlays/custom_protein.sqlite
+  allow_remote_context: false
+  roots:
+    - path: resources/local_knowledge/directed_evolution
+      root_id: DIRECTED_EVOLUTION
+      include: ["claims/**/*.md"]
+      exclude: ["**/~$*", "**/.git/**", "**/artifacts/**"]
+  ingestion:
+    parser: auto
+    required_language: en
+    chunk_tokens: 384
+    chunk_overlap: 32
+    max_file_mb: 50
+    follow_symlinks: false
+    extract_archives: false
+  retrieval:
+    mode: hybrid
+    lexical_backend: sqlite_fts5
+    dense_enabled: true
+    embedding_backend: local
+    embedding_model_path: models/embeddings/bge-small-en-v1.5
+    embedding_model_id: BAAI/bge-small-en-v1.5
+    embedding_model_revision: 5c38ec7c405ec4b44b94cc5a9bb96e735b38267a
+    embedding_query_prefix: "Represent this sentence for searching relevant passages: "
+    embedding_document_prefix: ""
+    allow_model_download: false
+    fusion: rrf
+    top_k: 8
+    lexical_candidates: 32
+    dense_candidates: 32
+    token_budget: 5000
+    max_chunks_per_document: 1
+    query_language: en
+    strict_query_language: true
+    minimum_dense_similarity: 0.50
+    require_dense_match_for_hybrid: true
+    instruction_content_policy: reject
+    dense_search_backend: numpy_exact
+    max_exact_dense_chunks: 50000
+    reranker_backend: none
+  kg_update:
+    enabled: true
+    materialization: retrieved_only
+    source_group: directed_evolution_library
+    max_claims_per_round: 32
+    contributes_to_selection: false
+    selection_mode: context_only
+  leakage_guard:
+    enabled: true
+    mode: generalize_and_filter
+    derive_protected_terms_from_task: true
+    protected_aliases: []
+    protected_accessions: []
+    strict_aliases_required: true
+    quarantine_target_documents: true
+    block_target_entities: true
+providers:
+  kg:
+    kind: observation_association
+    contributes_to_selection: true
+    calibration: none
+# The observation-KG scorer fails closed unless these four parameters are
+# explicitly configured and versioned; values mirror the GB1 presets.
+parameters:
+  kg.shrinkage_pseudocount:
+    value: 3.0
+    category: scientific
+    status: expert_prior
+    learnable: true
+    bounds: [0.1, 100.0]
+    transform: log
+    update_policy: round_boundary_only
+    min_evidence: 32
+    source: project_prior_pending_calibration
+    version: custom-protein-knowledge:v1
+  kg.confidence_base:
+    value: 0.25
+    category: policy
+    status: expert_prior
+    learnable: true
+    bounds: [0.0, 1.0]
+    transform: logit
+    update_policy: round_boundary_only
+    min_evidence: 32
+    source: project_prior_pending_calibration
+    version: custom-protein-knowledge:v1
+  kg.support_gain:
+    value: 0.03
+    category: policy
+    status: expert_prior
+    learnable: true
+    bounds: [0.0001, 0.5]
+    transform: log
+    update_policy: round_boundary_only
+    min_evidence: 32
+    source: project_prior_pending_calibration
+    version: custom-protein-knowledge:v1
+  kg.confidence_cap:
+    value: 0.85
+    category: policy
+    status: expert_prior
+    learnable: true
+    bounds: [0.01, 0.999]
+    transform: logit
+    update_policy: round_boundary_only
+    min_evidence: 32
+    source: project_prior_pending_calibration
+    version: custom-protein-knowledge:v1

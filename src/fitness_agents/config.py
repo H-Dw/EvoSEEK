@@ -48,6 +48,10 @@ class TaskConfig:
     public_data_path: Path | None = None
     oracle_data_path: Path | None = None
     initial_observations_path: Path | None = None
+    # without_prior marks a prior-free single-protein inference target: the task
+    # may then load without any measurement source (split_root, legacy
+    # public/oracle pair, or initial_observations_path).
+    without_prior: bool = False
     split_root: Path | None = None
     fold_index: int = 0
     expected_split_strategy: str | None = None
@@ -77,12 +81,18 @@ class TaskConfig:
                 "Task config cannot mix split_root, legacy public/oracle paths, and "
                 "initial_observations_path"
             )
-        if not uses_manifest and not uses_initial_only and not (
-            self.public_data_path is not None and self.oracle_data_path is not None
+        if (
+            not self.without_prior
+            and not uses_manifest
+            and not uses_initial_only
+            and not (
+                self.public_data_path is not None and self.oracle_data_path is not None
+            )
         ):
             raise ValueError(
                 "Task config requires split_root, initial_observations_path, or both "
-                "public_data_path and oracle_data_path"
+                "public_data_path and oracle_data_path (or set without_prior: true "
+                "for prior-free single-protein inference)"
             )
         if self.fold_index < 0:
             raise ValueError("fold_index must be non-negative")
@@ -1488,7 +1498,10 @@ class ExperimentConfig:
                     "an unmodified random draw or prediction Top-K"
                 )
         selected = self.generation.selection_driver == "active_learning"
-        if selected != self.active_learning.enabled:
+        # open_design always keeps the active_learning driver for residue
+        # selection, but active_learning.enabled=false requests knowledge-only
+        # ranking without a fitted posterior (no labeled priors required).
+        if selected != self.active_learning.enabled and self.designer.space != "open_design":
             raise ValueError(
                 "generation.selection_driver=active_learning and active_learning.enabled=true "
                 "must be configured together"
@@ -1535,6 +1548,17 @@ class ExperimentConfig:
             raise ValueError(
                 "structured_kg_snapshot_mode must be 'live_only' or 'incremental_ids'"
             )
+        if self.task.without_prior:
+            if self.designer.space != "open_design":
+                raise ValueError(
+                    "task.without_prior is only supported for designer.space=open_design"
+                )
+            if self.active_learning.enabled:
+                raise ValueError(
+                    "task.without_prior cannot be combined with active_learning.enabled=true: "
+                    "the posterior needs labeled priors, so either provide initial "
+                    "observations or disable active_learning"
+                )
         if self.designer.space == "open_design":
             if not (self.task.reference_sequence or self.task.reference_sequence_path):
                 raise ValueError("open_design requires a complete task reference sequence")

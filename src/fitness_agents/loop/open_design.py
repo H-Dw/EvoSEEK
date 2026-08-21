@@ -36,6 +36,7 @@ from fitness_agents.contracts.schemas import (
     CampaignState,
     Evidence,
     FitnessObservation,
+    Prediction,
     Variant,
 )
 from fitness_agents.data import load_open_design_initial_bundle
@@ -95,6 +96,21 @@ def _structure_constraint(evidence: Sequence[Evidence]) -> float:
         if item.channel == "structure" and item.quality_status == "ok"
     ]
     return -float(sum(risks))
+
+
+def _not_evaluated_prediction(variant_id: str) -> Prediction:
+    """Explicit no-posterior marker: NaN fitness fields, never a fitness estimate."""
+
+    nan = float("nan")
+    return Prediction(
+        variant_id=variant_id,
+        fitness_mean=nan,
+        fitness_std=nan,
+        interval_90=(nan, nan),
+        ood_score=nan,
+        component_scores={},
+        model_version="none:knowledge_only_no_posterior",
+    )
 
 
 class OpenDesignRunner:
@@ -157,17 +173,34 @@ class OpenDesignRunner:
         self.proposer = create_open_design_proposer(
             config.designer, self.computation_context, self.design_space
         )
+        # The posterior is fitted only in active-learning mode; with
+        # active_learning disabled the runner ranks generated sequences from
+        # knowledge evidence alone and needs no labeled observations at all.
+        self.posterior_enabled = bool(config.active_learning.enabled)
         if initial_variants is None:
-            initial = load_open_design_initial_bundle(
-                split_root=config.task.split_root,
-                fold_index=config.task.fold_index,
-                public_path=config.task.public_data_path,
-                oracle_path=config.task.oracle_data_path,
-                initial_path=config.task.initial_observations_path,
+            has_measurement_source = (
+                config.task.split_root is not None
+                or config.task.initial_observations_path is not None
+                or (
+                    config.task.public_data_path is not None
+                    and config.task.oracle_data_path is not None
+                )
             )
-            raw_variants = initial.variants
-            raw_observations = initial.observations
-            self.initial_data_source = initial.source
+            if has_measurement_source:
+                initial = load_open_design_initial_bundle(
+                    split_root=config.task.split_root,
+                    fold_index=config.task.fold_index,
+                    public_path=config.task.public_data_path,
+                    oracle_path=config.task.oracle_data_path,
+                    initial_path=config.task.initial_observations_path,
+                )
+                raw_variants = initial.variants
+                raw_observations = initial.observations
+                self.initial_data_source = initial.source
+            else:
+                raw_variants = []
+                raw_observations = []
+                self.initial_data_source = "none_configured"
         else:
             raw_variants = list(initial_variants)
             raw_observations = list(initial_observations or ())
@@ -178,8 +211,12 @@ class OpenDesignRunner:
             source_context=self.source_context,
             open_context=self.task_context,
         )
-        if len(self.observed_variants) < 4:
-            raise ValueError("Open-design posterior requires at least four visible observations")
+        if self.posterior_enabled and len(self.observed_variants) < 4:
+            raise ValueError(
+                "Open-design posterior requires at least four visible observations; "
+                "provide initial observations or set active_learning.enabled=false "
+                "for knowledge-only ranking without labels"
+            )
         self.predictor_factory = predictor_factory
         self.active_learning = create_active_learning_module(
             config.active_learning,
@@ -287,6 +324,7 @@ class OpenDesignRunner:
             "designer": asdict(self.config.designer),
             "selection_driver": self.config.generation.selection_driver,
             "active_learning": asdict(self.config.active_learning),
+            "posterior_enabled": self.posterior_enabled,
             "reference_sequence": self.task_context.full_sequence,
             "reference_length": len(self.task_context.full_sequence),
             "numbering_scheme": self.task_context.numbering_scheme,
@@ -418,31 +456,65 @@ class OpenDesignRunner:
             for variant in candidates
         }
 
-        self.writer.report(
-            "open_design_posterior_fit_started",
-            message="fitting visible-label posterior over generated sequences",
-            phase=CampaignPhase.MODEL_FIT.value,
-            round_id=1,
-            n_train=len(self.observed_variants),
-            n_candidates=len(candidates),
-        )
-        posterior = self.active_learning.fit_predict(
-            self.observed_variants,
-            self.observations,
-            candidates,
-        )
-        hybrid_scores = self.active_learning.score(posterior, acquisition_knowledge)
-        selection = self.active_learning.select(
-            candidates,
-            hybrid_scores,
-            self.config.budget_per_round,
-            knowledge_scores=acquisition_knowledge,
-        )
-        prediction_by_id = {item.variant_id: item for item in posterior.predictions}
-        score_by_id = hybrid_scores.by_id()
-        arm_by_id = {
-            variant_id: arm for arm, ids in selection.selected_by_arm.items() for variant_id in ids
-        }
+        expected_batch_size = min(self.config.budget_per_round, len(candidates))
+        if self.posterior_enabled:
+            self.writer.report(
+                "open_design_posterior_fit_started",
+                message="fitting visible-label posterior over generated sequences",
+                phase=CampaignPhase.MODEL_FIT.value,
+                round_id=1,
+                n_train=len(self.observed_variants),
+                n_candidates=len(candidates),
+            )
+            posterior = self.active_learning.fit_predict(
+                self.observed_variants,
+                self.observations,
+                candidates,
+            )
+            hybrid_scores = self.active_learning.score(posterior, acquisition_knowledge)
+            selection = self.active_learning.select(
+                candidates,
+                hybrid_scores,
+                self.config.budget_per_round,
+                knowledge_scores=acquisition_knowledge,
+            )
+            prediction_by_id = {item.variant_id: item for item in posterior.predictions}
+            score_by_id = hybrid_scores.by_id()
+            composite_by_id = {
+                variant_id: score.composite for variant_id, score in score_by_id.items()
+            }
+            arm_by_id = {
+                variant_id: arm for arm, ids in selection.selected_by_arm.items() for variant_id in ids
+            }
+            initial_ids = tuple(selection.selected_ids)
+        else:
+            # Knowledge-only mode: no posterior is fitted, fitness fields stay
+            # NaN, and ranking uses the knowledge/hypothesis/structure composite.
+            posterior = None
+            self.writer.report(
+                "open_design_knowledge_only",
+                message=(
+                    "active_learning disabled; ranking generated sequences from "
+                    "knowledge evidence without a fitted posterior"
+                ),
+                phase=CampaignPhase.MODEL_FIT.value,
+                round_id=1,
+                n_train=len(self.observed_variants),
+                n_candidates=len(candidates),
+            )
+            prediction_by_id = {
+                variant.variant_id: _not_evaluated_prediction(variant.variant_id)
+                for variant in candidates
+            }
+            composite_by_id = dict(acquisition_knowledge)
+            arm_by_id = {}
+            initial_ids = tuple(
+                item.variant_id
+                for item in sorted(
+                    candidates,
+                    key=lambda item: (-acquisition_knowledge[item.variant_id], item.variant_id),
+                )[:expected_batch_size]
+            )
         ranked = [
             RankedSequenceDesign(
                 proposal=proposal,
@@ -450,7 +522,7 @@ class OpenDesignRunner:
                 fitness_std=prediction_by_id[proposal.proposal_id].fitness_std,
                 interval_90=prediction_by_id[proposal.proposal_id].interval_90,
                 ood_score=prediction_by_id[proposal.proposal_id].ood_score,
-                acquisition_score=score_by_id[proposal.proposal_id].composite,
+                acquisition_score=composite_by_id[proposal.proposal_id],
                 knowledge_score=raw_knowledge_scores.get(proposal.proposal_id, 0.0),
                 hypothesis_prior=hypothesis_scores[proposal.proposal_id],
                 structure_constraint=structure_scores[proposal.proposal_id],
@@ -458,30 +530,37 @@ class OpenDesignRunner:
             )
             for proposal in proposals
         ]
-        ranked.sort(
-            key=lambda item: (
-                item.acquisition_score,
-                item.fitness_mean,
-                item.fitness_std,
-                item.proposal.proposal_id,
-            ),
-            reverse=True,
-        )
+        if self.posterior_enabled:
+            ranked.sort(
+                key=lambda item: (
+                    item.acquisition_score,
+                    item.fitness_mean,
+                    item.fitness_std,
+                    item.proposal.proposal_id,
+                ),
+                reverse=True,
+            )
+        else:
+            # fitness fields are NaN here; order by the knowledge composite only.
+            ranked.sort(
+                key=lambda item: (item.acquisition_score, item.proposal.proposal_id),
+                reverse=True,
+            )
         ranked_by_id = {item.proposal.proposal_id: item for item in ranked}
         candidate_by_id = {item.variant_id: item for item in candidates}
         ranked_ids = tuple(item.proposal.proposal_id for item in ranked)
-        initial_ids = tuple(selection.selected_ids)
-        expected_batch_size = min(self.config.budget_per_round, len(candidates))
         review_context_holder: dict[str, BatchReviewContext] = {}
         prediction_cards = {
             variant_id: prediction_review_card(
                 prediction,
-                source_kind="active_posterior",
-                decision_eligible=True,
+                source_kind=(
+                    "active_posterior" if self.posterior_enabled else "not_fitted"
+                ),
+                decision_eligible=self.posterior_enabled,
                 calibration_status=(
                     "calibrated"
-                    if posterior.calibration.status == "calibrated"
-                    else "uncalibrated"
+                    if posterior is not None and posterior.calibration.status == "calibrated"
+                    else ("uncalibrated" if self.posterior_enabled else "not_applicable")
                 ),
             )
             for variant_id, prediction in prediction_by_id.items()
@@ -576,6 +655,10 @@ class OpenDesignRunner:
                     item: (
                         "Selected from generated full sequences by calibrated posterior, "
                         "uncertainty, Scientist soft prior, and available structural context."
+                        if self.posterior_enabled
+                        else "Selected from generated full sequences by knowledge "
+                        "evidence, Scientist soft prior, and available structural "
+                        "context; no posterior was fitted."
                     )
                     for item in candidate_ids
                 },
@@ -647,8 +730,12 @@ class OpenDesignRunner:
         self.writer.write_json(
             "posterior.json",
             {
-                "calibration": posterior.calibration,
-                "predictions": posterior.predictions,
+                "calibration": (
+                    posterior.calibration
+                    if posterior is not None
+                    else {"status": "not_fitted_no_visible_labels"}
+                ),
+                "predictions": (posterior.predictions if posterior is not None else []),
             },
         )
         self.writer.write_json(
@@ -685,7 +772,12 @@ class OpenDesignRunner:
             "selected_variant_ids": list(selected_ids),
             "candidate_source": "generated_from_reference",
             "candidate_pool_consulted": False,
-            "posterior_calibration_status": posterior.calibration.status,
+            "posterior_enabled": self.posterior_enabled,
+            "posterior_calibration_status": (
+                posterior.calibration.status
+                if posterior is not None
+                else "not_fitted_no_visible_labels"
+            ),
             "knowledge_used": self.config.knowledge_enabled,
             "structure_constraint_available": structure_available,
             "structure_constraint_semantics": "static_context_penalty_not_fitness",

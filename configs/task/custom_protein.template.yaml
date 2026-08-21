@@ -1,0 +1,58 @@
+# Task template for single-protein open-design inference (no oracle, no folds).
+# Copy this file, replace the GB1 example values with your own protein, and point
+# initial_observations_path at your partially labeled measurement CSV.
+# All relative paths resolve against the repository root.
+task_id: custom_protein_open_design
+protein_id: CUSTOM
+protein_name: replace-with-your-protein-name
+protein_aliases: []
+protein_accessions: []
+assay_id: custom_assay
+
+# Compact per-site alphabet and the positions it refers to. Both are required and
+# must be consistent with the reference sequence (lengths must match and the
+# reference residue at each position must equal the corresponding site letter).
+wild_type_sites: VDGV
+mutable_positions: [39, 40, 41, 54]
+objective: maximize
+
+# Full-length wild-type reference. Set exactly one of reference_sequence (inline)
+# or reference_sequence_path (FASTA file). open_design requires a full-length
+# sequence, not just the mutable sites.
+reference_sequence: MTYKLILNGKTLKGETTTEAVDAATAEKVFKQYANDNGVDGEWTYDDATKTFTVTE
+# reference_sequence_path: examples/gb1/rcsb_pdb_1PGB.fasta
+sequence_position_offset: 1
+numbering_scheme: task_1_based
+
+# without_prior marks a prior-free single-protein inference target: the config
+# loads without split_root / public+oracle / initial_observations_path. It is
+# only valid for open_design experiments and is rejected together with
+# active_learning.enabled=true (the posterior needs labeled priors).
+without_prior: true
+
+# Prior knowledge dataset: partially labeled measurements. Disabled by default;
+# enable it when your condition consumes prior knowledge (active-learning mode,
+# kg_base_al-style runs: set active_learning.enabled=true in the experiment
+# YAML). With active_learning disabled the runner needs no labels and ranks
+# generated sequences from knowledge evidence alone; with it enabled, at least
+# 4 labeled rows are required and 8 or more are recommended for posterior
+# calibration. CSV columns: variant_id,variant,fitness (required);
+# sequence,mutation_notation,mutation_count (optional). `variant` may be a
+# full-length sequence or a compact per-site code such as VDGV whose length
+# equals len(mutable_positions). See
+# examples/custom_protein/prior_observations.example.csv for the format.
+# initial_observations_path: examples/custom_protein/prior_observations.example.csv
+
+# Optional structure resources. Uncomment and adapt to enable the structure
+# channel together with configs/knowledge/custom_protein.3channels.yaml.
+# residue_map translates task positions to structure chain/residue identifiers.
+# structure_resources:
+#   - resource_id: rcsb:1PGB
+#     path: examples/gb1/1PGB.cif
+#     format: cif
+#     chain: A
+#     residue_map:
+#       "39": {chain: A, residue: 39}
+#       "40": {chain: A, residue: 40}
+#       "41": {chain: A, residue: 41}
+#       "54": {chain: A, residue: 54}

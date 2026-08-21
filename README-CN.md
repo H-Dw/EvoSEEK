@@ -95,10 +95,82 @@ python -m pytest tests/unit -q
 `check_environment.py` 会打印 Python 版本、平台和核心包版本。单元测试不需要 API 密钥，
 也不依赖外部数据下载。
 
-数据与模型资产仍按第 2、3 节准备；默认 `python scripts/run_demo.py` 需要 `[llm]`、`[kermut]`、
+数据与模型资产仍按第 3、4 节准备；默认 `python scripts/run_demo.py` 需要 `[llm]`、`[kermut]`、
 `.env` 中的 `DEEPSEEK_API_KEY`，以及 Kermut 的条件概率/坐标文件。
 
-## 2. 数据下载与准备
+## 2. 快速开始：单蛋白推理
+
+对单个测试蛋白做推理时，可以完全跳过数据下载、fold manifest 和 oracle。open-design runner
+会枚举用户提供的参考序列的全部单点突变并排序——默认 kg_base 预设仅依据知识图谱证据排序；
+启用 active-learning 模式时则会在你的先验标签上拟合校准 posterior 参与排序。所有输入——
+序列、可选结构、可选 MSA、先验知识和 RAG 语料——都以路径形式写在 YAML 配置里；CLI 不接受
+序列输入。
+
+复制并编辑三个模板配置（GB1 数值仅示意格式，请替换为你自己的蛋白）：
+
+| 配置 | 模板 | 需要提供的内容 |
+|---|---|---|
+| Task | `configs/task/custom_protein.template.yaml` | `reference_sequence` / `reference_sequence_path`（二选一）、`mutable_positions` + `wild_type_sites`、可选的 `structure_resources`，以及——当所用 condition 需要先验知识时——指向先验知识 CSV 的 `initial_observations_path` |
+| Knowledge | `configs/knowledge/custom_protein.kg_base.yaml`（默认） | 用通道开关组合 condition 语义；可选 MSA 填 `providers.conservation.a3m_path`；可选 RAG 配置 `local_knowledge` 块 |
+| Experiment | `configs/experiments/custom_protein_open_design.yaml` | open_design 强制约束已预填；通过 `knowledge_config` 选择 knowledge 预设 |
+
+默认 kg_base 预设不需要任何先验数据（纯知识证据排序）：task 模板设置了 `without_prior: true`
+（仅限 open_design），允许配置在无任何测量数据源时加载；它与 `active_learning.enabled: true`
+组合会在配置加载时直接报错。仅当所用 condition 消费先验时才提供先验知识 CSV——即
+active-learning 模式（在 experiment YAML 中设 `active_learning.enabled: true` 并去掉
+`without_prior`，kg_base_al 类运行）：此时 `initial_observations_path` 必须指向至少 4 条带
+标签记录的 CSV（建议 8 条以上以保证 posterior 校准）。CSV 需要列 `variant_id,variant,fitness`
+（或 `target`）；`variant` 可以是全长序列，也可以是 `VDGV` 这样的按位点紧凑编码。格式示例见
+`examples/custom_protein/prior_observations.example.csv`。
+
+模板出厂即为无限制进化建议示例：参考序列的全部位点开放（`position_policy: all`），不需要先验
+标签、结构文件或 MSA 文件。Scientist 通过 `configs/llm/deepseek.yaml` 调用真实 DeepSeek API
+（请先在 `.env` 中设置 `DEEPSEEK_API_KEY`）：
+
+```bash
+python -m fitness_agents.cli configs/experiments/custom_protein_open_design.yaml \
+  --condition kg_base \
+  --output-root artifacts/runs
+```
+
+该命令适用于无限制的进化建议。后续如果有限制需求——固定突变位点集合、先验知识 CSV、结构
+文件、MSA 或 RAG 语料——请在配置的对应注释位置填写文件路径，无需删除任何内容：
+`configs/experiments/custom_protein_open_design.yaml` 中的 `designer.include_positions`、
+`configs/task/custom_protein.template.yaml` 中的 `structure_resources` /
+`initial_observations_path`、`configs/knowledge/custom_protein.kg_base.yaml` 中的通道 provider
+块 / `local_knowledge` 块（基于先验的 posterior 拟合需另设 `active_learning.enabled: true`）。
+
+condition 由 knowledge YAML 决定，而不是 `--condition`（后者只是运行标签）：
+
+| Knowledge 预设 | Condition 语义 |
+|---|---|
+| `custom_protein.kg_base.yaml` | 仅基础观测 KG（默认） |
+| `custom_protein.kg_base_rag.yaml` | 基础 KG + 文档 RAG |
+| `custom_protein.3channels.yaml` | 基础 KG + physchem/conservation/structure 三通道；需要 task YAML 提供 `structure_resources` 并在 `providers.conservation.a3m_path` 配置 MSA |
+| 在 experiment YAML 中设 `knowledge_enabled: false` | agent_only：完全消融 knowledge runtime |
+
+使用 RAG 时先构建一次语料索引（先将 `knowledge_config` 切换为 RAG 预设），然后带预建索引
+运行；索引路径可按次覆盖：
+
+```bash
+python -m fitness_agents.cli knowledge index configs/experiments/custom_protein_open_design.yaml
+python -m fitness_agents.cli configs/experiments/custom_protein_open_design.yaml \
+  --local-knowledge-index /path/to/corpus.sqlite
+```
+
+CLI 参数：`config`（实验 YAML，位置参数）、`--condition`（运行标签）、`--output-root`、
+`--seed`、`--local-knowledge-index` / `--local-knowledge-overlay`（RAG 语料/overlay 覆盖）、
+`--output-top-k`。每次运行在 `output-root` 下生成一个目录，内含 `ranked_candidates.csv`、
+`selected_candidates.csv`/`.fasta`、`knowledge_graph.sqlite`、`knowledge/evidence.json` 和
+`summary.json`。
+
+该路径的限制：仅 one-shot 排序（无多轮 oracle 循环）、仅单点突变（`mutation_depth: 1`）、
+posterior fitness 估计仅在 active-learning 模式下产出（`active_learning.enabled: true`，需
+至少 4 条带标签先验；默认 kg_base 预设输出知识复合分数，fitness 字段为 NaN）、posterior
+predictor 必须支持生成的全长序列——默认的 `full_sequence_onehot` 支持，Kermut 配置则需要在
+model YAML 中显式声明 `capabilities`（见第 7.2 节）。
+
+## 3. 数据下载与准备
 
 下载脚本固定到已核验的 `J-SNACKKB/FLIP` commit，并检查压缩包 SHA-256；固定地址不可用时会回退到同一仓库的 `main`，但任何回退文件仍必须通过相同校验：
 
@@ -132,7 +204,7 @@ FITNESS_AGENTS_FORCE_DOWNLOAD=1 bash scripts/data/download_flip_gb1.sh
 原始 GB1 测量为 CC BY 4.0，FLIP 派生文件及 split 为 AFL-3.0。来源和统计写入
 `data/demo/data_manifest.json`。
 
-### 2.1 正式五折数据集拆分
+### 3.1 正式五折数据集拆分
 
 上面的 `prepare_gb1.py` 保留给旧 demo。正式闭环与 OOD 实验使用 manifest-driven split，
 一次命令必须生成 `fold_00` 至 `fold_04`，而不是把五个随机 seed 当作五折。
@@ -198,7 +270,7 @@ python scripts/data/validate_data.py \
 输出按能力隔离为 `agent/`、`controller/`、`oracle/` 和 `evaluator/`。candidate 文件没有
 target；queryable labels 不含 final-test ID；相同 source/config/code 才允许复用已有目录。
 
-## 3. 模型与结构资产
+## 4. 模型与结构资产
 
 默认模型从可见 GB1 标签现场训练，没有外部预训练权重。仍应执行模型准备脚本来生成可追踪
 manifest：
@@ -218,7 +290,7 @@ python scripts/models/download_models.py --profile structure
 可以在后续通过 `EvidenceProvider` / `FitnessPredictor` 注册表接入。当前 structure 通道是版本化的
 5LDE 位点风险先验；它不把 ipTM 等同于结合亲和力或实验 fitness。
 
-### 4.1 本地 RAG 向量检索与 KG 物化诊断
+### 5.1 本地 RAG 向量检索与 KG 物化诊断
 
 默认配置使用英文原子事实语料、FTS5 + BGE dense hybrid 检索。通用 corpus/vector index 位于
 `artifacts/local_knowledge/corpus/directed_evolution-v4.sqlite`；GB1 泄漏策略与查询审计单独位于
@@ -262,7 +334,7 @@ python \
 `status: validated` 的候选级校准文件；draft 示例位于
 `configs/knowledge/local_rag_selection.example.yaml`，默认会被拒绝。
 
-### 4.2 API embedding 与 reranker
+### 5.2 API embedding 与 reranker
 
 远程向量化通过独立 YAML 配置，不在仓库中保存密钥。默认示例是 Qwen
 `text-embedding-v4`；另有 Jina v5、TEI 托管 BGE-M3/E5，以及 Qwen/Jina/BGE reranker
@@ -302,11 +374,11 @@ API 返回向量会检查数量、顺序、维度、有限值与零向量，并�
 静默截断。manifest 记录 provider、模型家族、模型/部署版本、endpoint 哈希、task/instruction、
 维度和 tokenizer 策略，但不会记录 API key。
 
-第 4.2 节的 `directed_evolution-qwen-v4.sqlite` 只覆盖 directed_evolution 语料，供
+第 5.2 节的 `directed_evolution-qwen-v4.sqlite` 只覆盖 directed_evolution 语料，供
 `knowledge_agent_qwen_rag` 使用。Hierarchical Scientist 的 RAG 条件需要另一份含 binding
-claims 的共享索引，见第 4.3 节。
+claims 的共享索引，见第 5.3 节。
 
-### 4.3 正式矩阵的共享 Qwen corpus index
+### 5.3 正式矩阵的共享 Qwen corpus index
 
 并行 RAG worker 只读一份预构建的 Qwen 语料索引，各自写入 per-condition/fold overlay，禁止
 边跑边建。密钥从 `.env` 的 `DASHSCOPE_API_KEY` 读取（第 1.7 节）。
@@ -327,11 +399,11 @@ python -m fitness_agents.cli knowledge inspect \
   configs/experiments/gb1_reasoning_routes_base.yaml
 ```
 
-`inspect` 应打印 corpus 统计。不要把第 4.2 节的 `directed_evolution-qwen-v4.sqlite` 拷贝或改名
+`inspect` 应打印 corpus 统计。不要把第 5.2 节的 `directed_evolution-qwen-v4.sqlite` 拷贝或改名
 成 `gb1-reasoning-routes-qwen-v4.sqlite`：两份索引的 roots、chunk 与 embedding manifest 不同。
 
 Qwen knowledge-agent AL96（`run_agent_baselines.py --modes knowledge_agent_qwen_rag`）仍使用
-第 4.2 节的 `directed_evolution-qwen-v4.sqlite`。若该文件尚不存在，用同一套 DashScope 密钥构建：
+第 5.2 节的 `directed_evolution-qwen-v4.sqlite`。若该文件尚不存在，用同一套 DashScope 密钥构建：
 
 ```bash
 python -m fitness_agents.cli knowledge index \
@@ -340,7 +412,7 @@ python -m fitness_agents.cli knowledge inspect \
   configs/experiments/knowledge_agent_qwen_al96.yaml
 ```
 
-## 5. Baseline
+## 6. Baseline
 
 共享相同 initial/validation/oracle/final split、查询预算、fitness predictor 和 seed。
 主比较均使用 greedy predictor mean，避免把 UQ 策略增益错误归因给 Agent；UCB 单独在消融实验中评估。
@@ -350,14 +422,14 @@ python -m fitness_agents.cli knowledge inspect \
 | Random | 全部未观测候选 | 随机 |
 | Fitness model direct | 全部未观测候选 | predictor top-μ |
 
-### 5.1 GB1-AL96 并行 baseline（`run_agent_baselines.py`）
+### 6.1 GB1-AL96 并行 baseline（`run_agent_baselines.py`）
 
 `scripts/run_baselines.py` 按 seed 串行跑 demo/full 四模式。正式 AL96 五折闭环请用
 `scripts/run_agent_baselines.py`：每个 `(mode, seed, fold)` 是独立进程，可用
-`--max-parallel` 并行。先按第 2.1 节生成 `GB1-AL96-5CV-v1`，并安装 `[llm]` 与 `[kermut]`。
+`--max-parallel` 并行。先按第 3.1 节生成 `GB1-AL96-5CV-v1`，并安装 `[llm]` 与 `[kermut]`。
 
 `random` / `fitness_direct` 不调用 LLM、不启用 RAG 或 KG 工具。Scientist 类模式需要
-`DEEPSEEK_API_KEY`。`knowledge_agent_qwen_rag` 另外需要 `DASHSCOPE_API_KEY` 和第 4.2 节的
+`DEEPSEEK_API_KEY`。`knowledge_agent_qwen_rag` 另外需要 `DASHSCOPE_API_KEY` 和第 5.2 节的
 Qwen 索引。
 
 检查调度表（不启动 campaign）：
@@ -397,11 +469,11 @@ nohup python scripts/run_agent_baselines.py \
 `--folds config`（默认）沿用各 YAML 的 `fold_index`；正式三折比较请显式传 `--folds 0,1,2`。
 
 Kermut 配置见 `configs/model/kermut.yaml`（`device: cuda:0`）。请在 conda 环境
-`EvoSEEK` 中启动（第 6.1 节）。`--max-parallel 3` 或 `4` 时加上
+`EvoSEEK` 中启动（第 7.1 节）。`--max-parallel 3` 或 `4` 时加上
 `--cuda-devices 0,1,2,3`（默认 `auto` 也会按可见卡数分配），让并发 job 各占一张卡。
 不要与第 16 节 Hierarchical Scientist 同时打满同一组 GPU。
 
-### 6.1 安装 Kermut 后端
+### 7.1 安装 Kermut 后端
 
 核心环境不强制安装 PyTorch。需要 Kermut 时，先看 `nvidia-smi` 右上角的 **CUDA Version**（这是驱动
 最高支持的 toolkit，不是 `nvcc` 版本），再安装匹配的 PyTorch。然后装 GPyTorch 与 `fair-esm`。
@@ -421,7 +493,7 @@ Kermut 还需要两个 assay/蛋白特异的外部资源，项目不会用占位
 - ProteinMPNN 条件氨基酸概率，形状为 `L × 20`；
 - 蛋白质 C-alpha 坐标，形状为 `L × 3`。
 
-### 6.2 配置 GB1 fitness 打分
+### 7.2 配置 GB1 fitness 打分
 
 编辑 [`configs/model/kermut.yaml`](configs/model/kermut.yaml)，至少设置两个资源路径：
 
@@ -495,7 +567,7 @@ python scripts/run_hierarchical_scientist.py \
 单 GPU 或显存紧张时用 `--max-parallel 1`。卡数少于并行度时调度器会直接退出，而不是让两份
 ESM-2 650M 挤在同一张 3090 上。
 
-### 6.3 实时序列与固定候选池
+### 7.3 实时序列与固定候选池
 
 开放序列空间使用实时模式。系统会缓存 ESM-2 embedding，并按 WT 位点缓存 masked-marginal：
 
@@ -537,7 +609,7 @@ Knowledge-enhanced Agent 默认通过受控的 `AgentKnowledgeGraphTool` 查询 
 当前轮计算结果；每次查询都会写入 `agent_queries`，从而支持轮次历史、推理追溯和消融。未来的
 Mutation Designer 或 Scientific Critic 可复用 `explain_variant` 获取单个候选的序列、预测与证据上下文。
 
-## 7. 项目结构
+## 8. 项目结构
 
 ```text
 configs/                  task/model/experiment/knowledge/ablation 配置
@@ -562,7 +634,7 @@ tests/                     unit/integration/leakage/e2e
 services/structure/        可选 GPU sidecar 接口约定
 ```
 
-## 8. 已知限制
+## 9. 已知限制
 
 - demo 结果是隐藏标签模拟，不是新的湿实验结论；
 - 5LDE 位点风险是轻量先验，不替代变体结构预测或自由能计算；
@@ -570,7 +642,7 @@ services/structure/        可选 GPU sidecar 接口约定
 - 小样本 KG residue aggregate 可能受上位性混杂，故 fitness 始终绑定完整 variant、assay 和 observation；
 - 正式结论应使用 paired seeds、bootstrap 置信区间和多重比较校正。
 
-## 9. Hierarchical Scientist 正式矩阵
+## 10. Hierarchical Scientist 正式矩阵
 
 `scripts/run_hierarchical_scientist.py` 在 GB1-AL96 前三折上跑四组条件。Scientist / Critic
 走 DeepSeek；RAG embedding / reranker 走 Qwen；fitness 为 Kermut。Agent-UQ 条件不把 fitness
@@ -622,7 +694,7 @@ nohup python scripts/run_hierarchical_scientist.py \
 `report.json`、`aggregate/`）。总控看 `hierarchical_scientist.log`；单 job 看
 `fold_logs/<condition>-fXX-sYY.stderr.log`。
 
-只跑不依赖 RAG 的两组时可以暂缓第 4.3 节索引：
+只跑不依赖 RAG 的两组时可以暂缓第 5.3 节索引：
 
 ```bash
 nohup python scripts/run_hierarchical_scientist.py \
@@ -631,3 +703,25 @@ nohup python scripts/run_hierarchical_scientist.py \
   --max-parallel 2 \
   > hierarchical_scientist_base.log 2>&1 &
 ```
+
+## 11. 交互界面
+
+安装本地 Gradio UI extra（见第 1.3 节）：
+
+```bash
+conda activate EvoSEEK
+python -m pip install -e ".[ui]"
+```
+
+用第 2 节的无限制单蛋白配置启动交互式 Web 界面：
+
+```bash
+evoseek serve configs/experiments/custom_protein_open_design.yaml --host 127.0.0.1 --port 7860
+```
+
+界面与 CLI 共用同一条 open-design 路径和同一份配置：真实 DeepSeek API（无 mock/占位调用，
+先在 `.env` 设置 `DEEPSEEK_API_KEY`）、参考序列全部位点开放、不需要先验/结构/MSA 文件。
+自然语言需求会被编译为结构化预览——参考序列核对、解析位点、预算、模型能力——确认后才执行
+与 CLI 相同的 `OpenDesignRunner` 运行。后续如需提供受限变体的界面，把 `serve` 指向填好注释
+路径的配置副本即可（见第 2 节）。Gradio 服务绑定 `127.0.0.1:7860`，在浏览器打开打印的 URL
+即可使用。模型与 knowledge/RAG 设置见第 7.2 节和第 5 节。
