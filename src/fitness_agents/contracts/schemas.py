@@ -208,27 +208,33 @@ class DesignScore:
 
 
 @dataclass(frozen=True)
-class ReThinkReflection:
+class HypothesisReflection:
     reflection_id: str
-    variant_id: str
+    hypothesis_id: str
+    assessment_id: str
     round_id: int
-    verdict: str
+    assessment_status: str
     summary: str
-    positive_findings: tuple[str, ...]
-    negative_findings: tuple[str, ...]
-    revised_reason: str
-    next_round_advice: str
+    retained_claims: tuple[str, ...]
+    invalidated_assumptions: tuple[str, ...]
+    unresolved_questions: tuple[str, ...]
+    recommended_actions: tuple[str, ...]
+    supporting_observation_ids: tuple[str, ...]
+    supporting_evidence_ids: tuple[str, ...]
     provider: str
-    relation_scope: str = "candidate_rationale"
-    assessment_id: str | None = None
-    assessment_status: str | None = None
-    assessment_commentary: str = ""
     quality_status: str = "model"
     advisory_only: bool = True
     selection_eligible: bool = False
-    next_round_action: str = "no_change"
     dimension_assessments: tuple[dict[str, Any], ...] = ()
     dimension_group_advice: tuple[dict[str, str], ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.assessment_status not in {"SUPPORTED", "CONTRADICTED", "INCONCLUSIVE"}:
+            raise ValueError("HypothesisReflection assessment_status is invalid")
+        if not self.advisory_only or self.selection_eligible:
+            raise ValueError(
+                "HypothesisReflection must remain advisory and selection-ineligible"
+            )
 
 
 @dataclass(frozen=True)
@@ -246,12 +252,8 @@ class ValidationRecord:
     reliability: float
     agent_reason: str
     hypothesis_id: str | None
+    assessment_id: str | None
     evidence_ids: tuple[str, ...]
-    reflection_id: str | None
-    reflection_verdict: str | None
-    reflection_summary: str
-    reflection_quality_status: str | None = None
-    reflection_advisory_only: bool = True
 
     def __post_init__(self) -> None:
         if self.validation_type not in {"wet", "dry"}:
@@ -488,7 +490,7 @@ class CampaignState:
     selections: list[SelectionRecord] = field(default_factory=list)
     critique_decisions: list[CritiqueDecision] = field(default_factory=list)
     hypothesis_assessments: list[HypothesisAssessment] = field(default_factory=list)
-    rethink_reflections: list[ReThinkReflection] = field(default_factory=list)
+    hypothesis_reflections: list[HypothesisReflection] = field(default_factory=list)
     approved_batch_ids: list[str] = field(default_factory=list)
     revealed_variant_ids: set[str] = field(default_factory=set)
     final_test_opened: bool = False

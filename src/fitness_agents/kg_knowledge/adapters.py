@@ -8,8 +8,9 @@ from fitness_agents.contracts.schemas import (
     Evidence,
     FitnessObservation,
     Hypothesis,
+    HypothesisAssessment,
+    HypothesisReflection,
     Prediction,
-    ReThinkReflection,
     ValidationRecord,
     Variant,
 )
@@ -1812,51 +1813,173 @@ class LocalRAGKnowledgeAdapter:
 
 
 class ValidationKnowledgeAdapter:
-    """Expose append-only wet/dry validation and ReThink records in the external KG."""
+    """Expose sample facts and hypothesis-level learning as distinct KG records."""
 
     name = "validation_records"
 
     def extract(self, context: BuildContext) -> KnowledgeBatch:
         records = tuple(context.resources.get("validation_records", ()))
-        reflections = tuple(context.resources.get("reflections", ()))
+        assessments = tuple(context.resources.get("hypothesis_assessments", ()))
+        reflections = tuple(context.resources.get("hypothesis_reflections", ()))
+        observations = tuple(context.resources.get("observations", ()))
         if not all(isinstance(item, ValidationRecord) for item in records):
             raise TypeError("resources['validation_records'] must contain ValidationRecord records")
-        if not all(isinstance(item, ReThinkReflection) for item in reflections):
-            raise TypeError("resources['reflections'] must contain ReThinkReflection records")
+        if not all(isinstance(item, HypothesisAssessment) for item in assessments):
+            raise TypeError(
+                "resources['hypothesis_assessments'] must contain HypothesisAssessment records"
+            )
+        if not all(isinstance(item, HypothesisReflection) for item in reflections):
+            raise TypeError(
+                "resources['hypothesis_reflections'] must contain HypothesisReflection records"
+            )
         entities: dict[str, EntityRecord] = {}
         relations: list[RelationRecord] = []
-        reflection_lookup = {item.reflection_id: item for item in reflections}
+        observation_lookup = {
+            item.variant_id: _observation_record_id(context, item)
+            for item in observations
+            if isinstance(item, FitnessObservation)
+        }
+        for assessment in assessments:
+            source_id = f"assessment:{assessment.evaluator_version}"
+            entities[assessment.assessment_id] = EntityRecord(
+                assessment.assessment_id,
+                "HypothesisAssessment",
+                KnowledgeLayer.AGENT,
+                frozenset({Modality.TABULAR, Modality.TIME_SERIES}),
+                {
+                    "hypothesis_id": assessment.hypothesis_id,
+                    "falsification_spec_id": assessment.falsification_spec_id,
+                    "round_id": assessment.round_id,
+                    "status": assessment.status.value,
+                    "criterion_results": tuple(
+                        {
+                            "criterion_id": item.criterion_id,
+                            "signal": item.signal.value,
+                            "metric_value": item.metric_value,
+                            "comparator_value": item.comparator_value,
+                            "effect_size": item.effect_size,
+                            "observation_ids": item.observation_ids,
+                            "qc_status": item.qc_status,
+                            "detector_name": item.detector_name,
+                            "detector_version": item.detector_version,
+                            "reason_code": item.reason_code,
+                        }
+                        for item in assessment.criterion_results
+                    ),
+                    "observation_ids": assessment.observation_ids,
+                    "decisive_criterion_ids": assessment.decisive_criterion_ids,
+                    "unresolved_criterion_ids": assessment.unresolved_criterion_ids,
+                    "evaluator_version": assessment.evaluator_version,
+                },
+                (source_id,),
+                "hypothesis_assessment",
+                valid_from_round=assessment.round_id,
+            )
+            relations.append(
+                _relation(
+                    self.name,
+                    assessment.assessment_id,
+                    "ASSESSES",
+                    assessment.hypothesis_id,
+                    KnowledgeLayer.AGENT,
+                    modality=Modality.TABULAR,
+                    source_id=source_id,
+                    source_group="hypothesis_assessment",
+                    context_id=assessment.assessment_id,
+                    valid_from_round=assessment.round_id,
+                )
+            )
+            for observation_id in assessment.observation_ids:
+                structured_id = observation_lookup.get(observation_id)
+                if structured_id is None:
+                    continue
+                relations.append(
+                    _relation(
+                        self.name,
+                        structured_id,
+                        "CONTRIBUTES_TO_ASSESSMENT",
+                        assessment.assessment_id,
+                        KnowledgeLayer.PROVENANCE,
+                        modality=Modality.TABULAR,
+                        source_id=source_id,
+                        source_group="hypothesis_assessment",
+                        context_id=assessment.assessment_id,
+                        valid_from_round=assessment.round_id,
+                    )
+                )
         for reflection in reflections:
+            source_id = f"agent:{reflection.provider}"
             entities[reflection.reflection_id] = EntityRecord(
                 reflection.reflection_id,
-                "ReThinkReflection",
+                "HypothesisReflection",
                 KnowledgeLayer.AGENT,
                 frozenset({Modality.TEXT, Modality.TIME_SERIES}),
                 {
-                    "variant_id": reflection.variant_id,
+                    "hypothesis_id": reflection.hypothesis_id,
                     "round_id": reflection.round_id,
-                    "verdict": reflection.verdict,
                     "summary": reflection.summary,
-                    "positive_findings": reflection.positive_findings,
-                    "negative_findings": reflection.negative_findings,
-                    "revised_reason": reflection.revised_reason,
-                    "next_round_advice": reflection.next_round_advice,
-                    "next_round_action": reflection.next_round_action,
+                    "retained_claims": reflection.retained_claims,
+                    "invalidated_assumptions": reflection.invalidated_assumptions,
+                    "unresolved_questions": reflection.unresolved_questions,
+                    "recommended_actions": reflection.recommended_actions,
+                    "supporting_observation_ids": reflection.supporting_observation_ids,
+                    "supporting_evidence_ids": reflection.supporting_evidence_ids,
                     "provider": reflection.provider,
-                    "relation_scope": reflection.relation_scope,
                     "assessment_id": reflection.assessment_id,
                     "assessment_status": reflection.assessment_status,
-                    "assessment_commentary": reflection.assessment_commentary,
                     "quality_status": reflection.quality_status,
                     "advisory_only": reflection.advisory_only,
                     "selection_eligible": reflection.selection_eligible,
                     "dimension_assessments": reflection.dimension_assessments,
                     "dimension_group_advice": reflection.dimension_group_advice,
                 },
-                (f"agent:{reflection.provider}",),
+                (source_id,),
                 "rethink_agent",
                 valid_from_round=reflection.round_id,
             )
+            relations.extend(
+                (
+                    _relation(
+                        self.name,
+                        reflection.reflection_id,
+                        "REFLECTS_ON",
+                        reflection.hypothesis_id,
+                        KnowledgeLayer.AGENT,
+                        modality=Modality.TEXT,
+                        source_id=source_id,
+                        source_group="rethink_agent",
+                        context_id=reflection.reflection_id,
+                        valid_from_round=reflection.round_id,
+                    ),
+                    _relation(
+                        self.name,
+                        reflection.reflection_id,
+                        "EXPLAINS_ASSESSMENT",
+                        reflection.assessment_id,
+                        KnowledgeLayer.AGENT,
+                        modality=Modality.TEXT,
+                        source_id=source_id,
+                        source_group="rethink_agent",
+                        context_id=reflection.reflection_id,
+                        valid_from_round=reflection.round_id,
+                    ),
+                )
+            )
+            for evidence_id in reflection.supporting_evidence_ids:
+                relations.append(
+                    _relation(
+                        self.name,
+                        reflection.reflection_id,
+                        "GROUNDED_IN",
+                        evidence_id,
+                        KnowledgeLayer.PROVENANCE,
+                        modality=Modality.TEXT,
+                        source_id=source_id,
+                        source_group="rethink_agent",
+                        context_id=reflection.reflection_id,
+                        valid_from_round=reflection.round_id,
+                    )
+                )
         for record in records:
             layer = (
                 KnowledgeLayer.EXPERIMENTAL
@@ -1878,10 +2001,7 @@ class ValidationKnowledgeAdapter:
                     "reliability": record.reliability,
                     "agent_reason": record.agent_reason,
                     "hypothesis_id": record.hypothesis_id,
-                    "reflection_verdict": record.reflection_verdict,
-                    "reflection_summary": record.reflection_summary,
-                    "reflection_quality_status": record.reflection_quality_status,
-                    "reflection_advisory_only": record.reflection_advisory_only,
+                    "assessment_id": record.assessment_id,
                 },
                 (record.source_id,),
                 "wet_validation" if record.validation_type == "wet" else "dry_validation",
@@ -1904,19 +2024,4 @@ class ValidationKnowledgeAdapter:
                     valid_from_round=record.round_id,
                 )
             )
-            if record.reflection_id and record.reflection_id in reflection_lookup:
-                relations.append(
-                    _relation(
-                        self.name,
-                        record.record_id,
-                        "REFLECTED_BY",
-                        record.reflection_id,
-                        KnowledgeLayer.AGENT,
-                        modality=Modality.TEXT,
-                        source_id=f"agent:{reflection_lookup[record.reflection_id].provider}",
-                        source_group="rethink_agent",
-                        context_id=record.record_id,
-                        valid_from_round=record.round_id,
-                    )
-                )
         return KnowledgeBatch(self.name, tuple(entities.values()), tuple(relations))

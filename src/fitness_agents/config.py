@@ -1255,11 +1255,10 @@ class LLMConfig:
     rethink_render_max_tokens: int = 32768
     rethink_reasoning_effort: str | None = None
     rethink_thinking: str = "disabled"
-    rethink_reasoning_batch_size: int = 1
-    rethink_max_parallel_batches: int = 8
-    rethink_max_calls_per_round: int = 256
-    rethink_call_reserve: int = 96
-    rethink_dimension_parallel: bool = True
+    rethink_max_parallel_batches: int = 4
+    rethink_max_calls_per_round: int = 32
+    rethink_call_reserve: int = 16
+    rethink_parallel_dimension_groups: bool = True
 
     def __post_init__(self) -> None:
         if self.max_transport_retries not in {0, 1, 2}:
@@ -1287,14 +1286,17 @@ class LLMConfig:
             raise ValueError("llm.rethink_render_max_tokens must be between 1 and 131072")
         if self.rethink_thinking not in {"enabled", "disabled"}:
             raise ValueError("llm.rethink_thinking must be enabled or disabled")
-        if not 1 <= self.rethink_reasoning_batch_size <= 8:
-            raise ValueError("llm.rethink_reasoning_batch_size must be between 1 and 8")
-        if not 1 <= self.rethink_max_parallel_batches <= 16:
-            raise ValueError("llm.rethink_max_parallel_batches must be between 1 and 16")
-        if self.rethink_max_calls_per_round < 16:
-            raise ValueError("llm.rethink_max_calls_per_round must be at least 16")
+        if not 1 <= self.rethink_max_parallel_batches <= 4:
+            raise ValueError("llm.rethink_max_parallel_batches must be between 1 and 4")
+        if self.rethink_max_calls_per_round < 4:
+            raise ValueError("llm.rethink_max_calls_per_round must be at least 4")
         if not 0 <= self.rethink_call_reserve < self.rethink_max_calls_per_round:
             raise ValueError("llm.rethink_call_reserve must leave a positive call budget")
+        required_rethink_calls = 4 * (2 if self.rethink_thinking == "enabled" else 1)
+        if self.rethink_max_calls_per_round - self.rethink_call_reserve < required_rethink_calls:
+            raise ValueError(
+                "llm ReThink usable call budget must cover four dimension groups"
+            )
 
 
 @dataclass

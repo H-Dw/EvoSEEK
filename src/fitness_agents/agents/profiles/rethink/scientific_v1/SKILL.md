@@ -9,14 +9,15 @@ campaign state directly.
 
 ## 2. Input contract
 
-Read `activation_state`, `visible_baseline`, and the complete supplied candidate list. For
-each candidate, distinguish revealed measurements, dry outputs, selection rationale, hypothesis
-text, and evidence identifiers. Treat configured, executed, visible, and present as different
-states. Do not infer evidence content from an identifier or tool name alone.
+Read `activation_state`, `visible_baseline`, the frozen hypothesis and its deterministic assessment,
+and the supplied round-level evidence digest. The digest may retain sample IDs and measurements for
+traceability, but the requested output is one hypothesis-level reflection. Treat configured,
+executed, visible, and present as different states. Do not infer evidence content from an identifier
+or tool name alone.
 
 The input is limited to the final approved hypothesis, the final structured Critic decision, the
-runtime-owned deterministic `hypothesis_assessment`, selected-candidate intent/rationale and
-evidence IDs, dry validation summaries, revealed wet observations, and the visible pre-round
+runtime-owned deterministic `hypothesis_assessment`, criterion receipts, acquisition-arm summaries,
+sample evidence IDs, dry/wet disagreement records, revealed wet observations, and the visible pre-round
 baseline. Treat the assessment ID and status as authoritative. Do not request raw KG packs,
 rejected drafts, other Critic histories, hidden reasoning, or unselected candidates.
 
@@ -53,46 +54,43 @@ rejected drafts, other Critic histories, hidden reasoning, or unselected candida
 
 ## 4. Post-measurement reasoning hierarchy
 
-Follow this order for every candidate:
+Follow this order for the frozen hypothesis:
 
-1. verify candidate identity and use only its supplied complete-sequence record;
-2. establish the revealed value, comparator, baseline, and missing-data status;
+1. verify the hypothesis, assessment, criterion receipts, and round identity;
+2. establish the revealed batch outcomes, comparators, baseline, and missing-data status;
 3. compare revealed and dry values while preserving their different evidence status;
-4. compare the result with the preregistered hypothesis and candidate-specific rationale;
+4. compare the aggregate result and important exceptions with the preregistered hypothesis;
 5. inspect exactly eight dimensions: `measured_function`, `edit_level_direction`,
    `sequence_interaction_context`, `structural_context`, `evolutionary_context`,
    `physicochemical_context`, `feasibility_developability`, and `uncertainty_domain_shift`.
    Provenance is a cross-cutting constraint on every dimension, not a ninth dimension;
-6. separate positive findings, negative findings, conflicts, and unresolved dimensions;
-7. assign candidate-level `candidate_relation` (`support`, `conflict`, `mixed`, or
-   `inconclusive`) only relative to that candidate's supplied selection rationale; never present
-   it as the batch-level hypothesis verdict;
+6. separate retained claims, invalidated assumptions, and unresolved questions;
+7. use `relation_to_hypothesis` only to explain the authoritative assessment; never vote against or
+   replace the supplied assessment status;
 8. write next-round advice that follows the active design and selection route and identifies the
    next discriminating observation rather than inserting a fixed domain rule.
 
-After candidate-level review, ensure the advice preserves batch diversity, controls, falsification
+After hypothesis-level review, ensure the advice preserves batch diversity, controls, falsification
 value, and unresolved alternatives where those concerns are visible in the inputs.
 
 ## 5. Output contract
 
-Return one JSON object with a `reflections` array containing exactly one item for every supplied
-candidate and no other variant. Each reflection must contain
-`variant_id`, `candidate_relation`, `summary`, `positive_findings`, `negative_findings`,
-`revised_reason`, `next_round_advice`, one generated-schema `next_round_action` enum, and exactly
-eight `dimension_assessments`, one for each required dimension. The runtime owns and injects the
-batch-level assessment; do not return or reinterpret it.
+Return one `ReThinkDimensionGroupOutput` JSON object for the requested group. It must copy the
+request-local `hypothesis_id`, `assessment_id`, and `group_name`; contain exactly the two requested
+dimension assessments; and provide bounded retained claims, invalidated assumptions, unresolved
+questions, supporting observation/evidence IDs, allow-listed actions, and group advice. The runtime
+combines the four groups deterministically into one `HypothesisReflection`.
 
-- Target 300-900 characters for `summary`, `revised_reason`, and `next_round_advice`; the
-  generated schema permits up to 2000 characters. For dimension-group calls, target 250-800
+- For dimension-group calls, target 250-800
   characters for each `finding` and `implication` and no more than 2400 characters for
-  `group_advice`. Prefer complete, sample-specific statements over repeated background.
-- Use only `support`, `conflict`, `mixed`, or `inconclusive` as `candidate_relation`.
+  `group_advice`. Prefer complete, hypothesis-specific aggregate statements; mention an individual
+  observation only when it is decisive or an important exception.
 - Never change, reinterpret, or vote against the supplied batch assessment status.
-- Advice must select one allow-listed `next_round_action`; prose cannot create a new threshold,
+- Advice must select only allow-listed actions; prose cannot create a new threshold,
   hard constraint, or mutation requirement.
-- For every dimension, also return a `relation_to_sample_rationale`, a concise `finding_code`,
+- For every dimension, also return a `relation_to_hypothesis`, a concise `finding_code`,
   and `quality_status=model`; do not infer a positive or negative relation when evidence is absent.
-- Preserve the supplied request-local candidate and evidence identifiers exactly.
+- Preserve the supplied request-local hypothesis, assessment, observation, and evidence identifiers exactly.
 - Return JSON only, without Markdown fences or hidden reasoning.
 
 ## 6. Prohibited behavior

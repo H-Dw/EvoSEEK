@@ -21,9 +21,6 @@ from fitness_agents.agents.output_guards import (
     SemanticOutputValidationError,
     UnknownEvidenceIdsError,
 )
-from fitness_agents.agents.rethink import RETHINK_DIMENSIONS, NativeReThinkClient
-from fitness_agents.agents.transports import OpenAICompatibleChatTransport
-from fitness_agents.contracts.agent_io import ReThinkContextInput
 from fitness_agents.contracts.schemas import Evidence
 
 
@@ -105,6 +102,41 @@ def test_runtime_owned_hypothesis_id_never_enters_model_contract() -> None:
 
     assert remote.calls == 1
     assert hypothesis.hypothesis_id == "hyp:run:r1"
+
+
+def test_scientist_prompt_keeps_hypothesis_memory_as_advisory_context() -> None:
+    context = {
+        **_context(),
+        "prior_hypothesis_memory": [
+            {
+                "hypothesis_id": "h0",
+                "assessment_id": "ha0",
+                "assessment_status": "CONTRADICTED",
+                "retained_claims": [],
+                "invalidated_assumptions": ["The prior edit direction failed."],
+                "unresolved_questions": ["A matched alternative remains untested."],
+                "recommended_actions": ["test_matched_alternative"],
+                "observation_ids": ["v0"],
+                "evidence_ids": ["e0"],
+                "advisory_only": True,
+                "selection_eligible": False,
+            }
+        ],
+    }
+
+    messages = build_scientist_hypothesis_messages(
+        profile="scientist profile",
+        sanitized_context=context,
+        evidence=[],
+        output_schema=HYPOTHESIS_SCHEMA,
+    )
+    memory = json.loads(messages[1]["content"])["context"][
+        "prior_hypothesis_memory"
+    ][0]
+
+    assert memory["invalidated_assumptions"] == ["The prior edit direction failed."]
+    assert memory["advisory_only"] is True
+    assert memory["selection_eligible"] is False
 
 
 def test_main_synthesis_partial_all_positions_can_repair_to_abstention() -> None:
@@ -770,89 +802,3 @@ def test_mock_scientist_uses_critic_revision_parent_and_new_id() -> None:
     assert hypothesis.hypothesis_id == "hyp:run:r1:a1"
     assert hypothesis.parent_hypothesis_id == "hyp:run:r1"
     assert "Revised after critic" in hypothesis.statement
-
-
-def _reflection(variant_id: str) -> dict:
-    return {
-        "variant_id": variant_id,
-        "candidate_relation": "support",
-        "summary": "Wet evidence supports the round-specific reason.",
-        "positive_findings": ["Wet validation exceeded the baseline."],
-        "negative_findings": [],
-        "revised_reason": "Keep the reason bounded to this round.",
-        "next_round_advice": "Test matched alternatives.",
-        "next_round_action": "test_matched_alternative",
-        "dimension_assessments": [
-            {
-                "dimension": dimension,
-                "evidence_status": "missing",
-                "finding": "No additional dimension evidence is visible.",
-                "implication": "Keep the interpretation bounded.",
-            }
-            for dimension in RETHINK_DIMENSIONS
-        ],
-    }
-
-
-def test_rethink_coverage_mismatch_retries_inside_structured_boundary() -> None:
-    remote = _SequenceClient(
-        [
-            {"reflections": [_reflection("S01")]},
-            {"reflections": [_reflection("S01"), _reflection("S02")]},
-        ]
-    )
-    client = NativeReThinkClient.__new__(NativeReThinkClient)
-    client.model = "unit-test-model"
-    client.temperature = 0.0
-    client.max_tokens = 1024
-    client.reasoning_effort = None
-    client.thinking = None
-    client.profile_name = "scientific_v1"
-    client.profile = "Return exact candidate coverage."
-    client.reasoning_batch_size = 4
-    client.max_parallel_batches = 1
-    client.dimension_parallel = False
-    client.client = remote
-    client.transport = OpenAICompatibleChatTransport(remote)
-    context = ReThinkContextInput.model_validate(
-        {
-            "run_id": "run",
-            "round_id": 1,
-            "visible_baseline": 0.0,
-            "baseline_receipt": {
-                "value": 0.0,
-                "statistic": "pre_round_visible_median",
-                "source": "revealed_observations_before_current_round",
-            },
-            "measurement_contract": {
-                "assay_id": "assay:test",
-                "fitness_scale": "raw_assay",
-                "optimization_direction": "higher_is_better",
-            },
-            "final_critic_decision": {
-                "decision_id": "D01-00",
-                "verdict": "APPROVE",
-                "summary": "approved",
-                "cited_evidence_ids": [],
-            },
-            "candidates": [
-                {
-                    "variant_id": item,
-                    "mutation_notation": "V39A",
-                    "agent_reason": "bounded",
-                    "evidence_ids": [],
-                    "wet_value": 0.1,
-                    "dry_validations": [],
-                    "intent_arm": "coverage_exploration",
-                    "allow_hypothesis_mismatch": False,
-                    "falsification_role": "not_in_primary_criterion",
-                }
-                for item in ("v1", "v2")
-            ],
-        }
-    )
-
-    reflections = client.reflect_round(context=context)
-
-    assert remote.calls == 2
-    assert {item.variant_id for item in reflections} == {"v1", "v2"}

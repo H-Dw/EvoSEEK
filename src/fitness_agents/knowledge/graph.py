@@ -9,6 +9,8 @@ from typing import Any
 from fitness_agents.contracts.schemas import (
     Evidence,
     FitnessObservation,
+    HypothesisAssessment,
+    HypothesisReflection,
     Prediction,
     ValidationRecord,
     Variant,
@@ -111,6 +113,41 @@ class ObservationKnowledgeGraph:
                 evidence_ids_json TEXT NOT NULL,
                 status TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS hypothesis_assessments (
+                assessment_id TEXT PRIMARY KEY,
+                hypothesis_id TEXT NOT NULL,
+                falsification_spec_id TEXT NOT NULL,
+                round_id INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                criterion_results_json TEXT NOT NULL,
+                observation_ids_json TEXT NOT NULL,
+                decisive_criterion_ids_json TEXT NOT NULL,
+                unresolved_criterion_ids_json TEXT NOT NULL,
+                evaluator_version TEXT NOT NULL,
+                FOREIGN KEY (hypothesis_id) REFERENCES hypotheses(hypothesis_id)
+            );
+            CREATE TABLE IF NOT EXISTS hypothesis_reflections (
+                reflection_id TEXT PRIMARY KEY,
+                hypothesis_id TEXT NOT NULL,
+                assessment_id TEXT NOT NULL,
+                round_id INTEGER NOT NULL,
+                assessment_status TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                retained_claims_json TEXT NOT NULL,
+                invalidated_assumptions_json TEXT NOT NULL,
+                unresolved_questions_json TEXT NOT NULL,
+                recommended_actions_json TEXT NOT NULL,
+                supporting_observation_ids_json TEXT NOT NULL,
+                supporting_evidence_ids_json TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                quality_status TEXT NOT NULL,
+                advisory_only INTEGER NOT NULL,
+                selection_eligible INTEGER NOT NULL,
+                dimension_assessments_json TEXT NOT NULL,
+                dimension_group_advice_json TEXT NOT NULL,
+                FOREIGN KEY (hypothesis_id) REFERENCES hypotheses(hypothesis_id),
+                FOREIGN KEY (assessment_id) REFERENCES hypothesis_assessments(assessment_id)
+            );
             CREATE TABLE IF NOT EXISTS agent_queries (
                 query_id TEXT PRIMARY KEY,
                 operation TEXT NOT NULL,
@@ -132,12 +169,8 @@ class ObservationKnowledgeGraph:
                 reliability REAL NOT NULL,
                 agent_reason TEXT NOT NULL,
                 hypothesis_id TEXT,
+                assessment_id TEXT,
                 evidence_ids_json TEXT NOT NULL,
-                reflection_id TEXT,
-                reflection_verdict TEXT,
-                reflection_summary TEXT NOT NULL,
-                reflection_quality_status TEXT,
-                reflection_advisory_only INTEGER NOT NULL DEFAULT 1,
                 FOREIGN KEY (variant_id) REFERENCES variants(variant_id)
             );
             CREATE INDEX IF NOT EXISTS idx_observations_round
@@ -196,8 +229,7 @@ class ObservationKnowledgeGraph:
             ).fetchall()
         }
         additions = {
-            "reflection_quality_status": "TEXT",
-            "reflection_advisory_only": "INTEGER NOT NULL DEFAULT 1",
+            "assessment_id": "TEXT",
         }
         for column, definition in additions.items():
             if column not in existing:
@@ -368,6 +400,86 @@ class ObservationKnowledgeGraph:
                 (hypothesis_id, round_id, statement, json.dumps(list(evidence_ids)), status),
             )
 
+    def add_hypothesis_assessment(self, assessment: HypothesisAssessment) -> None:
+        criterion_results = [
+            {
+                "criterion_id": item.criterion_id,
+                "signal": item.signal.value,
+                "metric_value": item.metric_value,
+                "comparator_value": item.comparator_value,
+                "effect_size": item.effect_size,
+                "observation_ids": list(item.observation_ids),
+                "qc_status": item.qc_status,
+                "detector_name": item.detector_name,
+                "detector_version": item.detector_version,
+                "reason_code": item.reason_code,
+            }
+            for item in assessment.criterion_results
+        ]
+        with self.connection:
+            self.connection.execute(
+                """
+                INSERT OR REPLACE INTO hypothesis_assessments
+                    (assessment_id, hypothesis_id, falsification_spec_id, round_id, status,
+                     criterion_results_json, observation_ids_json,
+                     decisive_criterion_ids_json, unresolved_criterion_ids_json,
+                     evaluator_version)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    assessment.assessment_id,
+                    assessment.hypothesis_id,
+                    assessment.falsification_spec_id,
+                    assessment.round_id,
+                    assessment.status.value,
+                    json.dumps(criterion_results),
+                    json.dumps(assessment.observation_ids),
+                    json.dumps(assessment.decisive_criterion_ids),
+                    json.dumps(assessment.unresolved_criterion_ids),
+                    assessment.evaluator_version,
+                ),
+            )
+            self.connection.execute(
+                "UPDATE hypotheses SET status = ? WHERE hypothesis_id = ?",
+                (assessment.status.value, assessment.hypothesis_id),
+            )
+
+    def add_hypothesis_reflection(self, reflection: HypothesisReflection) -> None:
+        with self.connection:
+            self.connection.execute(
+                """
+                INSERT OR REPLACE INTO hypothesis_reflections
+                    (reflection_id, hypothesis_id, assessment_id, round_id,
+                     assessment_status, summary, retained_claims_json,
+                     invalidated_assumptions_json, unresolved_questions_json,
+                     recommended_actions_json, supporting_observation_ids_json,
+                     supporting_evidence_ids_json, provider, quality_status,
+                     advisory_only, selection_eligible, dimension_assessments_json,
+                     dimension_group_advice_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    reflection.reflection_id,
+                    reflection.hypothesis_id,
+                    reflection.assessment_id,
+                    reflection.round_id,
+                    reflection.assessment_status,
+                    reflection.summary,
+                    json.dumps(reflection.retained_claims),
+                    json.dumps(reflection.invalidated_assumptions),
+                    json.dumps(reflection.unresolved_questions),
+                    json.dumps(reflection.recommended_actions),
+                    json.dumps(reflection.supporting_observation_ids),
+                    json.dumps(reflection.supporting_evidence_ids),
+                    reflection.provider,
+                    reflection.quality_status,
+                    int(reflection.advisory_only),
+                    int(reflection.selection_eligible),
+                    json.dumps(reflection.dimension_assessments),
+                    json.dumps(reflection.dimension_group_advice),
+                ),
+            )
+
     def add_validation_records(self, records: Sequence[ValidationRecord]) -> None:
         """Append versioned wet/dry validation records without replacing earlier rounds."""
 
@@ -386,10 +498,8 @@ class ObservationKnowledgeGraph:
                         (record_id, variant_id, round_id, validation_type,
                          mutation_notation, value, uncertainty, source_id, model_version,
                          base_weight, reliability, agent_reason, hypothesis_id,
-                         evidence_ids_json, reflection_id, reflection_verdict,
-                         reflection_summary, reflection_quality_status,
-                         reflection_advisory_only)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         assessment_id, evidence_ids_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         item.record_id,
@@ -405,12 +515,8 @@ class ObservationKnowledgeGraph:
                         item.reliability,
                         item.agent_reason,
                         item.hypothesis_id,
+                        item.assessment_id,
                         json.dumps(item.evidence_ids),
-                        item.reflection_id,
-                        item.reflection_verdict,
-                        item.reflection_summary,
-                        item.reflection_quality_status,
-                        int(item.reflection_advisory_only),
                     ),
                 )
 
@@ -443,9 +549,8 @@ class ObservationKnowledgeGraph:
             """
             SELECT record_id, variant_id, round_id, validation_type, mutation_notation,
                    value, uncertainty, source_id, model_version, base_weight,
-                   reliability, agent_reason, hypothesis_id, evidence_ids_json,
-                   reflection_id, reflection_verdict, reflection_summary
-                   , reflection_quality_status, reflection_advisory_only
+                   reliability, agent_reason, hypothesis_id, assessment_id,
+                   evidence_ids_json
             FROM validation_records
             WHERE round_id < ?
             ORDER BY round_id DESC, validation_type, variant_id, record_id
@@ -474,12 +579,8 @@ class ObservationKnowledgeGraph:
                     "recency_age": age,
                     "agent_reason": row[11],
                     "hypothesis_id": row[12],
-                    "evidence_ids": json.loads(row[13]),
-                    "reflection_id": row[14],
-                    "reflection_verdict": row[15],
-                    "reflection_summary": row[16],
-                    "reflection_quality_status": row[17],
-                    "reflection_advisory_only": bool(row[18]),
+                    "assessment_id": row[13],
+                    "evidence_ids": json.loads(row[14]),
                     "source_type": (
                         "measurement" if row[3] == "wet" else "model_prediction"
                     ),
@@ -677,6 +778,50 @@ class ObservationKnowledgeGraph:
             }
             for row in hypothesis_rows
         ]
+        memory_rows = self.connection.execute(
+            """
+            SELECT h.hypothesis_id, h.round_id, h.statement, h.status,
+                   a.assessment_id, a.status, a.criterion_results_json,
+                   a.decisive_criterion_ids_json, a.unresolved_criterion_ids_json,
+                   r.reflection_id, r.summary, r.retained_claims_json,
+                   r.invalidated_assumptions_json, r.unresolved_questions_json,
+                   r.recommended_actions_json, r.supporting_observation_ids_json,
+                   r.supporting_evidence_ids_json, r.quality_status,
+                   r.advisory_only, r.selection_eligible
+            FROM hypotheses h
+            JOIN hypothesis_assessments a ON a.hypothesis_id = h.hypothesis_id
+            LEFT JOIN hypothesis_reflections r ON r.assessment_id = a.assessment_id
+            WHERE h.round_id < ?
+            ORDER BY a.round_id DESC, a.assessment_id, r.reflection_id
+            LIMIT ?
+            """,
+            (round_id, limit),
+        ).fetchall()
+        prior_hypothesis_memory = [
+            {
+                "hypothesis_id": row[0],
+                "source_round": int(row[1]),
+                "hypothesis": row[2],
+                "hypothesis_status": row[3],
+                "assessment_id": row[4],
+                "assessment_status": row[5],
+                "criterion_results": json.loads(row[6]),
+                "decisive_criteria": json.loads(row[7]),
+                "unresolved_criteria": json.loads(row[8]),
+                "reflection_id": row[9],
+                "reflection": row[10] or "",
+                "retained_claims": json.loads(row[11]) if row[11] else [],
+                "invalidated_assumptions": json.loads(row[12]) if row[12] else [],
+                "unresolved_questions": json.loads(row[13]) if row[13] else [],
+                "recommended_actions": json.loads(row[14]) if row[14] else [],
+                "observation_ids": json.loads(row[15]) if row[15] else [],
+                "evidence_ids": json.loads(row[16]) if row[16] else [],
+                "quality_status": row[17],
+                "advisory_only": bool(row[18]) if row[18] is not None else True,
+                "selection_eligible": bool(row[19]) if row[19] is not None else False,
+            }
+            for row in memory_rows
+        ]
         evidence_preview_rows = self.connection.execute(
             """
             SELECT evidence_id, variant_id, channel, statement, score, source_id,
@@ -722,6 +867,7 @@ class ObservationKnowledgeGraph:
             "top_knowledge_evidence": top_knowledge_evidence,
             "current_candidate_predictions": candidates,
             "prior_hypotheses": prior_hypotheses,
+            "prior_hypothesis_memory": prior_hypothesis_memory,
             "validation_prior": validation_prior,
         }
 
@@ -767,7 +913,7 @@ class ObservationKnowledgeGraph:
             """
             SELECT record_id, round_id, validation_type, value, uncertainty, source_id,
                    model_version, base_weight, reliability, agent_reason,
-                   reflection_verdict, reflection_summary
+                   hypothesis_id, assessment_id
             FROM validation_records WHERE variant_id = ? AND round_id < ?
             ORDER BY round_id DESC, validation_type, record_id
             """,
@@ -837,8 +983,8 @@ class ObservationKnowledgeGraph:
                     "base_weight": float(row[7]),
                     "reliability": float(row[8]),
                     "agent_reason": row[9],
-                    "reflection_verdict": row[10],
-                    "reflection_summary": row[11],
+                    "hypothesis_id": row[10],
+                    "assessment_id": row[11],
                 }
                 for row in validation
             ],
@@ -972,7 +1118,7 @@ class ObservationKnowledgeGraph:
             """
             SELECT record_id, variant_id, round_id, validation_type, value,
                    uncertainty, source_id, model_version, base_weight, reliability,
-                   reflection_id, reflection_verdict
+                   hypothesis_id, assessment_id
             FROM validation_records ORDER BY round_id, validation_type, variant_id
             """
         ).fetchall()
@@ -988,8 +1134,8 @@ class ObservationKnowledgeGraph:
                 "model_version": row[7],
                 "base_weight": row[8],
                 "reliability": row[9],
-                "reflection_id": row[10],
-                "reflection_verdict": row[11],
+                "hypothesis_id": row[10],
+                "assessment_id": row[11],
                 "predicate": "VALIDATED_BY_WET" if row[3] == "wet" else "VALIDATED_BY_DRY",
             }
             for row in validation_rows

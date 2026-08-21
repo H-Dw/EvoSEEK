@@ -6,7 +6,7 @@ from typing import Any, Protocol
 
 import numpy as np
 
-from .agent_io import ReThinkContextInput, ScientistContextInput
+from .agent_io import HypothesisReflectionContextInput, ScientistContextInput
 from .schemas import (
     ApprovedBatch,
     CampaignState,
@@ -18,8 +18,8 @@ from .schemas import (
     FitnessObservation,
     Hypothesis,
     HypothesisAssessment,
+    HypothesisReflection,
     Prediction,
-    ReThinkReflection,
     SelectionRecord,
     Variant,
 )
@@ -90,9 +90,9 @@ class KnowledgeGraphTool(Protocol):
 class ReThinkClient(Protocol):
     provider_name: str
 
-    def reflect_round(
-        self, *, context: ReThinkContextInput
-    ) -> tuple[ReThinkReflection, ...]: ...
+    def reflect_hypothesis(
+        self, *, context: HypothesisReflectionContextInput
+    ) -> HypothesisReflection | None: ...
 
 
 class AcquisitionPolicy(Protocol):

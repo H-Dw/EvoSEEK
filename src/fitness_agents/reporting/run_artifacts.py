@@ -109,8 +109,7 @@ def write_campaign_outputs(
                 "mutation_count": variant.mutation_count,
                 "dry_validation": [record.value for record in dry],
                 "wet_validation": [record.value for record in wet],
-                "rethink_verdict": wet[0].reflection_verdict if wet else None,
-                "rethink_summary": wet[0].reflection_summary if wet else "",
+                "assessment_id": wet[0].assessment_id if wet else None,
             }
             rows.append(row)
             top_rows.append(row)
@@ -160,30 +159,34 @@ def write_campaign_outputs(
                 )
             lines.extend(
                 [
-                    "| Rank | Mutation | Driver | Agent score | UQ | Dry | Wet | ReThink |",
-                    "|---:|---|---|---:|---:|---|---|---|",
+                    "| Rank | Mutation | Driver | Agent score | UQ | Dry | Wet |",
+                    "|---:|---|---|---:|---:|---|---|",
                 ]
             )
             for row in (item for item in top_rows if int(item["round_id"]) == round_id):
                 lines.append(
                     "| {selection_order} | `{mutation_notation}` | {selection_driver} | "
-                    "{design_score:.4f} | {design_uncertainty:.4f} | {dry} | {wet} | {rethink} |".format(
+                    "{design_score:.4f} | {design_uncertainty:.4f} | {dry} | {wet} |".format(
                         **row,
                         dry=", ".join(f"{value:.4f}" for value in row["dry_validation"]),
                         wet=", ".join(f"{value:.4f}" for value in row["wet_validation"]),
-                        rethink=row["rethink_verdict"] or "",
                     )
                 )
             lines.append("")
             for reflection in (
-                item for item in state.rethink_reflections if item.round_id == round_id
+                item for item in state.hypothesis_reflections if item.round_id == round_id
             ):
                 lines.extend(
                     [
                         (
-                            f"- `{variants[reflection.variant_id].mutation_notation}`: "
-                            f"**{reflection.verdict}** — {reflection.summary}"
+                            f"Hypothesis reflection ({reflection.assessment_status}): "
+                            f"{reflection.summary}"
                         ),
+                        "",
+                        "- Retained: " + "; ".join(reflection.retained_claims),
+                        "- Invalidated: " + "; ".join(reflection.invalidated_assumptions),
+                        "- Unresolved: " + "; ".join(reflection.unresolved_questions),
+                        "- Next actions: " + "; ".join(reflection.recommended_actions),
                     ]
                 )
             lines.append("")

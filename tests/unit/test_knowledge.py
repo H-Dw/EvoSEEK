@@ -2,9 +2,19 @@ import json
 
 import pytest
 
-from fitness_agents.contracts.schemas import FitnessObservation, Prediction, ValidationRecord
+from fitness_agents.contracts.schemas import (
+    CriterionResult,
+    CriterionSignal,
+    FitnessObservation,
+    HypothesisAssessment,
+    HypothesisReflection,
+    HypothesisStatus,
+    Prediction,
+    ValidationRecord,
+)
 from fitness_agents.data import load_dataset_bundle
 from fitness_agents.knowledge import KnowledgeEngine
+from fitness_agents.knowledge.graph import ObservationKnowledgeGraph
 
 
 def test_knowledge_channels_are_independently_switchable(experiment_config, tmp_path):
@@ -117,17 +127,15 @@ def test_validation_priors_append_and_apply_fidelity_and_recency_weights(
     records = (
         ValidationRecord(
             "wet:1", variant.variant_id, 1, "wet", variant.mutation_notation,
-            1.0, 0.0, "assay", None, 1.0, 1.0, "reason", "h1", (),
-            None, "supported", "wet support",
+            1.0, 0.0, "assay", None, 1.0, 1.0, "reason", "h1", "ha1", (),
         ),
         ValidationRecord(
             "dry:1", variant.variant_id, 1, "dry", variant.mutation_notation,
-            0.8, 0.2, "predictor", "model:v1", 0.2, 0.5, "reason", "h1", (),
-            None, "supported", "dry support",
+            0.8, 0.2, "predictor", "model:v1", 0.2, 0.5, "reason", "h1", "ha1", (),
         ),
     )
-    engine.record_validation(records, ())
-    engine.record_validation(records, ())
+    engine.record_validation(records)
+    engine.record_validation(records)
 
     next_round = engine.graph.validation_prior_context(round_id=2, limit=10)
     later_round = engine.graph.validation_prior_context(round_id=3, limit=10)
@@ -141,6 +149,75 @@ def test_validation_priors_append_and_apply_fidelity_and_recency_weights(
     assert later_weights["wet"] == pytest.approx(0.85)
     assert later_weights["dry"] == pytest.approx(0.085)
     engine.close()
+
+
+def test_hypothesis_memory_is_separate_from_sample_validation_rows(tmp_path) -> None:
+    graph = ObservationKnowledgeGraph(
+        tmp_path / "hypothesis-memory.sqlite",
+        assay_id="test",
+        recency_decay=0.85,
+        wild_type_code="A",
+        mutable_positions=(1,),
+    )
+    graph.add_hypothesis("h1", 1, "A bounded testable claim.", ("e1",))
+    assessment = HypothesisAssessment(
+        "ha1",
+        "h1",
+        "fs1",
+        1,
+        HypothesisStatus.CONTRADICTED,
+        (
+            CriterionResult(
+                "c1",
+                CriterionSignal.CONTRADICT,
+                -0.2,
+                0.0,
+                -0.2,
+                ("v1",),
+                "ok",
+                "mean_delta",
+                "v1",
+                "target_below_control",
+            ),
+        ),
+        ("v1",),
+        ("c1",),
+        (),
+        "v1",
+    )
+    reflection = HypothesisReflection(
+        "hr1",
+        "h1",
+        "ha1",
+        1,
+        "CONTRADICTED",
+        "The tested assumption was contradicted.",
+        (),
+        ("The target edit direction is not reusable.",),
+        ("The matched alternative remains untested.",),
+        ("test_matched_alternative",),
+        ("v1",),
+        ("e1",),
+        "mock_rethink",
+    )
+    graph.add_hypothesis_assessment(assessment)
+    graph.add_hypothesis_reflection(reflection)
+
+    context = graph.agent_hypothesis_context(round_id=2, limit=5)
+
+    assert context["validation_prior"] == []
+    assert len(context["prior_hypothesis_memory"]) == 1
+    memory = context["prior_hypothesis_memory"][0]
+    assert memory["assessment_status"] == "CONTRADICTED"
+    assert memory["invalidated_assumptions"] == [
+        "The target edit direction is not reusable."
+    ]
+    assert memory["selection_eligible"] is False
+    status = graph.connection.execute(
+        "SELECT status FROM hypotheses WHERE hypothesis_id = 'h1'"
+    ).fetchone()[0]
+    assert status == "CONTRADICTED"
+    graph.close()
 
 
 def test_evidence_for_can_score_kg_without_static_channels(experiment_config, tmp_path):

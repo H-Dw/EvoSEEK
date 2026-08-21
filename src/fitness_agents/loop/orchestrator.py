@@ -27,7 +27,7 @@ from fitness_agents.agents.main_hypothesis_critic import (
 )
 from fitness_agents.agents.output_guards import RevisionConstraints, critic_revision_payload
 from fitness_agents.agents.profile_loader import load_role_profile
-from fitness_agents.agents.rethink import create_rethink_client
+from fitness_agents.agents.rethink import build_round_evidence_digest, create_rethink_client
 from fitness_agents.agents.scientist import ScientistAgent
 from fitness_agents.agents.subcritic import (
     DeterministicSubGateReviewer,
@@ -37,7 +37,7 @@ from fitness_agents.agents.subcritic import (
 from fitness_agents.agents.subscientist import RemoteSubScientist, RuleBasedSubScientist
 from fitness_agents.config import ExperimentConfig
 from fitness_agents.contracts.agent_io import (
-    ReThinkContextInput,
+    HypothesisReflectionContextInput,
     RoleActivationState,
     ScientistContextInput,
 )
@@ -493,15 +493,14 @@ class CampaignRunner:
                 "render_max_tokens": self.config.llm.rethink_render_max_tokens,
                 "reasoning_effort": self.config.llm.rethink_reasoning_effort,
                 "thinking": self.config.llm.rethink_thinking,
-                "reasoning_batch_size": (
-                    self.config.llm.rethink_reasoning_batch_size
-                ),
                 "max_parallel_batches": (
                     self.config.llm.rethink_max_parallel_batches
                 ),
                 "max_calls_per_round": self.config.llm.rethink_max_calls_per_round,
                 "call_reserve": self.config.llm.rethink_call_reserve,
-                "dimension_parallel": self.config.llm.rethink_dimension_parallel,
+                "parallel_dimension_groups": (
+                    self.config.llm.rethink_parallel_dimension_groups
+                ),
             },
             **llm_runtime_settings,
         )
@@ -1258,9 +1257,6 @@ class CampaignRunner:
                     self.config.llm.allow_unknown_evidence_stripping
                 ),
                 "max_input_chars": self.config.llm.max_input_chars,
-                "rethink_reasoning_batch_size": (
-                    self.config.llm.rethink_reasoning_batch_size
-                ),
                 "rethink_max_tokens": self.config.llm.rethink_max_tokens,
                 "rethink_render_max_tokens": (
                     self.config.llm.rethink_render_max_tokens
@@ -1276,8 +1272,8 @@ class CampaignRunner:
                     self.config.llm.rethink_max_calls_per_round
                 ),
                 "rethink_call_reserve": self.config.llm.rethink_call_reserve,
-                "rethink_dimension_parallel": (
-                    self.config.llm.rethink_dimension_parallel
+                "rethink_parallel_dimension_groups": (
+                    self.config.llm.rethink_parallel_dimension_groups
                 ),
                 "trace_role": "observability_only",
                 "scientific_state_source": "wet_dry_kg_artifact",
@@ -3755,18 +3751,73 @@ class CampaignRunner:
                 if criterion.primary
                 for variant_id in criterion.target_variant_ids
             }
-            sample_review_by_id = {
-                str(item.get("candidate_id")): dict(item)
-                for item in review_result.decision.sample_reviews
-                if isinstance(item, dict) and item.get("candidate_id")
-            }
-            missing_sample_reviews = sorted(set(selected_ids).difference(sample_review_by_id))
-            if missing_sample_reviews:
-                raise ValueError(
-                    "Final Critic sample_reviews do not cover selected ReThink samples; "
-                    f"missing={missing_sample_reviews}"
-                )
-            rethink_context = ReThinkContextInput.model_validate(
+            rethink_observations = [
+                {
+                    "variant_id": variant_id,
+                    "mutation_notation": public_by_id[variant_id].mutation_notation,
+                    "evidence_ids": list(selection_by_id[variant_id].evidence_ids),
+                    "wet_value": revealed_by_id[variant_id].fitness,
+                    "dry_validations": [
+                        {
+                            "value": prediction.fitness_mean,
+                            "uncertainty": prediction.fitness_std,
+                            "ood_score": prediction.ood_score,
+                            "model_version": prediction.model_version,
+                            "source_kind": "dry_validation",
+                            "decision_eligible": False,
+                            "calibration_status": "uncalibrated",
+                            "prediction_status": "evaluated",
+                        }
+                        for prediction in dry_by_variant[variant_id]
+                    ],
+                    "intent_arm": final_review_context.candidate_intent_by_id[
+                        variant_id
+                    ].arm,
+                    "matched_to": final_review_context.candidate_intent_by_id[
+                        variant_id
+                    ].matched_to,
+                    "allow_hypothesis_mismatch": final_review_context.candidate_intent_by_id[
+                        variant_id
+                    ].allow_hypothesis_mismatch,
+                    "falsification_role": (
+                        "target"
+                        if variant_id in primary_target_ids
+                        else "not_in_primary_criterion"
+                    ),
+                }
+                for variant_id in selected_ids
+            ]
+            criterion_receipts = (
+                [
+                    {
+                        "criterion_id": result.criterion_id,
+                        "signal": result.signal.value,
+                        "metric_value": result.metric_value,
+                        "comparator_value": result.comparator_value,
+                        "effect_size": result.effect_size,
+                        "observation_ids": list(result.observation_ids),
+                        "qc_status": result.qc_status,
+                        "detector_name": result.detector_name,
+                        "detector_version": result.detector_version,
+                        "reason_code": result.reason_code,
+                    }
+                    for result in assessment.criterion_results
+                ]
+                if assessment is not None
+                else []
+            )
+            rethink_digest = build_round_evidence_digest(
+                rethink_observations,
+                visible_baseline=pre_round_visible_baseline,
+                optimization_direction="higher_is_better",
+                criterion_receipts=criterion_receipts,
+            )
+            rethink_applicable = (
+                hypothesis is not None
+                and assessment is not None
+                and review_result.draft.falsification_spec is not None
+            )
+            rethink_context = HypothesisReflectionContextInput.model_validate(
                 {
                     "run_id": self.run_id,
                     "round_id": round_id,
@@ -3793,7 +3844,7 @@ class CampaignRunner:
                             "falsification_criterion": hypothesis.falsification_criterion,
                             "evidence_ids": list(hypothesis.evidence_ids),
                         }
-                        if hypothesis is not None
+                        if rethink_applicable
                         else None
                     ),
                     "final_critic_decision": {
@@ -3810,6 +3861,8 @@ class CampaignRunner:
                             "hypothesis_id": assessment.hypothesis_id,
                             "falsification_spec_id": assessment.falsification_spec_id,
                             "status": assessment.status.value,
+                            "criterion_results": criterion_receipts,
+                            "observation_ids": list(assessment.observation_ids),
                             "decisive_criterion_ids": list(
                                 assessment.decisive_criterion_ids
                             ),
@@ -3818,7 +3871,7 @@ class CampaignRunner:
                             ),
                             "evaluator_version": assessment.evaluator_version,
                         }
-                        if assessment is not None
+                        if rethink_applicable
                         else None
                     ),
                     "falsification_spec": (
@@ -3844,87 +3897,39 @@ class CampaignRunner:
                                 for criterion in review_result.draft.falsification_spec.criteria
                             ],
                         }
-                        if review_result.draft.falsification_spec is not None
+                        if rethink_applicable
                         else None
                     ),
-                    "candidates": [
-                        {
-                            "variant_id": variant_id,
-                            "mutation_notation": public_by_id[variant_id].mutation_notation,
-                            "agent_reason": selection_by_id[variant_id].reason,
-                            "feature_analysis": sample_review_by_id[variant_id].get(
-                                "feature_analysis", ""
-                            ),
-                            "critic_explanation": sample_review_by_id[variant_id].get(
-                                "critic_explanation", ""
-                            ),
-                            "critic_suggestions": list(
-                                sample_review_by_id[variant_id].get("suggestions", ())
-                            ),
-                            "evidence_ids": list(selection_by_id[variant_id].evidence_ids),
-                            "wet_value": revealed_by_id[variant_id].fitness,
-                            "dry_validations": [
-                                {
-                                    "value": prediction.fitness_mean,
-                                    "uncertainty": prediction.fitness_std,
-                                    "ood_score": prediction.ood_score,
-                                    "model_version": prediction.model_version,
-                                    "source_kind": "dry_validation",
-                                    "decision_eligible": False,
-                                    "calibration_status": "uncalibrated",
-                                    "prediction_status": "evaluated",
-                                }
-                                for prediction in dry_by_variant[variant_id]
-                            ],
-                            "intent_arm": final_review_context.candidate_intent_by_id[
-                                variant_id
-                            ].arm,
-                            "matched_to": final_review_context.candidate_intent_by_id[
-                                variant_id
-                            ].matched_to,
-                            "allow_hypothesis_mismatch": final_review_context.candidate_intent_by_id[
-                                variant_id
-                            ].allow_hypothesis_mismatch,
-                            "falsification_role": (
-                                "target"
-                                if variant_id in primary_target_ids
-                                else "not_in_primary_criterion"
-                            ),
-                        }
-                        for variant_id in selected_ids
-                    ],
+                    "round_evidence_digest": rethink_digest.model_dump(mode="json"),
                 }
             )
-            reflections = ()
+            reflection = None
             if self.config.validation.rethink_enabled:
                 try:
-                    reflections = self.rethink_client.reflect_round(context=rethink_context)
-                    if {item.variant_id for item in reflections} != set(selected_ids):
-                        raise ValueError("ReThink output did not cover every selected variant")
+                    reflection = self.rethink_client.reflect_hypothesis(
+                        context=rethink_context
+                    )
                 except Exception as error:  # noqa: BLE001 - provider boundary must degrade safely
                     self._fallback_nodes.append(f"round_{round_id}:rethink")
                     self.writer.event(
                         "rethink_fallback_used",
                         {"round_id": round_id, "error": str(error)},
                     )
-                    reflections = create_rethink_client("mock").reflect_round(
+                    reflection = create_rethink_client("mock").reflect_hypothesis(
                         context=rethink_context
                     )
-                    reflections = tuple(
-                        replace(
-                            item,
+                    if reflection is not None:
+                        reflection = replace(
+                            reflection,
                             quality_status="deterministic_fallback",
                             advisory_only=True,
                         )
-                        for item in reflections
-                    )
-            reflection_by_id = {item.variant_id: item for item in reflections}
-            self.state.rethink_reflections.extend(reflections)
+            if reflection is not None:
+                self.state.hypothesis_reflections.append(reflection)
             current_validation_records: list[ValidationRecord] = []
             for variant_id in selected_ids:
                 variant = public_by_id[variant_id]
                 selection = selection_by_id[variant_id]
-                reflection = reflection_by_id.get(variant_id)
                 wet_observation = revealed_by_id[variant_id]
                 wet_source = f"wet:{wet_observation.source}"
                 current_validation_records.append(
@@ -3942,16 +3947,8 @@ class CampaignRunner:
                         reliability=1.0,
                         agent_reason=selection.reason,
                         hypothesis_id=selection.hypothesis_id,
+                        assessment_id=(assessment.assessment_id if assessment else None),
                         evidence_ids=selection.evidence_ids,
-                        reflection_id=(reflection.reflection_id if reflection else None),
-                        reflection_verdict=(reflection.verdict if reflection else None),
-                        reflection_summary=(reflection.summary if reflection else ""),
-                        reflection_quality_status=(
-                            reflection.quality_status if reflection else None
-                        ),
-                        reflection_advisory_only=(
-                            reflection.advisory_only if reflection else True
-                        ),
                     )
                 )
                 for prediction in dry_by_variant[variant_id]:
@@ -3979,24 +3976,18 @@ class CampaignRunner:
                             reliability=reliability,
                             agent_reason=selection.reason,
                             hypothesis_id=selection.hypothesis_id,
+                            assessment_id=(assessment.assessment_id if assessment else None),
                             evidence_ids=selection.evidence_ids,
-                            reflection_id=(reflection.reflection_id if reflection else None),
-                            reflection_verdict=(reflection.verdict if reflection else None),
-                            reflection_summary=(reflection.summary if reflection else ""),
-                            reflection_quality_status=(
-                                reflection.quality_status if reflection else None
-                            ),
-                            reflection_advisory_only=(
-                                reflection.advisory_only if reflection else True
-                            ),
                         )
                     )
             self.validation_records.extend(current_validation_records)
             if self.config.knowledge_enabled:
-                self.knowledge.record_validation(
-                    current_validation_records,
-                    reflections,
-                )
+                self.knowledge.record_validation(current_validation_records)
+                if assessment is not None:
+                    self.knowledge.record_hypothesis_learning(
+                        assessment=assessment,
+                        reflection=reflection,
+                    )
             self.writer.write_json(
                 f"round_{round_id:02d}/validation_matrix.json",
                 current_validation_records,
@@ -4006,8 +3997,33 @@ class CampaignRunner:
                 [item.__dict__ for item in current_validation_records],
             )
             self.writer.write_json(
+                f"round_{round_id:02d}/rethink_input_digest.json",
+                rethink_digest,
+            )
+            self.writer.write_json(
+                f"round_{round_id:02d}/rethink_dimension_groups.json",
+                (
+                    list(getattr(self.rethink_client, "last_dimension_groups", ()))
+                    if reflection is not None
+                    else []
+                ),
+            )
+            reflection_artifact = (
+                reflection
+                if reflection is not None
+                else {
+                    "status": "NOT_APPLICABLE",
+                    "round_id": round_id,
+                    "reason": "no assessed hypothesis was available",
+                }
+            )
+            self.writer.write_json(
+                f"round_{round_id:02d}/hypothesis_reflection.json",
+                reflection_artifact,
+            )
+            self.writer.write_json(
                 f"round_{round_id:02d}/rethink.json",
-                reflections,
+                reflection_artifact,
             )
             self._progress(
                 "rethink_completed",
@@ -4020,7 +4036,7 @@ class CampaignRunner:
                     )
                 ),
                 phase=CampaignPhase.RETHOUGHT,
-                reflection_count=len(reflections),
+                reflection_count=int(reflection is not None),
                 validation_record_count=len(current_validation_records),
             )
             selected_set = set(selected_ids)
@@ -4178,7 +4194,7 @@ class CampaignRunner:
             "selection_records": len(self.state.selections),
             "critique_decisions": len(self.state.critique_decisions),
             "hypothesis_assessments": len(self.state.hypothesis_assessments),
-            "rethink_reflections": len(self.state.rethink_reflections),
+            "hypothesis_reflections": len(self.state.hypothesis_reflections),
             "validation_records": len(self.validation_records),
             "selection_driver": selection_driver,
             "fitness_predictors_used_for_generation": (

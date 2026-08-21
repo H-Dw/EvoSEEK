@@ -1,10 +1,16 @@
 import pytest
 
 from fitness_agents.contracts.schemas import (
+    CriterionResult,
+    CriterionSignal,
     Evidence,
     FitnessObservation,
     Hypothesis,
+    HypothesisAssessment,
+    HypothesisReflection,
+    HypothesisStatus,
     Prediction,
+    ValidationRecord,
     Variant,
 )
 from fitness_agents.kg_knowledge import (
@@ -22,6 +28,7 @@ from fitness_agents.kg_knowledge import (
     RelationRecord,
     SiteFeatureKnowledgeAdapter,
     StaticKnowledgeAdapter,
+    ValidationKnowledgeAdapter,
     stable_record_id,
 )
 from fitness_agents.plugin_registry import PluginRegistry
@@ -77,6 +84,102 @@ def test_builder_converts_current_records_and_keeps_all_edges_grounded():
         edge.subject_id in entity_ids and edge.object_id in entity_ids
         for edge in result.snapshot.relations
     )
+    assert not [item for item in result.report.validation_issues if item.severity == "error"]
+
+
+def test_validation_adapter_keeps_reflection_at_hypothesis_level() -> None:
+    observation = FitnessObservation("v1", 0.9, "observed", 1, "wet")
+    assessment = HypothesisAssessment(
+        "ha1",
+        "h1",
+        "fs1",
+        1,
+        HypothesisStatus.SUPPORTED,
+        (
+            CriterionResult(
+                "c1",
+                CriterionSignal.SUPPORT,
+                0.9,
+                0.5,
+                0.4,
+                ("v1",),
+                "ok",
+                "mean_delta",
+                "v1",
+                "target_above_control",
+            ),
+        ),
+        ("v1",),
+        ("c1",),
+        (),
+        "v1",
+    )
+    reflection = HypothesisReflection(
+        "hr1",
+        "h1",
+        "ha1",
+        1,
+        "SUPPORTED",
+        "The assessed hypothesis is retained within the tested scope.",
+        ("Retain the bounded claim.",),
+        (),
+        ("Generalization remains unresolved.",),
+        ("test_matched_alternative",),
+        ("v1",),
+        ("e1",),
+        "mock_rethink",
+    )
+    validation = ValidationRecord(
+        "wet:1",
+        "v1",
+        1,
+        "wet",
+        "A3W",
+        0.9,
+        0.0,
+        "wet",
+        None,
+        1.0,
+        1.0,
+        "selected",
+        "h1",
+        "ha1",
+        ("e1",),
+    )
+    base = _context()
+    context = BuildContext(
+        base.run_id,
+        base.round_id,
+        base.protein_id,
+        base.assay_id,
+        base.condition_id,
+        {
+            **base.resources,
+            "observations": (observation,),
+            "validation_records": (validation,),
+            "hypothesis_assessments": (assessment,),
+            "hypothesis_reflections": (reflection,),
+        },
+    )
+    batch = ValidationKnowledgeAdapter().extract(context)
+
+    entity_types = {item.entity_type for item in batch.entities}
+    predicates = {item.predicate for item in batch.relations}
+    assert {"WetValidation", "HypothesisAssessment", "HypothesisReflection"} <= entity_types
+    assert {
+        "VALIDATES",
+        "ASSESSES",
+        "CONTRIBUTES_TO_ASSESSMENT",
+        "REFLECTS_ON",
+        "EXPLAINS_ASSESSMENT",
+        "GROUNDED_IN",
+    } <= predicates
+    assert "REFLECTED_BY" not in predicates
+    registry = PluginRegistry("knowledge_adapter")
+    registry.register("campaign_observations", CampaignObservationAdapter())
+    registry.register("inference_records", InferenceKnowledgeAdapter())
+    registry.register("validation_records", ValidationKnowledgeAdapter())
+    result = KnowledgeGraphBuilder(registry).build(context)
     assert not [item for item in result.report.validation_issues if item.severity == "error"]
 
 

@@ -1,7 +1,7 @@
 import pytest
 
-from fitness_agents.agents.profile_loader import load_role_profile
 from fitness_agents.agents.critic import load_critic_profile
+from fitness_agents.agents.profile_loader import load_role_profile
 from fitness_agents.config import (
     HierarchicalHypothesisConfig,
     LLMConfig,
@@ -34,11 +34,10 @@ def test_formal_feature_route_enables_hierarchy_and_bounded_retries() -> None:
     assert config.llm.rethink_render_max_tokens == 32768
     assert config.llm.rethink_reasoning_effort is None
     assert config.llm.rethink_thinking == "disabled"
-    assert config.llm.rethink_reasoning_batch_size == 1
-    assert config.llm.rethink_max_parallel_batches == 8
-    assert config.llm.rethink_max_calls_per_round == 256
-    assert config.llm.rethink_call_reserve == 96
-    assert config.llm.rethink_dimension_parallel is True
+    assert config.llm.rethink_max_parallel_batches == 4
+    assert config.llm.rethink_max_calls_per_round == 32
+    assert config.llm.rethink_call_reserve == 16
+    assert config.llm.rethink_parallel_dimension_groups is True
     assert config.scientist_prompt_evidence_limit == 32
     assert config.hierarchical_hypothesis.main_max_input_chars == 160000
     assert config.hierarchical_hypothesis.child_max_input_chars == 120000
@@ -92,8 +91,8 @@ def test_formal_retry_caps_reject_unbounded_configuration() -> None:
         HierarchicalHypothesisConfig(child_max_input_chars=4000)
     with pytest.raises(ValueError, match="max_tokens"):
         LLMConfig(max_tokens=131073)
-    with pytest.raises(ValueError, match="reasoning_batch_size"):
-        LLMConfig(rethink_reasoning_batch_size=9)
+    with pytest.raises(ValueError, match="max_parallel_batches"):
+        LLMConfig(rethink_max_parallel_batches=9)
     with pytest.raises(ValueError, match="rethink_max_tokens"):
         LLMConfig(rethink_max_tokens=131073)
     with pytest.raises(ValueError, match="child_sample_batch_size"):

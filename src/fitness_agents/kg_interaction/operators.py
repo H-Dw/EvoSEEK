@@ -88,6 +88,9 @@ class HypothesisContextOperator:
             provenance=_collect_provenance(evidence)[: context.max_rows],
             metadata={
                 "prior_hypotheses": list(result.get("prior_hypotheses", ())),
+                "prior_hypothesis_memory": list(
+                    result.get("prior_hypothesis_memory", ())
+                ),
                 "visibility_rule": result.get("visibility_rule"),
             },
         )

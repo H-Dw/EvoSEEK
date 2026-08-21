@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
@@ -15,8 +14,9 @@ from fitness_agents.contracts.schemas import (
     Evidence,
     FitnessObservation,
     Hypothesis,
+    HypothesisAssessment,
+    HypothesisReflection,
     Prediction,
-    ReThinkReflection,
     ValidationRecord,
     Variant,
 )
@@ -188,7 +188,8 @@ class KnowledgeEngine:
         self._observed_variants: dict[str, Variant] = {}
         self._observations: dict[str, FitnessObservation] = {}
         self._validation_records: dict[str, ValidationRecord] = {}
-        self._reflections: dict[str, ReThinkReflection] = {}
+        self._hypothesis_assessments: dict[str, HypothesisAssessment] = {}
+        self._hypothesis_reflections: dict[str, HypothesisReflection] = {}
         self._local_retrieval_results: dict[int, list[RetrievalResult]] = defaultdict(list)
         self._local_evidence: dict[int, list[Evidence]] = defaultdict(list)
         self._static_evidence_cache: dict[tuple[str, str], Evidence] = {}
@@ -357,11 +358,22 @@ class KnowledgeEngine:
     def record_validation(
         self,
         records: Sequence[ValidationRecord],
-        reflections: Sequence[ReThinkReflection],
     ) -> None:
         self.graph.add_validation_records(records)
         self._validation_records.update({item.record_id: item for item in records})
-        self._reflections.update({item.reflection_id: item for item in reflections})
+
+    def record_hypothesis_learning(
+        self,
+        assessment: HypothesisAssessment,
+        reflection: HypothesisReflection | None,
+    ) -> None:
+        """Persist hypothesis-level learning separately from sample validation rows."""
+
+        self.graph.add_hypothesis_assessment(assessment)
+        self._hypothesis_assessments[assessment.assessment_id] = assessment
+        if reflection is not None:
+            self.graph.add_hypothesis_reflection(reflection)
+            self._hypothesis_reflections[reflection.reflection_id] = reflection
 
     def validation_prior_scores(
         self,
@@ -420,7 +432,12 @@ class KnowledgeEngine:
                     "evidence": tuple(evidence),
                     "hypotheses": tuple(hypotheses),
                     "validation_records": tuple(self._validation_records.values()),
-                    "reflections": tuple(self._reflections.values()),
+                    "hypothesis_assessments": tuple(
+                        self._hypothesis_assessments.values()
+                    ),
+                    "hypothesis_reflections": tuple(
+                        self._hypothesis_reflections.values()
+                    ),
                     "local_retrieval_results": current_local_results,
                     "site_feature_tables": self.site_feature_tables(),
                 },
