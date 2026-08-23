@@ -248,6 +248,7 @@ def test_rethink_dimension_group_honors_configured_retry_budgets(monkeypatch) ->
     assert captured["unknown_evidence_retries"] == 1
     assert captured["empty_retries"] == 1
     assert captured["allow_unknown_evidence_stripping"] is True
+    assert "at most 12 strongest IDs" in captured["messages"][0]["content"]
 
 
 def test_mock_rethink_returns_one_hypothesis_reflection() -> None:

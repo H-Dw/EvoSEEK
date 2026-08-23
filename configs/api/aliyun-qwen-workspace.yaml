@@ -25,9 +25,10 @@ items:
     model_revision: "provider-managed:model-id:text-embedding-v4"
     dimension: 1024
     max_input_tokens: 8192
-    batch_size: 10
-    timeout_seconds: 30
-    max_retries: 3
+    # Smaller batches avoided TLS EOFs during live remote-index acceptance tests.
+    batch_size: 2
+    timeout_seconds: 60
+    max_retries: 5
     query_task: query
     document_task: document
     query_instruction: "Given an English scientific question about protein engineering, retrieve atomic evidence passages that directly support or constrain the question."

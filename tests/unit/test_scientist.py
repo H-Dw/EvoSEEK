@@ -1,5 +1,8 @@
 from fitness_agents.agents.llm import MockScientistLLMClient
-from fitness_agents.agents.scientist import ScientistAgent
+from fitness_agents.agents.scientist import (
+    ScientistAgent,
+    _bounded_prior_hypothesis_memory,
+)
 from fitness_agents.contracts.schemas import CampaignState
 from fitness_agents.data import load_dataset_bundle
 from fitness_agents.protein_features import ProteinTaskContext
@@ -37,6 +40,20 @@ class _StubKnowledgeGraphTool:
         }
 
 
+def test_prior_hypothesis_memory_excludes_current_reflection_and_is_bounded() -> None:
+    memories = {
+        "AS03": {"assessment_id": "AS03", "reflection": "current"},
+        "AS02": {"assessment_id": "AS02", "reflection": "previous"},
+        "AS01": {"assessment_id": "AS01", "reflection": "oldest"},
+        "AS00": {"assessment_id": "AS00", "reflection": "outside-limit"},
+    }
+
+    assert _bounded_prior_hypothesis_memory(
+        memories,
+        current_assessment_id="AS03",
+    ) == (memories["AS02"], memories["AS01"])
+
+
 def test_mock_scientist_produces_falsifiable_updated_hypothesis(experiment_config):
     bundle = load_dataset_bundle(
         experiment_config.task.public_data_path, experiment_config.task.oracle_data_path
@@ -48,7 +65,12 @@ def test_mock_scientist_produces_falsifiable_updated_hypothesis(experiment_confi
     )
     assert hypothesis.preferred_residues
     assert hypothesis.expected_outcome
-    assert "Reject or revise" in hypothesis.falsification_criterion
+    assert "preregistered pre-round visible-observation median" in (
+        hypothesis.falsification_criterion
+    )
+    assert "INCONCLUSIVE" in hypothesis.falsification_criterion
+    assert hypothesis.falsification_template["detector"] == "batch_median_lift"
+    assert hypothesis.falsification_template["missing_data_policy"] == "INCONCLUSIVE"
 
 
 def test_scientist_agent_calls_configured_knowledge_graph(experiment_config):

@@ -634,6 +634,8 @@ class NativeHypothesisReThinkClient:
                         "HypothesisDimensionGroupOutput JSON without hidden reasoning. Required "
                         "dimensions: "
                         + json.dumps(dimensions)
+                        + ". Keep supporting_observation_ids and supporting_evidence_ids to at "
+                        "most 12 strongest IDs each"
                         + ". Schema: "
                         + json.dumps(
                             HypothesisDimensionGroupOutput.model_json_schema(), ensure_ascii=False

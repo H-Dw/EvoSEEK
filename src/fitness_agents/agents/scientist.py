@@ -45,6 +45,21 @@ def assert_sanitized(value: Any, path: str = "context") -> None:
             assert_sanitized(item, f"{path}[{index}]")
 
 
+def _bounded_prior_hypothesis_memory(
+    memory_by_assessment: dict[str, dict[str, Any]],
+    *,
+    current_assessment_id: str | None,
+    limit: int = 2,
+) -> tuple[dict[str, Any], ...]:
+    """Keep older aggregate memories without duplicating the current reflection."""
+
+    return tuple(
+        item
+        for assessment_id, item in memory_by_assessment.items()
+        if assessment_id != current_assessment_id
+    )[:limit]
+
+
 class ScientistAgent:
     """Hypothesis/critic layer that never receives hidden oracle labels."""
 
@@ -301,9 +316,14 @@ class ScientistAgent:
                     if key:
                         memory_by_assessment[key] = item
             if memory_by_assessment:
-                memory_payload = tuple(memory_by_assessment.values())
-                assert_sanitized(memory_payload, "context.prior_hypothesis_memory")
-                context["prior_hypothesis_memory"] = memory_payload
+                previous_reflection = context.get("previous_hypothesis_reflection") or {}
+                memory_payload = _bounded_prior_hypothesis_memory(
+                    memory_by_assessment,
+                    current_assessment_id=previous_reflection.get("assessment_id"),
+                )
+                if memory_payload:
+                    assert_sanitized(memory_payload, "context.prior_hypothesis_memory")
+                    context["prior_hypothesis_memory"] = memory_payload
             self.last_knowledge_query_ids = tuple(pack.query_id for pack in kg_interaction.packs)
             self.last_knowledge_query_id = (
                 self.last_knowledge_query_ids[-1] if self.last_knowledge_query_ids else None

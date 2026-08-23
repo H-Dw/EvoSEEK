@@ -17,6 +17,9 @@ model_config: configs/model/baseline.yaml
 knowledge_config: configs/knowledge/gb1.qwen-api.yaml
 output_root: artifacts/gb1-rethink-hypothesis-live-api
 llm_config: configs/llm/deepseek.yaml
+llm:
+  max_input_chars: 220000
+  request_timeout_seconds: 240.0
 critic_config: configs/critic/deepseek_remote.yaml
 critic:
   max_revision_attempts: 0
