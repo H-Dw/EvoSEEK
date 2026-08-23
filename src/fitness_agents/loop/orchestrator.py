@@ -520,6 +520,7 @@ class CampaignRunner:
         }
         role_clients = create_role_client_bundle(
             self.config.llm.provider,
+            rethink_mode=self.config.validation.rethink_mode,
             profile=self.config.llm.profile,
             rethink_options={
                 "max_tokens": self.config.llm.rethink_max_tokens,
@@ -1308,8 +1309,18 @@ class CampaignRunner:
                 "profile_version": load_role_profile(
                     "scientist", self.config.llm.profile
                 ).metadata.get("version"),
+                "rethink_profile": (
+                    "sample_v1"
+                    if self.config.validation.rethink_mode == "sample"
+                    else self.config.llm.profile
+                ),
                 "rethink_profile_version": load_role_profile(
-                    "rethink", "scientific_v1"
+                    "rethink",
+                    (
+                        "sample_v1"
+                        if self.config.validation.rethink_mode == "sample"
+                        else self.config.llm.profile
+                    ),
                 ).metadata.get("version"),
                 "model": self.config.llm.model,
                 "base_url": self.config.llm.base_url,

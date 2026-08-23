@@ -5,10 +5,14 @@ import threading
 import time
 
 from fitness_agents.agents import rethink_sample as rethink_module
+from fitness_agents.agents.client_registry import create_role_client_bundle
 from fitness_agents.agents.output_contracts import ReThinkDimensionGroupOutput
 from fitness_agents.agents.rethink import create_rethink_client
 from fitness_agents.agents.rethink_sample import NativeReThinkClient
-from fitness_agents.contracts.agent_io import ReThinkContextInput
+from fitness_agents.contracts.agent_io import ReThinkContextInput, RoleActivationState
+from fitness_agents.contracts.rethink_sample_io import (
+    RoleActivationState as SampleRoleActivationState,
+)
 
 
 def _reflection(candidate: dict) -> dict:
@@ -37,6 +41,24 @@ def test_original_rethink_factory_remains_candidate_level() -> None:
     client = create_rethink_client("mock")
     assert hasattr(client, "reflect_round")
     assert not hasattr(client, "reflect_hypothesis")
+
+
+def test_role_bundle_defaults_to_original_candidate_level_rethink() -> None:
+    bundle = create_role_client_bundle("mock")
+    assert hasattr(bundle.rethink, "reflect_round")
+    assert not hasattr(bundle.rethink, "reflect_hypothesis")
+
+    hypothesis_bundle = create_role_client_bundle("mock", rethink_mode="hypothesis")
+    assert hasattr(hypothesis_bundle.rethink, "reflect_hypothesis")
+    assert not hasattr(hypothesis_bundle.rethink, "reflect_round")
+
+
+def test_rethink_modes_share_role_activation_contract_identity() -> None:
+    assert RoleActivationState is SampleRoleActivationState
+    context = _context(1)
+    payload = context.model_dump(mode="python")
+    payload["activation_state"] = RoleActivationState(role="rethink")
+    assert ReThinkContextInput.model_validate(payload).activation_state.role == "rethink"
 
 
 class _AdaptiveBatchClient:

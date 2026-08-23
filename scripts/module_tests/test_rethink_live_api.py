@@ -1,38 +1,34 @@
-"""Isolated live-API smoke test for hypothesis-level ReThink.
+"""Live three-round acceptance test for hypothesis-level ReThink.
 
-The production experiment config is loaded and asserted to remain Kermut, but the
-CampaignRunner is not created. Dry predictions come from an independent one-hot
-fixture so this smoke test cannot activate Kermut.
+The campaign uses DeepSeek for Scientist, Critic, and ReThink, and the Qwen
+embedding/reranker APIs for read-only RAG. GB1 benchmark measurements are the
+only round-level fitness values. No fitness model, including Kermut, is created;
+the mandatory final evaluator receives a benchmark-truth adapter.
 """
 
 from __future__ import annotations
 
 import argparse
+import csv
 import json
+import sqlite3
 import time
-from dataclasses import asdict
-from datetime import datetime, timezone
+from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
-import numpy as np
-import pandas as pd
-import yaml
+from fitness_agents.agents.remote_llm import load_project_env, resolve_secret
+from fitness_agents.config import ExperimentConfig, load_experiment_config
+from fitness_agents.contracts.schemas import FitnessObservation, Prediction, Variant
+from fitness_agents.loop import CampaignRunner
+from fitness_agents.utils.progress import configure_progress_logging
 
-from fitness_agents.agents.rethink import (
-    NativeHypothesisReThinkClient,
-    build_round_evidence_digest,
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_CONFIG = PROJECT_ROOT / "configs/experiments/gb1_rethink_hypothesis_live_api.yaml"
+RESTRICTED_RELATIVE_PATH = (
+    "claims/continuous_evolution_operations/maintain_mutagenesis_and_host_flow.md"
 )
-from fitness_agents.config import ModelConfig, load_experiment_config
-from fitness_agents.contracts.agent_io import HypothesisReflectionContextInput
-from fitness_agents.data import load_dataset_bundle
-from fitness_agents.models import create_predictor
-from fitness_agents.utils.artifacts import JsonArtifactWriter
-from fitness_agents.utils.progress import (
-    bind_progress,
-    configure_progress_logging,
-    reset_progress,
-)
-
 REQUIRED_DIMENSIONS = {
     "measured_function",
     "edit_level_direction",
@@ -46,356 +42,288 @@ REQUIRED_DIMENSIONS = {
 
 
 def _arguments() -> argparse.Namespace:
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument(
-        "--production-config",
-        default="configs/experiments/knowledge_agent.yaml",
+        "--output-root",
+        type=Path,
+        default=PROJECT_ROOT / "artifacts/gb1-rethink-hypothesis-live-api",
     )
-    parser.add_argument("--fixture-config", default="configs/model/baseline.yaml")
-    parser.add_argument("--output-root", default="artifacts/rethink_real_api")
     return parser.parse_args()
 
 
-def _fixture_context(root: Path, production, fixture_config: ModelConfig):
-    bundle = load_dataset_bundle(
-        production.task.public_data_path,
-        production.task.oracle_data_path,
-    )
-    fixture = create_predictor(fixture_config, seed=20260821)
-    fixture.fit(
-        bundle.initial_variants,
-        bundle.initial_observations,
-        bundle.validation_variants,
-        bundle.validation_observations,
-    )
-    candidates = tuple(bundle.oracle_pool[:4])
-    predictions = tuple(fixture.predict(candidates))
-    if len(predictions) != 4 or not all(
-        np.isfinite(item.fitness_mean) and item.fitness_std > 0
-        for item in predictions
-    ):
-        raise AssertionError("one-hot fixture did not produce four finite predictions")
+def _require_live_credentials() -> None:
+    load_project_env(PROJECT_ROOT)
+    missing = [
+        name
+        for name in ("DEEPSEEK_API_KEY", "DASHSCOPE_API_KEY")
+        if not resolve_secret(f"env:{name}", name)
+    ]
+    if missing:
+        raise RuntimeError(
+            "Missing required live-API environment variables: " + ", ".join(missing)
+        )
 
-    oracle = pd.read_csv(production.task.oracle_data_path).set_index("variant_id")
-    visible_baseline = float(
-        np.median([item.fitness for item in bundle.initial_observations])
+
+def _benchmark_truth(path: Path) -> dict[str, float]:
+    with path.open(encoding="utf-8", newline="") as handle:
+        return {row["variant_id"]: float(row["fitness"]) for row in csv.DictReader(handle)}
+
+
+class BenchmarkTruthEvaluator:
+    """Final-evaluation adapter that only replays authoritative benchmark values."""
+
+    model_version = "gb1-benchmark-truth:v1"
+
+    def __init__(self, truth: dict[str, float]) -> None:
+        self._truth = truth
+        self.fit_calls = 0
+
+    def fit(
+        self,
+        variants: Sequence[Variant],
+        observations: Sequence[FitnessObservation],
+        validation_variants: Sequence[Variant] | None = None,
+        validation_observations: Sequence[FitnessObservation] | None = None,
+    ) -> BenchmarkTruthEvaluator:
+        del variants, observations, validation_variants, validation_observations
+        self.fit_calls += 1
+        return self
+
+    def predict(self, variants: Sequence[Variant]) -> list[Prediction]:
+        return [
+            Prediction(
+                variant_id=variant.variant_id,
+                fitness_mean=self._truth[variant.variant_id],
+                fitness_std=0.0,
+                interval_90=(self._truth[variant.variant_id], self._truth[variant.variant_id]),
+                ood_score=0.0,
+                component_scores={"benchmark_truth": self._truth[variant.variant_id]},
+                model_version=self.model_version,
+                is_measured=True,
+            )
+            for variant in variants
+        ]
+
+
+def _live_config(path: Path, output_root: Path) -> ExperimentConfig:
+    config = load_experiment_config(path)
+    local = config.knowledge.local_knowledge
+    corpus_path = local.corpus_index_path or local.index_path
+    if corpus_path is None or not corpus_path.is_file():
+        raise FileNotFoundError("The prebuilt Qwen RAG corpus index is missing")
+    if not any(RESTRICTED_RELATIVE_PATH in root.exclude for root in local.roots):
+        raise AssertionError("The configured RAG roots do not exclude the restricted path")
+    overlay = output_root / "rag-overlays" / f"live-{time.time_ns()}.sqlite"
+    local = replace(
+        local,
+        corpus_mode="read_only_prebuilt",
+        retrieval_overlay_path=overlay,
     )
-    wet = {
-        item.variant_id: float(oracle.loc[item.variant_id, "fitness"])
-        for item in candidates
+    return replace(
+        config,
+        output_root=output_root,
+        knowledge=replace(config.knowledge, local_knowledge=local),
+    )
+
+
+def _assert_preflight(config: ExperimentConfig) -> None:
+    retrieval = config.knowledge.local_knowledge.retrieval
+    checks = {
+        "three rounds": config.rounds == 3,
+        "hypothesis ReThink enabled": (
+            config.validation.rethink_enabled
+            and config.validation.rethink_mode == "hypothesis"
+        ),
+        "DeepSeek Scientist/ReThink": config.llm.provider == "deepseek",
+        "remote DeepSeek Critic": (
+            config.critic.enabled
+            and config.critic.mode == "remote"
+            and config.critic.provider == "deepseek"
+        ),
+        "Kermut absent": config.model.name != "kermut",
+        "active learning disabled": not config.active_learning.enabled,
+        "generation predictors disabled": (
+            not config.generation.use_fitness_predictors
+            and not config.generation.predictor_models
+            and config.generation.predictor_weight == 0.0
+        ),
+        "dry validation disabled": (
+            not config.validation.enabled and not config.validation.predictor_models
+        ),
+        "read-only prebuilt RAG": (
+            config.knowledge.local_knowledge.enabled
+            and config.knowledge.local_knowledge.corpus_mode == "read_only_prebuilt"
+        ),
+        "Qwen API embedding": (
+            retrieval.mode == "hybrid"
+            and retrieval.dense_enabled
+            and retrieval.embedding_backend == "api"
+            and retrieval.embedding_api_config is not None
+            and retrieval.embedding_model_path is None
+        ),
+        "Qwen API reranker": (
+            retrieval.reranker_backend == "api"
+            and retrieval.reranker_api_config is not None
+            and retrieval.reranker_model_path is None
+        ),
     }
-    target_ids = tuple(item.variant_id for item in candidates[:2])
-    control_ids = tuple(item.variant_id for item in candidates[2:])
-    target_mean = float(np.mean([wet[item] for item in target_ids]))
-    control_mean = float(np.mean([wet[item] for item in control_ids]))
-    effect = target_mean - control_mean
-    status = "SUPPORTED" if effect > 0 else "CONTRADICTED"
-    signal = "SUPPORT" if status == "SUPPORTED" else "CONTRADICT"
-    prediction_by_id = {item.variant_id: item for item in predictions}
-    observation_cards = []
-    for index, variant in enumerate(candidates):
-        prediction = prediction_by_id[variant.variant_id]
-        observation_cards.append(
+    failed = [label for label, passed in checks.items() if not passed]
+    if failed:
+        raise AssertionError("Live campaign preflight failed: " + ", ".join(failed))
+
+
+def _read_json(path: Path) -> Any:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _assert_campaign(
+    config: ExperimentConfig,
+    summary: dict[str, Any],
+    truth: dict[str, float],
+    factory_calls: list[dict[str, Any]],
+    evaluators: list[BenchmarkTruthEvaluator],
+) -> dict[str, Any]:
+    run_dir = Path(summary["run_dir"])
+    if summary["run_status"] != "completed" or summary["rounds_aborted"] != 0:
+        raise AssertionError("The live campaign did not complete all rounds")
+    if summary["hypothesis_reflections"] != 3 or summary["rethink_reflections"] != 0:
+        raise AssertionError("The campaign did not retain exactly three aggregate reflections")
+    if summary["fitness_predictors_used_for_generation"]:
+        raise AssertionError("A fitness predictor was used for generation")
+    if summary["required_node_failures"] or summary["fallback_nodes"]:
+        raise AssertionError("The live campaign used a required-node or fallback path")
+    expected_factory_call = {
+        "seed": config.seed + config.rounds + 1,
+        "requested_model": config.model.name,
+    }
+    if factory_calls != [expected_factory_call]:
+        raise AssertionError("A fitness model was requested outside final evaluation")
+    if len(evaluators) != 1 or evaluators[0].fit_calls != 1:
+        raise AssertionError("The benchmark-truth final evaluator was not used exactly once")
+
+    rag_receipts: list[dict[str, Any]] = []
+    dimension_quality: list[str] = []
+    for round_id in range(1, config.rounds + 1):
+        round_dir = run_dir / f"round_{round_id:02d}"
+        scope = _read_json(round_dir / "prediction_scope_receipt.json")
+        if (
+            scope["acquisition_prediction_scope"] != "none"
+            or scope["acquisition_prediction_count"] != 0
+            or scope["dry_validation_scope"] != "disabled"
+            or scope["dry_validation_candidate_count"] != 0
+        ):
+            raise AssertionError(f"Round {round_id} activated a fitness prediction path")
+
+        rag = _read_json(round_dir / "local_rag_retrieval.json")
+        if not rag.get("query_id") or not rag.get("chunks"):
+            raise AssertionError(f"Round {round_id} did not return live RAG chunks")
+        rag_receipts.append(
             {
-                "variant_id": variant.variant_id,
-                "mutation_notation": variant.mutation_notation,
-                "evidence_ids": [],
-                "wet_value": wet[variant.variant_id],
-                "dry_validations": [
-                    {
-                        "value": prediction.fitness_mean,
-                        "uncertainty": prediction.fitness_std,
-                        "ood_score": prediction.ood_score,
-                        "model_version": prediction.model_version,
-                        "source_kind": "dry_validation",
-                        "decision_eligible": False,
-                        "calibration_status": "uncalibrated",
-                        "prediction_status": "evaluated",
-                    }
-                ],
-                "intent_arm": (
-                    "hypothesis_target" if index < 2 else "matched_control"
-                ),
-                "matched_to": (
-                    candidates[index + 2].variant_id
-                    if index < 2
-                    else candidates[index - 2].variant_id
-                ),
-                "allow_hypothesis_mismatch": False,
-                "falsification_role": "target" if index < 2 else "comparator",
+                "round_id": round_id,
+                "query_id": rag["query_id"],
+                "chunk_count": len(rag["chunks"]),
             }
         )
-    criterion_receipts = [
-        {
-            "criterion_id": "criterion:onehot-live:target_vs_control",
-            "signal": signal,
-            "metric_value": target_mean,
-            "comparator_value": control_mean,
-            "effect_size": effect,
-            "observation_ids": [item.variant_id for item in candidates],
-            "qc_status": "ok",
-            "detector_name": "fixture_target_control_mean_delta",
-            "detector_version": "1.0.0",
-            "reason_code": (
-                "target_above_control" if effect > 0 else "target_not_above_control"
-            ),
-        }
+
+        groups = _read_json(round_dir / "rethink_dimension_groups.json")
+        if len(groups) != 4:
+            raise AssertionError(f"Round {round_id} did not return four ReThink groups")
+        assessments = [item for group in groups for item in group["dimension_assessments"]]
+        if {item["dimension"] for item in assessments} != REQUIRED_DIMENSIONS:
+            raise AssertionError(f"Round {round_id} did not cover all eight dimensions")
+        dimension_quality.extend(item["quality_status"] for item in assessments)
+        if any(item["quality_status"] != "model" for item in assessments):
+            raise AssertionError(f"Round {round_id} degraded a ReThink dimension to fallback")
+
+        validations = _read_json(round_dir / "validation_matrix.json")
+        if len(validations) != config.budget_per_round:
+            raise AssertionError(f"Round {round_id} returned an unexpected wet batch size")
+        for item in validations:
+            if item["validation_type"] != "wet" or item["model_version"] is not None:
+                raise AssertionError(f"Round {round_id} created a dry validation record")
+            if item["value"] != truth[item["variant_id"]]:
+                raise AssertionError(f"Round {round_id} did not use benchmark truth")
+
+    with sqlite3.connect(run_dir / "knowledge_graph.sqlite") as connection:
+        aggregate_count = connection.execute(
+            "SELECT COUNT(*) FROM hypothesis_reflections"
+        ).fetchone()[0]
+        sample_link_count = connection.execute(
+            "SELECT COUNT(*) FROM validation_records WHERE reflection_id IS NOT NULL"
+        ).fetchone()[0]
+    if aggregate_count != 3 or sample_link_count != 0:
+        raise AssertionError("KG reflection persistence was not collection-level only")
+
+    trace = [
+        json.loads(line)
+        for line in (run_dir / "trace.jsonl").read_text(encoding="utf-8").splitlines()
     ]
-    digest = build_round_evidence_digest(
-        observation_cards,
-        visible_baseline=visible_baseline,
-        optimization_direction="higher_is_better",
-        criterion_receipts=criterion_receipts,
-    )
-    context = HypothesisReflectionContextInput.model_validate(
-        {
-            "run_id": "rethink-live-onehot-20260821",
-            "round_id": 1,
-            "visible_baseline": visible_baseline,
-            "baseline_receipt": {
-                "value": visible_baseline,
-                "statistic": "pre_round_visible_median",
-                "source": "revealed_observations_before_current_round",
-            },
-            "measurement_contract": {
-                "assay_id": production.task.assay_id,
-                "fitness_scale": production.task.fitness_scale,
-                "optimization_direction": "higher_is_better",
-            },
-            "approved_hypothesis": {
-                "hypothesis_id": "H-onehot-live-01",
-                "statement": (
-                    "The first one-hot fixture arm has higher measured fitness "
-                    "than its matched-control arm."
-                ),
-                "expected_outcome": (
-                    "The target-arm mean exceeds the matched-control mean."
-                ),
-                "falsification_criterion": (
-                    "Contradict the hypothesis when the target-arm mean does not "
-                    "exceed the matched-control mean."
-                ),
-                "evidence_ids": [],
-            },
-            "final_critic_decision": {
-                "decision_id": "D-onehot-live-01",
-                "verdict": "APPROVE",
-                "summary": (
-                    "The fixture defines explicit target and matched-control arms "
-                    "with a deterministic criterion."
-                ),
-                "cited_evidence_ids": [],
-            },
-            "hypothesis_assessment": {
-                "assessment_id": "AS-onehot-live-01",
-                "hypothesis_id": "H-onehot-live-01",
-                "falsification_spec_id": "FS-onehot-live-01",
-                "status": status,
-                "criterion_results": criterion_receipts,
-                "observation_ids": [item.variant_id for item in candidates],
-                "decisive_criterion_ids": [
-                    "criterion:onehot-live:target_vs_control"
-                ],
-                "unresolved_criterion_ids": [],
-                "evaluator_version": "fixture_target_control_mean_delta.v1",
-            },
-            "falsification_spec": {
-                "spec_id": "FS-onehot-live-01",
-                "hypothesis_id": "H-onehot-live-01",
-                "version": "1.0.0",
-                "reduction_policy": "single_primary_criterion",
-                "criteria": [
-                    {
-                        "criterion_id": "criterion:onehot-live:target_vs_control",
-                        "detector_name": "fixture_target_control_mean_delta",
-                        "metric": "mean_fitness_delta",
-                        "expected_direction": "greater",
-                        "target_variant_ids": list(target_ids),
-                        "comparator_variant_ids": list(control_ids),
-                        "min_observations": 4,
-                        "missing_data_policy": "INCONCLUSIVE",
-                        "primary": True,
-                    }
-                ],
-            },
-            "round_evidence_digest": digest.model_dump(mode="json"),
-        }
-    )
-    fixture_receipt = {
-        "sample_count": len(candidates),
-        "visible_baseline": visible_baseline,
-        "target_mean": target_mean,
-        "control_mean": control_mean,
-        "effect_size": effect,
-        "assessment_status": status,
-        "variant_ids": [item.variant_id for item in candidates],
-        "predictions": [asdict(item) for item in predictions],
-        "wet_values": wet,
+    if sum(item.get("event_type") == "local_knowledge_retrieved" for item in trace) != 3:
+        raise AssertionError("The trace does not contain three RAG retrieval events")
+    if sum(item.get("event_type") == "rethink_completed" for item in trace) != 3:
+        raise AssertionError("The trace does not contain three ReThink completion events")
+
+    return {
+        "status": "passed",
+        "test_kind": "gb1_hypothesis_rethink_live_api",
+        "run_id": summary["run_id"],
+        "run_dir": str(run_dir),
+        "rounds": config.rounds,
+        "wet_measurements": config.rounds * config.budget_per_round,
+        "deepseek_scientist_model": config.llm.model,
+        "deepseek_critic_model": config.critic.model,
+        "qwen_embedding_model": retrieval_model_id(
+            config.knowledge.local_knowledge.retrieval.embedding_api_config
+        ),
+        "qwen_reranker_model": retrieval_model_id(
+            config.knowledge.local_knowledge.retrieval.reranker_api_config
+        ),
+        "rag_receipts": rag_receipts,
+        "rethink_group_calls": config.rounds * 4,
+        "rethink_dimension_assessments": len(dimension_quality),
+        "hypothesis_reflections_in_kg": aggregate_count,
+        "sample_reflection_links_in_kg": sample_link_count,
+        "fitness_model_activated": False,
+        "kermut_activated": False,
+        "final_mse": summary["final_prediction_metrics"]["mse"],
+        "final_rmse": summary["final_prediction_metrics"]["rmse"],
     }
-    return context, fixture_receipt
+
+
+def retrieval_model_id(config: Any) -> str | None:
+    return None if config is None else str(config.model)
 
 
 def main() -> None:
     args = _arguments()
-    root = Path(__file__).resolve().parents[2]
-    production = load_experiment_config(root / args.production_config)
-    if production.model.name != "kermut":
-        raise AssertionError("production experiment config must remain Kermut")
-    fixture_config = ModelConfig(
-        **yaml.safe_load((root / args.fixture_config).read_text(encoding="utf-8"))
-    )
-    if fixture_config.name != "onehot_heterogeneous_ensemble":
-        raise AssertionError("live ReThink smoke test requires an isolated one-hot fixture")
-    context, fixture_receipt = _fixture_context(root, production, fixture_config)
-    llm = production.llm
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    writer = JsonArtifactWriter(root / args.output_root, stamp)
-    output = writer.run_dir
-    configure_progress_logging()
-    writer.write_json("rethink_input.json", context)
-    writer.write_json(
-        "preflight_receipt.json",
-        {
-            "production_experiment_config": args.production_config,
-            "production_runner_invoked": False,
-            "production_model_config": production.model.name,
-            "fixture_model_config": args.fixture_config,
-            "fixture_model_name": fixture_config.name,
-            "kermut_activated": False,
-            "provider": llm.provider,
-            "model": llm.model,
-            "prompt_profile": llm.profile,
-            **fixture_receipt,
-        },
-    )
-    client = NativeHypothesisReThinkClient(
-        model=llm.model,
-        base_url=llm.base_url,
-        provider=llm.provider,
-        temperature=llm.temperature,
-        max_tokens=llm.rethink_max_tokens,
-        render_max_tokens=llm.rethink_render_max_tokens,
-        reasoning_effort=llm.rethink_reasoning_effort,
-        thinking=llm.rethink_thinking,
-        profile=llm.profile,
-        max_transport_retries=llm.max_transport_retries,
-        max_truncation_retries=llm.max_truncation_retries,
-        max_syntax_retries=llm.max_syntax_retries,
-        max_schema_retries=llm.max_schema_retries,
-        max_semantic_retries=llm.max_semantic_retries,
-        max_unknown_evidence_retries=llm.max_unknown_evidence_retries,
-        retry_backoff_seconds=llm.retry_backoff_seconds,
-        request_timeout_seconds=llm.request_timeout_seconds,
-        allow_unknown_evidence_stripping=llm.allow_unknown_evidence_stripping,
-        max_input_chars=llm.max_input_chars,
-        max_parallel_batches=llm.rethink_max_parallel_batches,
-        max_calls_per_round=llm.rethink_max_calls_per_round,
-        call_reserve=llm.rethink_call_reserve,
-        parallel_dimension_groups=llm.rethink_parallel_dimension_groups,
-    )
-    started = time.perf_counter()
-    progress_token = bind_progress(writer)
-    try:
-        reflection = client.reflect_hypothesis(context=context)
-    except Exception as error:
-        writer.write_json(
-            "live_api_failure.json",
-            {
-                "error_type": type(error).__name__,
-                "error": str(error),
-                "elapsed_seconds": time.perf_counter() - started,
-            },
-        )
-        raise
-    finally:
-        reset_progress(progress_token)
-    elapsed = time.perf_counter() - started
-    if reflection is None:
-        raise AssertionError("live ReThink unexpectedly returned NOT_APPLICABLE")
-    if (
-        reflection.hypothesis_id != "H-onehot-live-01"
-        or reflection.assessment_id != "AS-onehot-live-01"
-        or reflection.assessment_status != fixture_receipt["assessment_status"]
-    ):
-        raise AssertionError("live ReThink changed runtime-owned hypothesis fields")
-    if not reflection.advisory_only or reflection.selection_eligible:
-        raise AssertionError("live ReThink violated its advisory-only boundary")
-    if len(client.last_dimension_groups) != 4:
-        raise AssertionError("live ReThink did not return exactly four dimension groups")
-    if len(reflection.dimension_assessments) != 8 or {
-        item["dimension"] for item in reflection.dimension_assessments
-    } != REQUIRED_DIMENSIONS:
-        raise AssertionError("live ReThink did not cover all eight dimensions exactly once")
-    degraded_dimensions = [
-        item["dimension"]
-        for item in reflection.dimension_assessments
-        if item["quality_status"] != "model"
-    ]
-    writer.write_json("rethink_dimension_groups.json", client.last_dimension_groups)
-    writer.write_json("hypothesis_reflection.json", reflection)
-    if degraded_dimensions:
-        writer.write_json(
-            "live_api_failure.json",
-            {
-                "error_type": "DegradedDimensionGroups",
-                "degraded_dimensions": degraded_dimensions,
-                "elapsed_seconds": elapsed,
-            },
-        )
-        print(
-            json.dumps(
-                {
-                    "status": "failed",
-                    "artifact_dir": str(output),
-                    "degraded_dimensions": degraded_dimensions,
-                },
-                ensure_ascii=False,
-            )
-        )
-        raise AssertionError("one or more live dimension groups degraded to fallback")
-    if not all(
-        item["quality_status"] == "model"
-        for item in reflection.dimension_assessments
-    ):
-        raise AssertionError("one or more live dimension groups degraded to fallback")
+    _require_live_credentials()
+    output_root = args.output_root
+    if not output_root.is_absolute():
+        output_root = PROJECT_ROOT / output_root
+    config = _live_config(args.config, output_root)
+    _assert_preflight(config)
+    if config.task.oracle_data_path is None:
+        raise AssertionError("GB1 live acceptance requires the benchmark oracle CSV")
+    truth = _benchmark_truth(config.task.oracle_data_path)
+    factory_calls: list[dict[str, Any]] = []
+    evaluators: list[BenchmarkTruthEvaluator] = []
 
-    receipt = {
-        "test_kind": "isolated_rethink_live_api",
-        "production_experiment_config": args.production_config,
-        "production_runner_invoked": False,
-        "production_model_config": production.model.name,
-        "fixture_model_config": args.fixture_config,
-        "fixture_model_name": fixture_config.name,
-        "kermut_activated": False,
-        "provider": llm.provider,
-        "model": llm.model,
-        "prompt_profile": llm.profile,
-        "logical_dimension_group_calls": len(client.last_dimension_groups),
-        "dimension_count": len(reflection.dimension_assessments),
-        "quality_status": reflection.quality_status,
-        "elapsed_seconds": elapsed,
-        **fixture_receipt,
-    }
-    writer.write_json("fixture_receipt.json", receipt)
-    print(
-        json.dumps(
-            {
-                "status": "passed",
-                "artifact_dir": str(output),
-                "production_model": production.model.name,
-                "fixture_model": fixture_config.name,
-                "kermut_activated": False,
-                "provider": llm.provider,
-                "model": llm.model,
-                "assessment_status": reflection.assessment_status,
-                "logical_dimension_group_calls": len(client.last_dimension_groups),
-                "dimension_count": len(reflection.dimension_assessments),
-                "quality_status": reflection.quality_status,
-                "elapsed_seconds": round(elapsed, 3),
-            },
-            ensure_ascii=False,
-        )
-    )
+    def benchmark_truth_factory(model_config: Any, *, seed: int) -> BenchmarkTruthEvaluator:
+        factory_calls.append({"seed": seed, "requested_model": model_config.name})
+        evaluator = BenchmarkTruthEvaluator(truth)
+        evaluators.append(evaluator)
+        return evaluator
+
+    configure_progress_logging()
+    started = time.perf_counter()
+    summary = CampaignRunner(
+        config,
+        predictor_factory=benchmark_truth_factory,
+    ).run()
+    receipt = _assert_campaign(config, summary, truth, factory_calls, evaluators)
+    receipt["elapsed_seconds"] = round(time.perf_counter() - started, 3)
+    print(json.dumps(receipt, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":

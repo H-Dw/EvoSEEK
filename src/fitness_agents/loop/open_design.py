@@ -240,6 +240,7 @@ class OpenDesignRunner:
         )
         role_clients = create_role_client_bundle(
             config.llm.provider,
+            rethink_mode=config.validation.rethink_mode,
             profile=config.llm.profile,
             model=config.llm.model,
             base_url=config.llm.base_url,

@@ -54,6 +54,8 @@ where = ["src"]
   "critic_profiles/scientific_v1/*.jsonl",
   "profiles/scientist/scientific_v1/*.md",
   "profiles/scientist/scientific_v1/*.yaml",
+  "profiles/rethink/sample_v1/*.md",
+  "profiles/rethink/sample_v1/*.yaml",
   "profiles/rethink/scientific_v1/*.md",
   "profiles/rethink/scientific_v1/*.yaml",
 ]

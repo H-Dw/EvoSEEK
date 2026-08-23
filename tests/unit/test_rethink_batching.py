@@ -138,20 +138,21 @@ def _group(group_name: str, dimensions: tuple[str, str]) -> HypothesisDimensionG
 
 def _client(monkeypatch, **kwargs) -> NativeHypothesisReThinkClient:
     monkeypatch.setattr(rethink_module, "create_openai_client", lambda **_kw: object())
-    return NativeHypothesisReThinkClient(
-        model="unit-test-model",
-        provider="openai_compatible",
-        thinking="disabled",
-        max_transport_retries=0,
-        max_truncation_retries=0,
-        max_syntax_retries=0,
-        max_schema_retries=0,
-        max_semantic_retries=0,
-        max_unknown_evidence_retries=0,
-        retry_backoff_seconds=0.0,
-        parallel_dimension_groups=False,
-        **kwargs,
-    )
+    settings = {
+        "model": "unit-test-model",
+        "provider": "openai_compatible",
+        "thinking": "disabled",
+        "max_transport_retries": 0,
+        "max_truncation_retries": 0,
+        "max_syntax_retries": 0,
+        "max_schema_retries": 0,
+        "max_semantic_retries": 0,
+        "max_unknown_evidence_retries": 0,
+        "retry_backoff_seconds": 0.0,
+        "parallel_dimension_groups": False,
+    }
+    settings.update(kwargs)
+    return NativeHypothesisReThinkClient(**settings)
 
 
 @pytest.mark.parametrize("sample_count", [1, 2, 25])
@@ -210,6 +211,43 @@ def test_rethink_skips_llm_when_no_assessed_hypothesis(monkeypatch) -> None:
     )
 
     assert client.reflect_hypothesis(context=_context(2, assessed=False)) is None
+
+
+def test_rethink_dimension_group_honors_configured_retry_budgets(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def capture_and_stop(**kwargs):
+        captured.update(kwargs)
+        raise RuntimeError("captured retry policy")
+
+    monkeypatch.setattr(rethink_module, "complete_structured", capture_and_stop)
+    client = _client(
+        monkeypatch,
+        max_transport_retries=2,
+        max_truncation_retries=1,
+        max_syntax_retries=1,
+        max_schema_retries=2,
+        max_semantic_retries=1,
+        max_unknown_evidence_retries=1,
+        allow_unknown_evidence_stripping=True,
+    )
+    context = _context(2)
+
+    with pytest.raises(RuntimeError, match="captured retry policy"):
+        client._reflect_dimension_group(
+            context=context,
+            group_name="outcome_and_edit",
+            dimensions=rethink_module.RETHINK_DIMENSION_GROUPS["outcome_and_edit"],
+        )
+
+    assert captured["transport_retries"] == 2
+    assert captured["truncation_retries"] == 1
+    assert captured["syntax_retries"] == 1
+    assert captured["schema_retries"] == 2
+    assert captured["semantic_retries"] == 1
+    assert captured["unknown_evidence_retries"] == 1
+    assert captured["empty_retries"] == 1
+    assert captured["allow_unknown_evidence_stripping"] is True
 
 
 def test_mock_rethink_returns_one_hypothesis_reflection() -> None:

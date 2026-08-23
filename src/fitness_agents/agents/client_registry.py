@@ -39,21 +39,35 @@ class ClientRegistry:
 def create_role_client_bundle(
     provider: str,
     *,
+    rethink_mode: str = "sample",
     rethink_options: Mapping[str, Any] | None = None,
     **kwargs: Any,
 ) -> RoleClientBundle:
-    """Build both cognitive roles from one explicit provider allowlist."""
+    """Build both cognitive roles while preserving the sample-mode default."""
 
     from .llm import create_llm_client
-    from .rethink import create_hypothesis_rethink_client
+    from .rethink import create_hypothesis_rethink_client, create_rethink_client
+
+    if rethink_mode not in {"sample", "hypothesis"}:
+        raise ValueError("rethink_mode must be sample or hypothesis")
 
     registry = ClientRegistry()
 
     def build(**settings: Any) -> RoleClientBundle:
         rethink_settings = {**settings, **dict(rethink_options or {})}
+        if rethink_mode == "sample" and "parallel_dimension_groups" in rethink_settings:
+            rethink_settings.setdefault(
+                "dimension_parallel",
+                rethink_settings.pop("parallel_dimension_groups"),
+            )
+        rethink_factory = (
+            create_hypothesis_rethink_client
+            if rethink_mode == "hypothesis"
+            else create_rethink_client
+        )
         return RoleClientBundle(
             scientist=create_llm_client(provider, **settings),
-            rethink=create_hypothesis_rethink_client(provider, **rethink_settings),
+            rethink=rethink_factory(provider, **rethink_settings),
         )
 
     registry.register(provider, build)
