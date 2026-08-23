@@ -23,7 +23,6 @@ from fitness_agents.contracts.hypothesis_pipeline import (
     CANDIDATE_PROSE_MAX,
     SynthesisAbstention,
 )
-from fitness_agents.contracts.schemas import Hypothesis, HypothesisReflection
 
 _SYNTHESIS_PROSE_KEYS = (
     "statement",
@@ -45,6 +44,8 @@ def _strip_unknown_request_local_evidence_aliases(
         if isinstance(value, str):
             output[key] = id_map.strip_unknown_aliases_in_text(value)
     return output
+from fitness_agents.contracts.rethink_sample_io import ReThinkReflection
+from fitness_agents.contracts.schemas import Hypothesis
 
 HYPOTHESIS_TEXT_MAX = CANDIDATE_PROSE_MAX
 RETHINK_TEXT_MAX = 2000
@@ -440,7 +441,30 @@ def validate_main_synthesis_payload(
     return dumped
 
 
-class HypothesisDimensionAssessmentOutput(BaseModel):
+class ReThinkItemOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    variant_id: NonEmptyText
+    candidate_relation: Literal["support", "conflict", "mixed", "inconclusive"]
+    summary: ReThinkText
+    positive_findings: list[NonEmptyText]
+    negative_findings: list[NonEmptyText]
+    revised_reason: ReThinkText
+    next_round_advice: ReThinkText
+    next_round_action: Literal[
+        "retain_uncertainty_aware_exploration",
+        "downweight_rationale",
+        "test_matched_alternative",
+        "collect_missing_measurement",
+        "preserve_control",
+        "no_change",
+    ]
+    dimension_assessments: list[ReThinkDimensionAssessmentOutput] = Field(
+        default_factory=list
+    )
+
+
+class ReThinkDimensionAssessmentOutput(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     dimension: Literal[
@@ -454,7 +478,7 @@ class HypothesisDimensionAssessmentOutput(BaseModel):
         "uncertainty_domain_shift",
     ]
     evidence_status: Literal["measured", "dry", "context", "mixed", "missing"]
-    relation_to_hypothesis: Literal[
+    relation_to_sample_rationale: Literal[
         "positive", "negative", "mixed", "unresolved"
     ] = "unresolved"
     finding_code: str = Field(default="unresolved", min_length=1, max_length=80)
@@ -463,65 +487,18 @@ class HypothesisDimensionAssessmentOutput(BaseModel):
     quality_status: Literal["model", "deterministic_fallback"] = "model"
 
 
-class HypothesisDimensionGroupOutput(BaseModel):
-    """One hypothesis-level output for one merged pair of ReThink dimensions."""
+class ReThinkItemsOutput(BaseModel):
+    """Model-visible sample-level output; batch assessment is runtime-owned."""
 
     model_config = ConfigDict(extra="forbid", strict=True)
-    hypothesis_id: NonEmptyText
-    assessment_id: NonEmptyText
-    group_name: Literal[
-        "outcome_and_edit",
-        "sequence_and_physchem",
-        "structure_and_evolution",
-        "execution_and_uncertainty",
-    ]
-    dimension_assessments: list[HypothesisDimensionAssessmentOutput] = Field(
-        min_length=2, max_length=2
-    )
-    retained_claims: list[ReThinkText] = Field(default_factory=list, max_length=3)
-    invalidated_assumptions: list[ReThinkText] = Field(default_factory=list, max_length=3)
-    unresolved_questions: list[ReThinkText] = Field(default_factory=list, max_length=3)
-    recommended_actions: list[
-        Literal[
-            "retain_uncertainty_aware_exploration",
-            "downweight_rationale",
-            "test_matched_alternative",
-            "collect_missing_measurement",
-            "preserve_control",
-            "no_change",
-        ]
-    ] = Field(default_factory=list, max_length=2)
-    supporting_observation_ids: list[NonEmptyText] = Field(
-        default_factory=list, max_length=12
-    )
-    supporting_evidence_ids: list[NonEmptyText] = Field(
-        default_factory=list, max_length=12
-    )
-    group_advice: ReThinkGroupAdviceText
-
-
-class HypothesisReflectionOutput(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    hypothesis_id: NonEmptyText
-    assessment_id: NonEmptyText
-    assessment_status: Literal["SUPPORTED", "CONTRADICTED", "INCONCLUSIVE"]
-    dimension_groups: list[HypothesisDimensionGroupOutput] = Field(
-        min_length=4, max_length=4
-    )
+    reflections: list[ReThinkItemOutput]
 
     @model_validator(mode="after")
-    def validate_complete_hypothesis_reflection(self) -> HypothesisReflectionOutput:
-        expected_groups = {
-            "outcome_and_edit",
-            "sequence_and_physchem",
-            "structure_and_evolution",
-            "execution_and_uncertainty",
-        }
-        groups = {item.group_name for item in self.dimension_groups}
-        if groups != expected_groups or len(groups) != len(self.dimension_groups):
-            raise ValueError("ReThink must return each dimension group exactly once")
-        expected_dimensions = {
+    def validate_unique_variants(self) -> ReThinkItemsOutput:
+        ids = [item.variant_id for item in self.reflections]
+        if len(ids) != len(set(ids)):
+            raise ValueError("ReThink reflections must have unique variant_id values")
+        expected = {
             "measured_function",
             "edit_level_direction",
             "sequence_interaction_context",
@@ -531,67 +508,75 @@ class HypothesisReflectionOutput(BaseModel):
             "feasibility_developability",
             "uncertainty_domain_shift",
         }
-        dimensions = {
-            entry.dimension
-            for group in self.dimension_groups
-            for entry in group.dimension_assessments
-        }
-        if dimensions != expected_dimensions or len(dimensions) != 8:
-            raise ValueError("ReThink must return each of the eight dimensions exactly once")
-        if any(
-            group.hypothesis_id != self.hypothesis_id
-            or group.assessment_id != self.assessment_id
-            for group in self.dimension_groups
-        ):
-            raise ValueError("ReThink group IDs must match the aggregate reflection")
+        for item in self.reflections:
+            actual = {entry.dimension for entry in item.dimension_assessments}
+            if actual != expected or len(item.dimension_assessments) != len(expected):
+                raise ValueError("ReThink must return each of the eight dimensions exactly once")
         return self
 
-    def to_reflection(
-        self, *, round_id: int, provider: str, quality_status: str = "model"
-    ) -> HypothesisReflection:
-        groups = tuple(self.dimension_groups)
-        retained = tuple(dict.fromkeys(item for group in groups for item in group.retained_claims))
-        invalidated = tuple(
-            dict.fromkeys(item for group in groups for item in group.invalidated_assumptions)
-        )
-        unresolved = tuple(
-            dict.fromkeys(item for group in groups for item in group.unresolved_questions)
-        )
-        actions = tuple(
-            dict.fromkeys(item for group in groups for item in group.recommended_actions)
-        )
-        observation_ids = tuple(
-            dict.fromkeys(item for group in groups for item in group.supporting_observation_ids)
-        )
-        evidence_ids = tuple(
-            dict.fromkeys(item for group in groups for item in group.supporting_evidence_ids)
-        )
-        summary_parts = [f"{group.group_name}: {group.group_advice}" for group in groups]
-        return HypothesisReflection(
-            reflection_id=f"HR{round_id:02d}:{self.assessment_id}",
-            hypothesis_id=self.hypothesis_id,
-            assessment_id=self.assessment_id,
-            round_id=round_id,
-            assessment_status=self.assessment_status,
-            summary=" ".join(summary_parts)[:RETHINK_TEXT_MAX],
-            retained_claims=retained,
-            invalidated_assumptions=invalidated,
-            unresolved_questions=unresolved,
-            recommended_actions=actions or ("no_change",),
-            supporting_observation_ids=observation_ids,
-            supporting_evidence_ids=evidence_ids,
-            provider=provider,
-            quality_status=quality_status,
-            dimension_assessments=tuple(
-                entry.model_dump(mode="json")
-                for group in groups
-                for entry in group.dimension_assessments
-            ),
-            dimension_group_advice=tuple(
-                {"group": group.group_name, "advice": group.group_advice}
-                for group in groups
-            ),
-        )
+
+class ReThinkDimensionGroupOutput(BaseModel):
+    """One sample's bounded output for one merged pair of ReThink dimensions."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    variant_id: NonEmptyText
+    dimension_assessments: list[ReThinkDimensionAssessmentOutput] = Field(
+        min_length=2, max_length=2
+    )
+    group_advice: ReThinkGroupAdviceText
+
+
+class ReThinkBatchAssessmentOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    assessment_id: NonEmptyText | None
+    status: Literal["SUPPORTED", "CONTRADICTED", "INCONCLUSIVE", "NOT_APPLICABLE"]
+    commentary: ReThinkText
+    next_round_advice: ReThinkText
+
+
+class ReThinkOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    reflections: list[ReThinkItemOutput]
+    batch_assessment: ReThinkBatchAssessmentOutput
+
+    @model_validator(mode="after")
+    def validate_unique_variants(self) -> ReThinkOutput:
+        variant_ids = [item.variant_id for item in self.reflections]
+        if len(variant_ids) != len(set(variant_ids)):
+            raise ValueError("ReThink reflections must have unique variant_id values")
+        return self
+
+    def to_reflections(
+        self, *, run_id: str, round_id: int, provider: str, id_prefix: str = "R"
+    ) -> tuple[ReThinkReflection, ...]:
+        del run_id
+        output: list[ReThinkReflection] = []
+        for index, item in enumerate(self.reflections, start=1):
+            output.append(
+                ReThinkReflection(
+                    reflection_id=f"{id_prefix}{round_id:02d}-{index:02d}",
+                    variant_id=item.variant_id,
+                    round_id=round_id,
+                    verdict=item.candidate_relation,
+                    summary=item.summary,
+                    positive_findings=tuple(item.positive_findings),
+                    negative_findings=tuple(item.negative_findings),
+                    revised_reason=item.revised_reason,
+                    next_round_advice=item.next_round_advice,
+                    next_round_action=item.next_round_action,
+                    provider=provider,
+                    assessment_id=self.batch_assessment.assessment_id,
+                    assessment_status=self.batch_assessment.status,
+                    assessment_commentary=self.batch_assessment.commentary,
+                    dimension_assessments=tuple(
+                        entry.model_dump(mode="json")
+                        for entry in item.dimension_assessments
+                    ),
+                )
+            )
+        return tuple(output)
 
 
 def validate_hypothesis_payload(
@@ -635,34 +620,28 @@ def validate_hypothesis_payload(
     return dumped
 
 
-def validate_hypothesis_rethink_payload(
+def validate_rethink_payload(
     payload: dict[str, Any],
     *,
-    expected_hypothesis_id: str | None = None,
-    expected_assessment_id: str | None = None,
+    expected_variant_ids: frozenset[str] | None = None,
+    expected_assessment_id: str | None | object = _UNSET,
     expected_assessment_status: str | None = None,
 ) -> dict[str, Any]:
-    model = HypothesisReflectionOutput.model_validate(payload)
-    if expected_hypothesis_id is not None and model.hypothesis_id != expected_hypothesis_id:
-        raise ValueError("ReThink hypothesis ID does not match runtime hypothesis")
-    if expected_assessment_id is not None and model.assessment_id != expected_assessment_id:
-        raise ValueError("ReThink assessment ID does not match runtime assessment")
-    if (
-        expected_assessment_status is not None
-        and model.assessment_status != expected_assessment_status
-    ):
-        raise ValueError("ReThink assessment status contradicts runtime assessment")
+    model = ReThinkOutput.model_validate(payload)
+    if expected_variant_ids is not None:
+        actual = {item.variant_id for item in model.reflections}
+        missing = sorted(expected_variant_ids.difference(actual))
+        unexpected = sorted(actual.difference(expected_variant_ids))
+        if missing or unexpected:
+            raise ValueError(
+                f"ReThink variant coverage mismatch; missing={missing}, unexpected={unexpected}"
+            )
+    if expected_assessment_id is not _UNSET:
+        if model.batch_assessment.assessment_id != expected_assessment_id:
+            raise ValueError("ReThink batch assessment ID does not match runtime assessment")
+        if (
+            expected_assessment_status is not None
+            and model.batch_assessment.status != expected_assessment_status
+        ):
+            raise ValueError("ReThink batch assessment status contradicts runtime assessment")
     return model.model_dump(mode="json")
-
-
-# Candidate-level contracts keep their original public names. The hypothesis-level
-# module uses explicitly named classes above so both modes can coexist safely.
-from .rethink_sample_output_contracts import (  # noqa: F401
-    ReThinkBatchAssessmentOutput,
-    ReThinkDimensionAssessmentOutput,
-    ReThinkDimensionGroupOutput,
-    ReThinkItemOutput,
-    ReThinkItemsOutput,
-    ReThinkOutput,
-    validate_rethink_payload,
-)

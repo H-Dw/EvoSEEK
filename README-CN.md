@@ -98,6 +98,23 @@ python -m pytest tests/unit -q
 数据与模型资产仍按第 3、4 节准备；默认 `python scripts/run_demo.py` 需要 `[llm]`、`[kermut]`、
 `.env` 中的 `DEEPSEEK_API_KEY`，以及 Kermut 的条件概率/坐标文件。
 
+### 1.6 ReThink 兼容模式与集合模式
+
+ReThink 在实验揭示真实值后支持两种模式。`validation.rethink_mode: sample` 为默认值，
+保留原有的逐候选 reflection 产物与 KG 关系；显式设置
+`validation.rethink_mode: hypothesis` 才会启用集合级模块：系统先生成确定性的 wet/dry
+证据摘要，再并行执行四组、每组两个维度的分析，每个已评估 round 只生成一条假设级
+reflection，并将学习结果关联到 hypothesis assessment，而不是逐样本挂载 reflection。
+`validation.rethink_enabled: false` 可关闭任一模式。
+
+离线三轮 GB1 smoke 配置为
+`configs/experiments/gb1_rethink_hypothesis_smoke.yaml`。其生成与轮内 validation 均不使用
+fitness predictor；集成测试只在强制执行的 final evaluator 中回放 GB1 benchmark 真实值：
+
+```bash
+PYTHONPATH=. pytest -q tests/integration/test_gb1_rethink_multiround.py
+```
+
 ## 2. 快速开始：单蛋白推理
 
 对单个测试蛋白做推理时，可以完全跳过数据下载、fold manifest 和 oracle。open-design runner

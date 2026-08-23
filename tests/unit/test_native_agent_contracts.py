@@ -3,10 +3,11 @@ from __future__ import annotations
 import pytest
 
 from fitness_agents.agents.client_registry import ClientRegistry
-from fitness_agents.agents.output_contracts import validate_rethink_payload
+from fitness_agents.agents.output_contracts import validate_hypothesis_rethink_payload
 from fitness_agents.agents.profile_loader import load_role_profile
+from fitness_agents.agents.rethink import RETHINK_DIMENSION_GROUPS
 from fitness_agents.config import load_experiment_config, project_root
-from fitness_agents.contracts.agent_io import ReThinkContextInput, RoleActivationState
+from fitness_agents.contracts.agent_io import RoleActivationState
 
 
 def test_removed_agents_runtime_fails_fast() -> None:
@@ -62,66 +63,41 @@ def test_role_activation_state_distinguishes_configured_and_executed_routes() ->
     assert state.configured_kg_tools != state.executed_kg_tools
 
 
-def test_rethink_context_and_output_require_exact_candidate_coverage() -> None:
-    context = ReThinkContextInput.model_validate(
-        {
-            "run_id": "run",
-            "round_id": 1,
-            "visible_baseline": 0.0,
-            "baseline_receipt": {
-                "value": 0.0,
-                "statistic": "pre_round_visible_median",
-                "source": "revealed_observations_before_current_round",
-            },
-            "measurement_contract": {
-                "assay_id": "assay:test",
-                "fitness_scale": "raw_assay",
-                "optimization_direction": "higher_is_better",
-            },
-            "final_critic_decision": {
-                "decision_id": "D01-00",
-                "verdict": "APPROVE",
-                "summary": "approved",
-                "cited_evidence_ids": [],
-            },
-            "candidates": [
-                {
-                    "variant_id": item,
-                    "mutation_notation": "V39A",
-                    "agent_reason": "bounded",
-                    "evidence_ids": [],
-                    "wet_value": 0.1,
-                    "dry_validations": [],
-                    "intent_arm": "coverage_exploration",
-                    "allow_hypothesis_mismatch": False,
-                    "falsification_role": "not_in_primary_criterion",
-                }
-                for item in ("v1", "v2")
-            ],
-        }
-    )
+def test_rethink_output_requires_all_four_groups_and_eight_dimensions() -> None:
     payload = {
-        "reflections": [
+        "hypothesis_id": "H01",
+        "assessment_id": "HA01",
+        "assessment_status": "SUPPORTED",
+        "dimension_groups": [
             {
-                "variant_id": "v1",
-                "candidate_relation": "support",
-                "summary": "supported",
-                "positive_findings": [],
-                "negative_findings": [],
-                "revised_reason": "bounded reason",
-                "next_round_advice": "test again",
-                "next_round_action": "test_matched_alternative",
+                "hypothesis_id": "H01",
+                "assessment_id": "HA01",
+                "group_name": group_name,
+                "dimension_assessments": [
+                    {
+                        "dimension": dimension,
+                        "evidence_status": "measured",
+                        "relation_to_hypothesis": "positive",
+                        "finding_code": "supported",
+                        "finding": "The criterion receipt supports this bounded dimension.",
+                        "implication": "Retain the claim only within the tested scope.",
+                    }
+                    for dimension in dimensions
+                ],
+                "group_advice": "Keep the conclusion bounded to the assessed hypothesis.",
             }
+            for group_name, dimensions in RETHINK_DIMENSION_GROUPS.items()
         ],
-        "batch_assessment": {
-            "assessment_id": None,
-            "status": "NOT_APPLICABLE",
-            "commentary": "No batch assessment applies.",
-            "next_round_advice": "Keep candidate relations bounded.",
-        },
     }
-    with pytest.raises(ValueError, match="coverage mismatch"):
-        validate_rethink_payload(payload, expected_variant_ids=context.expected_variant_ids)
+    payload["dimension_groups"].pop()
+
+    with pytest.raises(ValueError, match="at least 4 items"):
+        validate_hypothesis_rethink_payload(
+            payload,
+            expected_hypothesis_id="H01",
+            expected_assessment_id="HA01",
+            expected_assessment_status="SUPPORTED",
+        )
 
 
 def test_client_registry_is_allowlisted() -> None:

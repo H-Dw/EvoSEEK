@@ -6,7 +6,11 @@ from typing import Any, Protocol
 
 import numpy as np
 
-from .agent_io import ReThinkContextInput, ScientistContextInput
+from .agent_io import (
+    HypothesisReflectionContextInput,
+    ReThinkContextInput,
+    ScientistContextInput,
+)
 from .schemas import (
     ApprovedBatch,
     CampaignState,
@@ -18,6 +22,7 @@ from .schemas import (
     FitnessObservation,
     Hypothesis,
     HypothesisAssessment,
+    HypothesisReflection,
     Prediction,
     ReThinkReflection,
     SelectionRecord,
@@ -93,6 +98,14 @@ class ReThinkClient(Protocol):
     def reflect_round(
         self, *, context: ReThinkContextInput
     ) -> tuple[ReThinkReflection, ...]: ...
+
+
+class HypothesisReThinkClient(Protocol):
+    provider_name: str
+
+    def reflect_hypothesis(
+        self, *, context: HypothesisReflectionContextInput
+    ) -> HypothesisReflection | None: ...
 
 
 class AcquisitionPolicy(Protocol):

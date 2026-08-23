@@ -2,34 +2,33 @@ from __future__ import annotations
 
 import json
 import threading
+from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextvars import copy_context
-from dataclasses import replace
 from functools import partial
+from statistics import mean
 from typing import Any
 
-from fitness_agents.agents.adaptive_batch import AdaptiveBatchWork, adaptive_batch_submit
-from fitness_agents.agents.remote_llm import (
-    RemoteLLMCompletionError,
-    create_openai_client,
-    resolve_base_url,
-    resolve_model,
+from fitness_agents.agents.remote_llm import create_openai_client, resolve_base_url, resolve_model
+from fitness_agents.contracts.agent_io import (
+    AgentTraceContext,
+    HypothesisReflectionContextInput,
+    ReThinkObservationCard,
+    RoundEvidenceDigest,
 )
-from fitness_agents.contracts.agent_io import AgentTraceContext, ReThinkContextInput
-from fitness_agents.contracts.schemas import ReThinkReflection
+from fitness_agents.contracts.schemas import HypothesisReflection
 from fitness_agents.utils.progress import report_event, report_llm_id_bridge
 
 from .output_contracts import (
-    ReThinkDimensionGroupOutput,
-    ReThinkItemsOutput,
-    ReThinkOutput,
+    HypothesisDimensionGroupOutput,
+    HypothesisReflectionOutput,
 )
 from .profile_loader import load_role_profile
 from .short_ids import FieldIdPolicy, RequestScopedIdBridge
 from .structured_completion import complete_structured
 from .transports import OpenAICompatibleChatTransport
 
-RETHINK_SCHEMA: dict[str, Any] = ReThinkOutput.model_json_schema()
+RETHINK_SCHEMA: dict[str, Any] = HypothesisReflectionOutput.model_json_schema()
 
 RETHINK_DIMENSIONS = (
     "measured_function",
@@ -43,10 +42,7 @@ RETHINK_DIMENSIONS = (
 )
 RETHINK_DIMENSION_GROUPS = {
     "outcome_and_edit": ("measured_function", "edit_level_direction"),
-    "sequence_and_physchem": (
-        "sequence_interaction_context",
-        "physicochemical_context",
-    ),
+    "sequence_and_physchem": ("sequence_interaction_context", "physicochemical_context"),
     "structure_and_evolution": ("structural_context", "evolutionary_context"),
     "execution_and_uncertainty": (
         "feasibility_developability",
@@ -59,8 +55,6 @@ _PROVIDER_GATES: dict[tuple[str, int], threading.BoundedSemaphore] = {}
 
 
 def _provider_gate(provider: str, concurrency_limit: int) -> threading.BoundedSemaphore:
-    """Share a provider concurrency gate across ReThink clients in this process."""
-
     key = (provider, concurrency_limit)
     with _PROVIDER_GATE_LOCK:
         gate = _PROVIDER_GATES.get(key)
@@ -71,7 +65,7 @@ def _provider_gate(provider: str, concurrency_limit: int) -> threading.BoundedSe
 
 
 class LLMAttemptBudget:
-    """Thread-safe hard cap over actual provider attempts for one round."""
+    """Thread-safe hard cap over provider attempts for one hypothesis reflection."""
 
     def __init__(
         self,
@@ -149,24 +143,94 @@ class LLMAttemptBudget:
             }
 
 
+def build_round_evidence_digest(
+    observations: Sequence[ReThinkObservationCard | dict[str, Any]],
+    *,
+    visible_baseline: float,
+    optimization_direction: str,
+    criterion_receipts: Sequence[dict[str, Any]] = (),
+) -> RoundEvidenceDigest:
+    """Build a deterministic hypothesis-level digest without generated prose."""
+
+    typed = tuple(ReThinkObservationCard.model_validate(item) for item in observations)
+    favorable = (
+        (lambda value: value > visible_baseline)
+        if optimization_direction == "higher_is_better"
+        else (lambda value: value < visible_baseline)
+    )
+    arm_summaries = []
+    disagreements = []
+    evidence_ids: list[str] = []
+    for arm in (
+        "hypothesis_target",
+        "evidence_prior",
+        "coverage_exploration",
+        "matched_control",
+        "fallback",
+    ):
+        selected = tuple(item for item in typed if item.intent_arm == arm)
+        if not selected:
+            continue
+        wet_values = [item.wet_value for item in selected]
+        disagreement_count = 0
+        for item in selected:
+            evidence_ids.extend(item.evidence_ids)
+            if not item.dry_validations:
+                continue
+            dry_mean = mean(entry.value for entry in item.dry_validations)
+            if favorable(dry_mean) != favorable(item.wet_value):
+                disagreement_count += 1
+                disagreements.append(
+                    {
+                        "variant_id": item.variant_id,
+                        "wet_value": item.wet_value,
+                        "dry_mean": dry_mean,
+                        "residual": item.wet_value - dry_mean,
+                        "max_ood_score": max(entry.ood_score for entry in item.dry_validations),
+                        "model_versions": tuple(
+                            dict.fromkeys(entry.model_version for entry in item.dry_validations)
+                        ),
+                    }
+                )
+        arm_summaries.append(
+            {
+                "arm": arm,
+                "sample_count": len(selected),
+                "variant_ids": tuple(item.variant_id for item in selected),
+                "wet_mean": mean(wet_values),
+                "wet_min": min(wet_values),
+                "wet_max": max(wet_values),
+                "favorable_count": sum(favorable(value) for value in wet_values),
+                "dry_wet_disagreement_count": disagreement_count,
+            }
+        )
+    return RoundEvidenceDigest.model_validate(
+        {
+            "observation_count": len(typed),
+            "observations": typed,
+            "arm_summaries": arm_summaries,
+            "dry_wet_disagreements": disagreements,
+            "criterion_receipts": tuple(criterion_receipts),
+            "evidence_ids": tuple(dict.fromkeys(evidence_ids)),
+        }
+    )
+
+
 def _rethink_bridge(
-    context: ReThinkContextInput,
+    context: HypothesisReflectionContextInput,
     *,
     scope_id: str,
-    schema_name: str,
 ) -> RequestScopedIdBridge:
-    payload = context.model_dump(mode="json")
-    sample_ids: list[str] = [item.variant_id for item in context.candidates]
-    evidence_ids: list[str] = []
+    observation_ids = list(context.expected_variant_ids)
+    evidence_ids = list(context.round_evidence_digest.evidence_ids)
     hypothesis_ids: list[str] = []
-    decision_ids = [context.final_critic_decision.decision_id]
     assessment_ids: list[str] = []
     spec_ids: list[str] = []
     criterion_ids: list[str] = []
-    for item in context.candidates:
+    for item in context.round_evidence_digest.observations:
         evidence_ids.extend(item.evidence_ids)
         if item.matched_to:
-            sample_ids.append(item.matched_to)
+            observation_ids.append(item.matched_to)
     if context.approved_hypothesis is not None:
         hypothesis_ids.append(context.approved_hypothesis.hypothesis_id)
         evidence_ids.extend(context.approved_hypothesis.evidence_ids)
@@ -177,271 +241,262 @@ def _rethink_bridge(
         spec_ids.append(context.hypothesis_assessment.falsification_spec_id)
         criterion_ids.extend(context.hypothesis_assessment.decisive_criterion_ids)
         criterion_ids.extend(context.hypothesis_assessment.unresolved_criterion_ids)
+        observation_ids.extend(context.hypothesis_assessment.observation_ids)
     if context.falsification_spec is not None:
         spec_ids.append(context.falsification_spec.spec_id)
         hypothesis_ids.append(context.falsification_spec.hypothesis_id)
         for criterion in context.falsification_spec.criteria:
             criterion_ids.append(criterion.criterion_id)
-            sample_ids.extend(criterion.target_variant_ids)
-            sample_ids.extend(criterion.comparator_variant_ids)
-    del payload
+            observation_ids.extend(criterion.target_variant_ids)
+            observation_ids.extend(criterion.comparator_variant_ids)
     return RequestScopedIdBridge.build(
         scope_id=scope_id,
         role="rethink",
-        schema_name=schema_name,
+        schema_name="HypothesisDimensionGroupOutput",
         namespace_values={
-            "S": tuple(sample_ids),
+            "S": tuple(observation_ids),
             "E": tuple(evidence_ids),
             "H": tuple(hypothesis_ids),
-            "D": tuple(decision_ids),
             "A": tuple(assessment_ids),
             "P": tuple(spec_ids),
             "T": tuple(criterion_ids),
         },
         field_policies={
-            "candidates[].variant_id": FieldIdPolicy("S", "unique_near"),
-            "candidates[].matched_to": FieldIdPolicy("S", "normalize"),
-            "candidates[].evidence_ids[]": FieldIdPolicy("E", "normalize"),
             "approved_hypothesis.hypothesis_id": FieldIdPolicy("H", "exact"),
             "approved_hypothesis.evidence_ids[]": FieldIdPolicy("E", "normalize"),
-            "final_critic_decision.decision_id": FieldIdPolicy("D", "exact"),
-            "final_critic_decision.cited_evidence_ids[]": FieldIdPolicy("E", "normalize"),
             "hypothesis_assessment.assessment_id": FieldIdPolicy("A", "exact"),
             "hypothesis_assessment.hypothesis_id": FieldIdPolicy("H", "exact"),
             "hypothesis_assessment.falsification_spec_id": FieldIdPolicy("P", "exact"),
-            "hypothesis_assessment.decisive_criterion_ids[]": FieldIdPolicy("T", "exact"),
-            "hypothesis_assessment.unresolved_criterion_ids[]": FieldIdPolicy("T", "exact"),
+            "hypothesis_assessment.criterion_results[].criterion_id": FieldIdPolicy(
+                "T", "normalize"
+            ),
+            "hypothesis_assessment.observation_ids[]": FieldIdPolicy("S", "normalize"),
+            "hypothesis_assessment.criterion_results[].observation_ids[]": FieldIdPolicy(
+                "S", "normalize"
+            ),
+            "hypothesis_assessment.decisive_criterion_ids[]": FieldIdPolicy(
+                "T", "normalize"
+            ),
+            "hypothesis_assessment.unresolved_criterion_ids[]": FieldIdPolicy(
+                "T", "normalize"
+            ),
             "falsification_spec.spec_id": FieldIdPolicy("P", "exact"),
             "falsification_spec.hypothesis_id": FieldIdPolicy("H", "exact"),
-            "falsification_spec.criteria[].criterion_id": FieldIdPolicy("T", "exact"),
-            "falsification_spec.criteria[].target_variant_ids[]": FieldIdPolicy("S", "unique_near"),
-            "falsification_spec.criteria[].comparator_variant_ids[]": FieldIdPolicy("S", "unique_near"),
-            "reflections[].variant_id": FieldIdPolicy("S", "unique_near"),
-            "variant_id": FieldIdPolicy("S", "unique_near"),
+            "falsification_spec.criteria[].criterion_id": FieldIdPolicy(
+                "T", "normalize"
+            ),
+            "falsification_spec.criteria[].target_variant_ids[]": FieldIdPolicy(
+                "S", "normalize"
+            ),
+            "falsification_spec.criteria[].comparator_variant_ids[]": FieldIdPolicy(
+                "S", "normalize"
+            ),
+            "round_evidence_digest.observations[].variant_id": FieldIdPolicy(
+                "S", "unique_near"
+            ),
+            "round_evidence_digest.observations[].matched_to": FieldIdPolicy("S", "normalize"),
+            "round_evidence_digest.observations[].evidence_ids[]": FieldIdPolicy(
+                "E", "normalize"
+            ),
+            "round_evidence_digest.arm_summaries[].variant_ids[]": FieldIdPolicy(
+                "S", "normalize"
+            ),
+            "round_evidence_digest.dry_wet_disagreements[].variant_id": FieldIdPolicy(
+                "S", "unique_near"
+            ),
+            "round_evidence_digest.criterion_receipts[].criterion_id": FieldIdPolicy(
+                "T", "normalize"
+            ),
+            "round_evidence_digest.criterion_receipts[].observation_ids[]": FieldIdPolicy(
+                "S", "normalize"
+            ),
+            "round_evidence_digest.evidence_ids[]": FieldIdPolicy("E", "normalize"),
+            "hypothesis_id": FieldIdPolicy("H", "exact"),
+            "assessment_id": FieldIdPolicy("A", "exact"),
+            "supporting_observation_ids[]": FieldIdPolicy("S", "normalize"),
+            "supporting_evidence_ids[]": FieldIdPolicy("E", "normalize"),
         },
     )
 
 
-def _bounded_join(values: list[str] | tuple[str, ...], *, limit: int) -> str:
-    selected: list[str] = []
-    length = 0
-    for value in values:
-        cleaned = " ".join(str(value).split())
-        if not cleaned:
-            continue
-        addition = len(cleaned) + (1 if selected else 0)
-        if length + addition > limit:
-            break
-        selected.append(cleaned)
-        length += addition
-    return " ".join(selected) or "No additional bounded advice was available."
-
-
-def _prioritized_group_advice(
-    groups: dict[str, ReThinkDimensionGroupOutput],
-) -> tuple[str, tuple[dict[str, str], ...]]:
-    """Keep all group advice for audit and select at most two next-step priorities."""
-
-    relation_weight = {"unresolved": 4, "negative": 3, "mixed": 2, "positive": 1}
-    ranked: list[tuple[int, int, str, str]] = []
-    persisted: list[dict[str, str]] = []
-    for order, group_name in enumerate(RETHINK_DIMENSION_GROUPS):
-        group = groups[group_name]
-        persisted.append({"group": group_name, "advice": group.group_advice})
-        priority = max(
-            relation_weight[item.relation_to_sample_rationale]
-            + (2 if item.quality_status == "deterministic_fallback" else 0)
-            for item in group.dimension_assessments
-        )
-        ranked.append((priority, -order, group_name, group.group_advice))
-    ranked.sort(reverse=True)
-    selected = [f"{name}: {advice}" for _, _, name, advice in ranked[:2]]
-    return _bounded_join(selected, limit=2000), tuple(persisted)
-
-
-def _relation_for_candidate(
+def _group_prompt_context(
+    context: HypothesisReflectionContextInput,
     *,
-    intent_arm: str,
-    wet_support: bool,
-    dry_agrees: bool,
-) -> str:
-    """Relate the observation to the sample rationale, not the batch hypothesis."""
-
-    if intent_arm in {"hypothesis_target", "evidence_prior"}:
-        if not dry_agrees:
-            return "mixed"
-        return "support" if wet_support else "conflict"
-    if intent_arm in {"coverage_exploration", "matched_control", "fallback"}:
-        return "inconclusive" if dry_agrees else "mixed"
-    return "inconclusive"
-
-
-def _dimension_assessments(*, wet_support: bool, dry_agrees: bool) -> list[dict[str, str]]:
-    output: list[dict[str, str]] = []
-    for dimension in RETHINK_DIMENSIONS:
-        if dimension == "measured_function":
-            finding = "The revealed value exceeded the visible baseline." if wet_support else "The revealed value did not exceed the visible baseline."
-            status = "measured"
-        elif dimension == "uncertainty_domain_shift":
-            finding = "Dry and wet directions agree." if dry_agrees else "Dry and wet directions disagree."
-            status = "mixed"
-        else:
-            finding = "No dimension-specific evidence was supplied in this request."
-            status = "missing"
-        output.append(
-            {
-                "dimension": dimension,
-                "evidence_status": status,
-                "finding": finding,
-                "implication": "Keep this dimension bounded to the visible round evidence.",
-            }
-        )
-    return output
-
-
-def _compact_rethink_prompt(context: ReThinkContextInput) -> dict[str, Any]:
-    """Remove repeated comparator universes while preserving executable assessment semantics."""
-
+    group_name: str,
+    dimensions: tuple[str, str],
+) -> dict[str, Any]:
     payload = context.model_dump(mode="json")
-    spec = payload.get("falsification_spec")
-    if isinstance(spec, dict):
-        candidate_ids = {item["variant_id"] for item in payload.get("candidates", ())}
-        compact_criteria: list[dict[str, Any]] = []
-        for raw in spec.get("criteria", ()):
-            criterion = dict(raw)
-            targets = tuple(criterion.pop("target_variant_ids", ()))
-            comparators = tuple(criterion.pop("comparator_variant_ids", ()))
-            criterion["target_scope"] = (
-                "current_request_candidates"
-                if set(targets).intersection(candidate_ids)
-                else "outside_current_request"
-            )
-            criterion["target_count"] = len(targets)
-            criterion["comparator_scope"] = "registered_visible_baseline"
-            criterion["comparator_count"] = len(comparators)
-            compact_criteria.append(criterion)
-        spec["criteria"] = compact_criteria
+    source = payload["round_evidence_digest"]
+    observations = source["observations"]
+    if group_name == "outcome_and_edit":
+        digest = {
+            "observation_count": source["observation_count"],
+            "observations": [
+                {key: item[key] for key in (
+                    "variant_id", "mutation_notation", "wet_value", "intent_arm",
+                    "matched_to", "falsification_role",
+                )}
+                for item in observations
+            ],
+            "arm_summaries": source["arm_summaries"],
+            "criterion_receipts": source["criterion_receipts"],
+        }
+    elif group_name == "sequence_and_physchem":
+        digest = {
+            "observation_count": source["observation_count"],
+            "observations": [
+                {key: item[key] for key in (
+                    "variant_id", "mutation_notation", "wet_value", "intent_arm",
+                    "matched_to", "evidence_ids",
+                )}
+                for item in observations
+            ],
+            "arm_summaries": source["arm_summaries"],
+            "evidence_ids": source["evidence_ids"],
+        }
+    elif group_name == "structure_and_evolution":
+        digest = {
+            "observation_count": source["observation_count"],
+            "observations": [
+                {
+                    "variant_id": item["variant_id"],
+                    "mutation_notation": item["mutation_notation"],
+                    "evidence_ids": item["evidence_ids"],
+                }
+                for item in observations
+            ],
+            "evidence_ids": source["evidence_ids"],
+        }
+    else:
+        digest = {
+            "observation_count": source["observation_count"],
+            "observations": [
+                {key: item[key] for key in (
+                    "variant_id", "wet_value", "dry_validations", "intent_arm", "matched_to",
+                )}
+                for item in observations
+            ],
+            "arm_summaries": source["arm_summaries"],
+            "dry_wet_disagreements": source["dry_wet_disagreements"],
+            "criterion_receipts": source["criterion_receipts"],
+        }
+    payload["round_evidence_digest"] = digest
     payload["output_scope"] = {
-        "level": "sample",
-        "required_sample_ids": [item["variant_id"] for item in payload["candidates"]],
-        "batch_assessment": "runtime_owned_not_model_output",
-        "required_dimensions": list(RETHINK_DIMENSIONS),
+        "level": "hypothesis_assessment",
+        "dimension_group": group_name,
+        "required_dimensions": list(dimensions),
+        "assessment_status_runtime_owned": True,
     }
     return payload
 
 
-def _parse_reflections(
-    payload: dict[str, Any], *, run_id: str, round_id: int, provider: str
-) -> tuple[ReThinkReflection, ...]:
-    return ReThinkOutput.model_validate(payload).to_reflections(
-        run_id=run_id,
-        round_id=round_id,
-        provider=provider,
+def _relation_from_status(status: str) -> str:
+    return {
+        "SUPPORTED": "positive",
+        "CONTRADICTED": "negative",
+        "INCONCLUSIVE": "unresolved",
+    }[status]
+
+
+def _fallback_group(
+    *,
+    hypothesis_id: str,
+    assessment_id: str,
+    group_name: str,
+    dimensions: tuple[str, str],
+) -> HypothesisDimensionGroupOutput:
+    return HypothesisDimensionGroupOutput(
+        hypothesis_id=hypothesis_id,
+        assessment_id=assessment_id,
+        group_name=group_name,
+        dimension_assessments=[
+            {
+                "dimension": dimension,
+                "evidence_status": "missing",
+                "relation_to_hypothesis": "unresolved",
+                "finding_code": "remote_group_unavailable",
+                "finding": "The remote group did not produce a validated hypothesis-level result.",
+                "implication": "Keep this dimension unresolved and out of selection evidence.",
+                "quality_status": "deterministic_fallback",
+            }
+            for dimension in dimensions
+        ],
+        unresolved_questions=[f"The {group_name} reflection remains unavailable."],
+        recommended_actions=["collect_missing_measurement"],
+        group_advice="Repeat this bounded group assessment without changing the deterministic status.",
     )
 
 
-def _validate_rethink_items(
-    payload: dict[str, Any], *, expected_variant_ids: frozenset[str]
-) -> dict[str, Any]:
-    output = ReThinkItemsOutput.model_validate(payload)
-    actual = {item.variant_id for item in output.reflections}
-    missing = sorted(expected_variant_ids.difference(actual))
-    unexpected = sorted(actual.difference(expected_variant_ids))
-    if missing or unexpected:
-        raise ValueError(
-            f"ReThink sample coverage mismatch; missing={missing}, unexpected={unexpected}"
-        )
-    return output.model_dump(mode="json")
-
-
-class MockReThinkClient:
-    """Deterministic offline reflection with the same structured output as the remote role."""
-
+class MockHypothesisReThinkClient:
     provider_name = "mock_rethink"
 
-    def reflect_round(self, *, context: ReThinkContextInput) -> tuple[ReThinkReflection, ...]:
-        typed_context = ReThinkContextInput.model_validate(context)
-        context = typed_context.model_dump(mode="json")
-        baseline = typed_context.visible_baseline
-        items: list[dict[str, Any]] = []
-        for item in context.get("candidates", ()):
-            wet = float(item["wet_value"])
-            dry = [float(entry["value"]) for entry in item.get("dry_validations", ())]
-            wet_support = wet > baseline
-            dry_mean = sum(dry) / len(dry) if dry else None
-            dry_agrees = dry_mean is None or (dry_mean > baseline) == wet_support
-            verdict = _relation_for_candidate(
-                intent_arm=str(item.get("intent_arm", "fallback")),
-                wet_support=wet_support,
-                dry_agrees=dry_agrees,
+    def __init__(self) -> None:
+        self.last_dimension_groups: tuple[HypothesisDimensionGroupOutput, ...] = ()
+
+    def reflect_hypothesis(
+        self, *, context: HypothesisReflectionContextInput
+    ) -> HypothesisReflection | None:
+        typed = HypothesisReflectionContextInput.model_validate(context)
+        self.last_dimension_groups = ()
+        if typed.approved_hypothesis is None or typed.hypothesis_assessment is None:
+            return None
+        status = typed.hypothesis_assessment.status
+        relation = _relation_from_status(status)
+        groups = []
+        for group_name, dimensions in RETHINK_DIMENSION_GROUPS.items():
+            groups.append(
+                HypothesisDimensionGroupOutput(
+                    hypothesis_id=typed.approved_hypothesis.hypothesis_id,
+                    assessment_id=typed.hypothesis_assessment.assessment_id,
+                    group_name=group_name,
+                    dimension_assessments=[
+                        {
+                            "dimension": dimension,
+                            "evidence_status": "measured",
+                            "relation_to_hypothesis": relation,
+                            "finding_code": f"deterministic_{status.casefold()}",
+                            "finding": f"The deterministic assessment status is {status}.",
+                            "implication": "Treat the result as hypothesis-level and round-bounded.",
+                            "quality_status": "deterministic_fallback",
+                        }
+                        for dimension in dimensions
+                    ],
+                    retained_claims=(
+                        ["Retain the tested hypothesis only within its observed scope."]
+                        if status == "SUPPORTED" else []
+                    ),
+                    invalidated_assumptions=(
+                        ["Do not reuse the contradicted hypothesis without revision."]
+                        if status == "CONTRADICTED" else []
+                    ),
+                    unresolved_questions=(
+                        ["The deterministic assessment remains inconclusive."]
+                        if status == "INCONCLUSIVE" else []
+                    ),
+                    recommended_actions=[
+                        "downweight_rationale"
+                        if status == "CONTRADICTED"
+                        else "retain_uncertainty_aware_exploration"
+                    ],
+                    supporting_observation_ids=list(
+                        typed.hypothesis_assessment.observation_ids[:12]
+                    ),
+                    group_advice="Use the deterministic assessment and preserve alternatives.",
+                )
             )
-            positives = []
-            negatives = []
-            if wet_support:
-                positives.append("Wet validation exceeded the pre-round visible baseline.")
-            else:
-                negatives.append("Wet validation did not exceed the pre-round visible baseline.")
-            if dry_mean is not None and dry_agrees:
-                positives.append("Dry validation agreed with the wet direction.")
-            elif dry_mean is not None:
-                negatives.append("Dry and wet validation directions disagreed.")
-            items.append(
-                {
-                    "variant_id": item["variant_id"],
-                    "candidate_relation": verdict,
-                    "summary": (
-                        f"Recommendation reason is {verdict} by wet/dry directional checks; "
-                        f"wet={wet:.4f}, baseline={baseline:.4f}."
-                    ),
-                    "positive_findings": positives,
-                    "negative_findings": negatives,
-                    "revised_reason": (
-                        "Treat the original selection rationale as round-specific evidence. "
-                        "Do not infer a universal residue effect from this fallback review."
-                    ),
-                    "next_round_advice": (
-                        "Retain related mutations with uncertainty-aware exploration."
-                        if wet_support
-                        else "Down-weight this rationale and test matched alternatives."
-                    ),
-                    "next_round_action": (
-                        "retain_uncertainty_aware_exploration"
-                        if wet_support
-                        else "test_matched_alternative"
-                    ),
-                    "dimension_assessments": _dimension_assessments(
-                        wet_support=wet_support, dry_agrees=dry_agrees
-                    ),
-                }
-            )
-        return _parse_reflections(
-            {
-                "reflections": items,
-                "batch_assessment": {
-                    "assessment_id": (
-                        typed_context.hypothesis_assessment.assessment_id
-                        if typed_context.hypothesis_assessment is not None
-                        else None
-                    ),
-                    "status": (
-                        typed_context.hypothesis_assessment.status
-                        if typed_context.hypothesis_assessment is not None
-                        else "NOT_APPLICABLE"
-                    ),
-                    "commentary": (
-                        "Candidate-level rationale relations are advisory; the runtime assessment "
-                        "is the authoritative batch-level hypothesis result."
-                    ),
-                    "next_round_advice": "Use the deterministic assessment and candidate relations separately.",
-                },
-            },
-            run_id=str(context["run_id"]),
-            round_id=int(context["round_id"]),
+        self.last_dimension_groups = tuple(groups)
+        return HypothesisReflectionOutput(
+            hypothesis_id=typed.approved_hypothesis.hypothesis_id,
+            assessment_id=typed.hypothesis_assessment.assessment_id,
+            assessment_status=status,
+            dimension_groups=groups,
+        ).to_reflection(
+            round_id=typed.round_id,
             provider=self.provider_name,
+            quality_status="deterministic_fallback",
         )
 
-
-class NativeReThinkClient:
+class NativeHypothesisReThinkClient:
     provider_name = "openai_compatible_rethink"
 
     def __init__(
@@ -467,11 +522,10 @@ class NativeReThinkClient:
         request_timeout_seconds: float = 120.0,
         allow_unknown_evidence_stripping: bool = False,
         max_input_chars: int | None = None,
-        reasoning_batch_size: int = 1,
-        max_parallel_batches: int = 8,
-        max_calls_per_round: int = 256,
-        call_reserve: int = 96,
-        dimension_parallel: bool = True,
+        max_parallel_batches: int = 4,
+        max_calls_per_round: int = 32,
+        call_reserve: int = 16,
+        parallel_dimension_groups: bool = True,
     ) -> None:
         self.model = resolve_model(model, provider=provider)
         self.temperature = temperature
@@ -488,21 +542,19 @@ class NativeReThinkClient:
         self.retry_backoff_seconds = retry_backoff_seconds
         self.allow_unknown_evidence_stripping = allow_unknown_evidence_stripping
         self.max_input_chars = max_input_chars
-        if not 1 <= reasoning_batch_size <= 8:
-            raise ValueError("ReThink reasoning_batch_size must be between 1 and 8")
         if max_parallel_batches < 1:
             raise ValueError("ReThink max_parallel_batches must be positive")
-        self.reasoning_batch_size = reasoning_batch_size
-        self.max_parallel_batches = max_parallel_batches
+        self.max_parallel_batches = min(max_parallel_batches, len(RETHINK_DIMENSION_GROUPS))
         if max_calls_per_round < 1 or not 0 <= call_reserve < max_calls_per_round:
             raise ValueError("ReThink call budget and reserve are invalid")
         self.max_calls_per_round = max_calls_per_round
         self.call_reserve = call_reserve
-        self.dimension_parallel = dimension_parallel
+        self.parallel_dimension_groups = parallel_dimension_groups
         self._budget_lock = threading.Lock()
         self._attempt_budget: LLMAttemptBudget | None = None
         self._bridge_lock = threading.Lock()
         self._bridge_sequence = 0
+        self.last_dimension_groups: tuple[HypothesisDimensionGroupOutput, ...] = ()
         role_profile = load_role_profile("rethink", profile)
         self.profile_name = profile
         self.profile_version = role_profile.metadata.get("version")
@@ -516,267 +568,55 @@ class NativeReThinkClient:
         self.transport = OpenAICompatibleChatTransport(self.client)
 
     def _new_bridge_scope(self) -> str:
-        if not hasattr(self, "_bridge_lock"):
-            self._bridge_lock = threading.Lock()
-            self._bridge_sequence = 0
         with self._bridge_lock:
             self._bridge_sequence += 1
             return f"IDB{self._bridge_sequence:06d}"
 
     def _consume_attempt(self, metadata: dict[str, Any]) -> None:
-        budget = self._attempt_budget
-        if budget is not None:
-            budget.consume(metadata)
+        if self._attempt_budget is not None:
+            self._attempt_budget.consume(metadata)
 
     def _release_attempt(self, metadata: dict[str, Any]) -> None:
-        budget = self._attempt_budget
-        if budget is not None:
-            budget.release(metadata)
+        if self._attempt_budget is not None:
+            self._attempt_budget.release(metadata)
 
     def _reset_attempt_budget(self) -> LLMAttemptBudget:
         budget = LLMAttemptBudget(
-            limit=getattr(self, "max_calls_per_round", 256),
-            reserve=getattr(self, "call_reserve", 96),
-            concurrency_limit=getattr(self, "max_parallel_batches", 8),
-            provider=getattr(self, "provider_name", "rethink"),
+            limit=self.max_calls_per_round,
+            reserve=self.call_reserve,
+            concurrency_limit=self.max_parallel_batches,
+            provider=self.provider_name,
         )
-        if not hasattr(self, "_budget_lock"):
-            self._budget_lock = threading.Lock()
         with self._budget_lock:
             self._attempt_budget = budget
         return budget
 
-    @staticmethod
-    def _is_splittable_output_failure(error: Exception) -> bool:
-        return isinstance(error, RemoteLLMCompletionError) and (
-            error.error_code in {"OUTPUT_TRUNCATED", "OUTPUT_JSON_INVALID"}
-        )
-
-    def _reflect_batch(
-        self,
-        *,
-        context: ReThinkContextInput,
-        batch_id: str,
-        split_depth: int,
-    ) -> tuple[ReThinkReflection, ...]:
-        bridge = _rethink_bridge(
-            context,
-            scope_id=self._new_bridge_scope(),
-            schema_name="ReThinkItemsOutput",
-        )
-        alias_context = ReThinkContextInput.model_validate(
-            bridge.encode_projection(context.model_dump(mode="json"))
-        )
-        expected_aliases = alias_context.expected_variant_ids
-        trace_context = AgentTraceContext(
-            run_id=context.run_id,
-            round_id=context.round_id,
-            role="rethink",
-            request_id=(
-                f"rethink:{context.run_id}:r{context.round_id}:{batch_id}"
-            ),
-        )
-        report_llm_id_bridge(
-            round_id=context.round_id,
-            **bridge.audit_payload(),
-        )
-
-        def validate_output(value: dict[str, Any]) -> dict[str, Any]:
-            decoded = bridge.decode_and_validate(value)
-            _validate_rethink_items(
-                decoded,
-                expected_variant_ids=context.expected_variant_ids,
-            )
-            return value
-
-        output = complete_structured(
-            client=self.client,
-            transport=self.transport,
-            model=self.model,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        self.profile + "\nReturn JSON matching ReThinkItemsOutput. "
-                        "Use only the request-local S labels in candidates; local code maps them "
-                        "back to canonical sample records. "
-                        "Return exactly one sample-level reflection and all eight dimension "
-                        "assessments per candidate. Do not return a batch assessment; the runtime "
-                        "owns and injects it. "
-                        + json.dumps(ReThinkItemsOutput.model_json_schema(), ensure_ascii=False)
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": json.dumps(_compact_rethink_prompt(alias_context), ensure_ascii=False),
-                },
-            ],
-            output_type=ReThinkItemsOutput,
-            temperature=self.temperature,
-            max_tokens=self.max_tokens,
-            render_max_tokens=getattr(self, "render_max_tokens", self.max_tokens),
-            reasoning_effort=self.reasoning_effort,
-            thinking=self.thinking,
-            retries=0,
-            transport_retries=getattr(self, "max_transport_retries", 2),
-            truncation_retries=getattr(self, "max_truncation_retries", 1),
-            syntax_retries=getattr(self, "max_syntax_retries", 1),
-            schema_retries=getattr(self, "max_schema_retries", 2),
-            semantic_retries=getattr(self, "max_semantic_retries", 1),
-            unknown_evidence_retries=getattr(
-                self, "max_unknown_evidence_retries", 1
-            ),
-            retry_backoff_seconds=getattr(self, "retry_backoff_seconds", 0.0),
-            allow_unknown_evidence_stripping=getattr(
-                self, "allow_unknown_evidence_stripping", False
-            ),
-            max_input_chars=getattr(self, "max_input_chars", None),
-            separate_json_render=True,
-            repair_hints={
-                "reflections[].variant_id": tuple(expected_aliases)
-            },
-            contextual_validator=validate_output,
-            reasoning_truncation_retries=0,
-            preserve_reasoning_on_retry=True,
-            trace_context={
-                **trace_context.model_dump(mode="json"),
-                "profile": self.profile_name,
-                "profile_version": getattr(self, "profile_version", None),
-                "schema_name": "ReThinkOutput",
-                "retry_scope": f"rethink:{batch_id}",
-                "rethink_batch_id": batch_id,
-                "rethink_batch_size": len(context.candidates),
-                "rethink_split_depth": split_depth,
-                "id_bridge_scope": bridge.scope_id,
-            },
-            attempt_guard=self._consume_attempt,
-            attempt_release=self._release_attempt,
-        )
-        assessment = context.hypothesis_assessment
-        complete_output = ReThinkOutput(
-            reflections=output.reflections,
-            batch_assessment={
-                "assessment_id": assessment.assessment_id if assessment is not None else None,
-                "status": assessment.status if assessment is not None else "NOT_APPLICABLE",
-                "commentary": "Runtime-owned deterministic batch assessment; sample reflections are advisory.",
-                "next_round_advice": "Use sample-level dimensions without overriding the deterministic batch result.",
-            },
-        )
-        canonical_payload = bridge.decode_and_validate(
-            complete_output.model_dump(mode="json"),
-            record_receipts=False,
-        )
-        report_llm_id_bridge(
-            round_id=context.round_id,
-            **bridge.audit_payload(),
-        )
-        reflections = _parse_reflections(
-            canonical_payload,
-            run_id=context.run_id,
-            round_id=context.round_id,
-            provider=self.provider_name,
-        )
-        return reflections
-
-    def reflect_round(self, *, context: ReThinkContextInput) -> tuple[ReThinkReflection, ...]:
-        validated_context = ReThinkContextInput.model_validate(context)
-        candidates = tuple(validated_context.candidates)
-        if not candidates:
-            return ()
-        budget = self._reset_attempt_budget()
-        if getattr(self, "dimension_parallel", False):
-            output = self._reflect_round_dimensions(validated_context)
-            report_event(
-                "rethink_attempt_budget_completed",
-                message="ReThink provider attempt budget completed",
-                round_id=validated_context.round_id,
-                **budget.snapshot(),
-            )
-            return output
-        batch_size = getattr(self, "reasoning_batch_size", 1)
-        planned_calls = (len(candidates) + batch_size - 1) // batch_size
-        max_calls = getattr(self, "max_calls_per_round", 256)
-        reserve = getattr(self, "call_reserve", 96)
-        usable_calls = max_calls - reserve
-        if planned_calls > usable_calls:
-            raise ValueError(
-                "ReThink logical call plan exceeds the call budget after retry reserve; "
-                f"planned={planned_calls}, usable={usable_calls}"
-            )
-        by_variant_id: dict[str, ReThinkReflection] = {}
-        batches = adaptive_batch_submit(
-            candidates,
-            item_id=lambda item: item.variant_id,
-            submit_batch=lambda work: self._reflect_batch_work(
-                context=validated_context,
-                work=work,
-            ),
-            initial_batch_size=getattr(self, "reasoning_batch_size", 1),
-            max_parallel_batches=getattr(self, "max_parallel_batches", 8),
-            should_split_failure=self._is_splittable_output_failure,
-            role="rethink",
-            round_id=validated_context.round_id,
-            event_reporter=report_event,
-        )
-        for batch in batches:
-            for reflection in batch.output:
-                if reflection.variant_id in by_variant_id:
-                    raise ValueError(
-                        "Adaptive ReThink batches returned duplicate variant_id "
-                        f"{reflection.variant_id!r}"
-                    )
-                by_variant_id[reflection.variant_id] = reflection
-        expected_ids = tuple(item.variant_id for item in candidates)
-        missing = sorted(set(expected_ids).difference(by_variant_id))
-        unexpected = sorted(set(by_variant_id).difference(expected_ids))
-        if missing or unexpected:
-            raise ValueError(
-                "Adaptive ReThink batch coverage mismatch; "
-                f"missing={missing}, unexpected={unexpected}"
-            )
-        output = tuple(
-            replace(by_variant_id[item], reflection_id=f"R{validated_context.round_id:02d}-{index:02d}")
-            for index, item in enumerate(expected_ids, start=1)
-        )
-        report_event(
-            "rethink_attempt_budget_completed",
-            message="ReThink provider attempt budget completed",
-            round_id=validated_context.round_id,
-            **budget.snapshot(),
-        )
-        return output
-
     def _reflect_dimension_group(
         self,
         *,
-        context: ReThinkContextInput,
+        context: HypothesisReflectionContextInput,
         group_name: str,
         dimensions: tuple[str, str],
-    ) -> ReThinkDimensionGroupOutput:
-        candidate = context.candidates[0]
-        bridge = _rethink_bridge(
-            context,
-            scope_id=self._new_bridge_scope(),
-            schema_name="ReThinkDimensionGroupOutput",
-        )
-        alias_context = ReThinkContextInput.model_validate(
+    ) -> HypothesisDimensionGroupOutput:
+        assert context.approved_hypothesis is not None
+        assert context.hypothesis_assessment is not None
+        bridge = _rethink_bridge(context, scope_id=self._new_bridge_scope())
+        alias_context = HypothesisReflectionContextInput.model_validate(
             bridge.encode_projection(context.model_dump(mode="python"))
         )
-        alias_variant_id = bridge.namespaces["S"].encode(
-            candidate.variant_id, strict=True
-        )
-        report_llm_id_bridge(
-            round_id=context.round_id,
-            **bridge.audit_payload(),
-        )
+        report_llm_id_bridge(round_id=context.round_id, **bridge.audit_payload())
 
         def validate_output(value: dict[str, Any]) -> dict[str, Any]:
             decoded = bridge.decode_and_validate(value)
-            self._validate_dimension_group(
-                decoded,
-                expected_variant_id=candidate.variant_id,
-                expected_dimensions=frozenset(dimensions),
-            )
+            output = HypothesisDimensionGroupOutput.model_validate(decoded)
+            actual = {item.dimension for item in output.dimension_assessments}
+            if (
+                output.hypothesis_id != context.approved_hypothesis.hypothesis_id
+                or output.assessment_id != context.hypothesis_assessment.assessment_id
+                or output.group_name != group_name
+                or actual != frozenset(dimensions)
+            ):
+                raise ValueError("ReThink dimension group does not match its hypothesis request")
             return value
 
         output = complete_structured(
@@ -788,33 +628,32 @@ class NativeReThinkClient:
                     "role": "system",
                     "content": (
                         self.profile
-                        + "\nAnalyze only the two named dimensions for exactly one sample. "
-                        "Return ReThinkDimensionGroupOutput JSON. Do not return a batch verdict "
-                        "or hidden reasoning. Required dimensions: "
+                        + "\nAnalyze only the two named dimensions for the frozen hypothesis and "
+                        "round-level evidence digest. The deterministic assessment status is "
+                        "runtime-owned and cannot be changed. Return "
+                        "HypothesisDimensionGroupOutput JSON without hidden reasoning. Required "
+                        "dimensions: "
                         + json.dumps(dimensions)
                         + ". Schema: "
                         + json.dumps(
-                            ReThinkDimensionGroupOutput.model_json_schema(),
-                            ensure_ascii=False,
+                            HypothesisDimensionGroupOutput.model_json_schema(), ensure_ascii=False
                         )
                     ),
                 },
                 {
                     "role": "user",
                     "content": json.dumps(
-                        {
-                            **_compact_rethink_prompt(alias_context),
-                            "dimension_group": group_name,
-                            "required_dimensions": list(dimensions),
-                        },
+                        _group_prompt_context(
+                            alias_context, group_name=group_name, dimensions=dimensions
+                        ),
                         ensure_ascii=False,
                     ),
                 },
             ],
-            output_type=ReThinkDimensionGroupOutput,
+            output_type=HypothesisDimensionGroupOutput,
             temperature=self.temperature,
             max_tokens=self.max_tokens,
-            render_max_tokens=getattr(self, "render_max_tokens", self.max_tokens),
+            render_max_tokens=self.render_max_tokens,
             reasoning_effort=self.reasoning_effort,
             thinking=self.thinking,
             retries=0,
@@ -829,18 +668,20 @@ class NativeReThinkClient:
             max_input_chars=self.max_input_chars,
             separate_json_render=True,
             contextual_validator=validate_output,
-            repair_hints={"variant_id": (alias_variant_id,)},
             trace_context={
-                "run_id": context.run_id,
-                "round_id": context.round_id,
-                "role": "rethink",
+                **AgentTraceContext(
+                    run_id=context.run_id,
+                    round_id=context.round_id,
+                    role="rethink",
+                    request_id=(
+                        f"rethink:{context.run_id}:r{context.round_id}:"
+                        f"{context.hypothesis_assessment.assessment_id}:{group_name}"
+                    ),
+                ).model_dump(mode="json"),
                 "profile": self.profile_name,
                 "profile_version": self.profile_version,
-                "request_id": (
-                    f"rethink:{context.run_id}:r{context.round_id}:"
-                    f"{alias_variant_id}:{group_name}"
-                ),
-                "rethink_scope": "sample_dimension_group",
+                "schema_name": "HypothesisDimensionGroupOutput",
+                "rethink_scope": "hypothesis_dimension_group",
                 "rethink_dimension_group": group_name,
                 "id_bridge_scope": bridge.scope_id,
             },
@@ -848,223 +689,105 @@ class NativeReThinkClient:
             attempt_release=self._release_attempt,
         )
         decoded = bridge.decode_and_validate(
-            output.model_dump(mode="json"),
-            record_receipts=False,
+            output.model_dump(mode="json"), record_receipts=False
         )
-        report_llm_id_bridge(
-            round_id=context.round_id,
-            **bridge.audit_payload(),
-        )
-        return ReThinkDimensionGroupOutput.model_validate(decoded)
+        report_llm_id_bridge(round_id=context.round_id, **bridge.audit_payload())
+        return HypothesisDimensionGroupOutput.model_validate(decoded)
 
-    @staticmethod
-    def _validate_dimension_group(
-        payload: dict[str, Any],
-        *,
-        expected_variant_id: str,
-        expected_dimensions: frozenset[str],
-    ) -> dict[str, Any]:
-        output = ReThinkDimensionGroupOutput.model_validate(payload)
-        actual = {item.dimension for item in output.dimension_assessments}
-        if output.variant_id != expected_variant_id or actual != expected_dimensions:
-            raise ValueError("ReThink dimension group does not match its sample/group request")
-        return output.model_dump(mode="json")
-
-    @staticmethod
-    def _fallback_dimension_group(
-        *,
-        candidate_id: str,
-        group_name: str,
-        dimensions: tuple[str, str],
-        error: Exception,
-    ) -> ReThinkDimensionGroupOutput:
-        del error
-        return ReThinkDimensionGroupOutput(
-            variant_id=candidate_id,
-            dimension_assessments=[
-                {
-                    "dimension": dimension,
-                    "evidence_status": "missing",
-                    "relation_to_sample_rationale": "unresolved",
-                    "finding_code": "remote_group_unavailable",
-                    "finding": (
-                        "The remote ReThink group did not produce a validated result for "
-                        "this sample; no dimension-specific conclusion is available."
-                    ),
-                    "implication": (
-                        "Keep this dimension unresolved and ineligible for selection until a "
-                        "validated sample-level review is available."
-                    ),
-                    "quality_status": "deterministic_fallback",
-                }
-                for dimension in dimensions
-            ],
-            group_advice=(
-                f"Repeat the {group_name} review with the same request-local evidence scope; "
-                "do not infer a direction from this fallback."
-            ),
-        )
-
-    def _reflect_round_dimensions(
-        self, context: ReThinkContextInput
-    ) -> tuple[ReThinkReflection, ...]:
-        candidates = tuple(context.candidates)
+    def reflect_hypothesis(
+        self, *, context: HypothesisReflectionContextInput
+    ) -> HypothesisReflection | None:
+        typed = HypothesisReflectionContextInput.model_validate(context)
+        self.last_dimension_groups = ()
+        if typed.approved_hypothesis is None or typed.hypothesis_assessment is None:
+            report_event(
+                "rethink_not_applicable",
+                message="ReThink skipped because no assessed hypothesis is available",
+                round_id=typed.round_id,
+            )
+            return None
+        budget = self._reset_attempt_budget()
         calls_per_completion = 1 if self.thinking == "disabled" else 2
-        planned_calls = (
-            len(candidates) * len(RETHINK_DIMENSION_GROUPS) * calls_per_completion
-        )
-        usable_calls = self.max_calls_per_round - self.call_reserve
-        if planned_calls > usable_calls:
+        planned_calls = len(RETHINK_DIMENSION_GROUPS) * calls_per_completion
+        if planned_calls > budget.usable_baseline:
             raise ValueError(
                 "ReThink dimension call plan exceeds the call budget after retry reserve; "
-                f"planned={planned_calls}, usable={usable_calls}"
+                f"planned={planned_calls}, usable={budget.usable_baseline}"
             )
-        grouped: dict[str, dict[str, ReThinkDimensionGroupOutput]] = {
-            item.variant_id: {} for item in candidates
-        }
-        with ThreadPoolExecutor(max_workers=self.max_parallel_batches) as executor:
-            futures = {}
-            for candidate in candidates:
-                sample_context = context.model_copy(update={"candidates": [candidate]})
-                for group_name, dimensions in RETHINK_DIMENSION_GROUPS.items():
-                    future = executor.submit(
-                        copy_context().run,
-                        partial(
-                            self._reflect_dimension_group,
-                            context=sample_context,
-                            group_name=group_name,
-                            dimensions=dimensions,
-                        ),
-                    )
-                    futures[future] = (candidate.variant_id, group_name, dimensions)
-            for future in as_completed(futures):
-                variant_id, group_name, dimensions = futures[future]
-                try:
-                    grouped[variant_id][group_name] = future.result()
-                except Exception as error:  # noqa: BLE001 - isolate one advisory group
-                    grouped[variant_id][group_name] = self._fallback_dimension_group(
-                        candidate_id=variant_id,
-                        group_name=group_name,
-                        dimensions=dimensions,
-                        error=error,
-                    )
-                    report_event(
-                        "rethink_dimension_group_degraded",
-                        message="ReThink dimension group degraded to a typed fallback",
-                        round_id=context.round_id,
-                        variant_id=variant_id,
-                        group_name=group_name,
-                        error_type=type(error).__name__,
-                        error=str(error),
-                    )
+        groups: dict[str, HypothesisDimensionGroupOutput] = {}
 
-        assessment = context.hypothesis_assessment
-        output: list[ReThinkReflection] = []
-        for index, candidate in enumerate(candidates, start=1):
-            groups = grouped[candidate.variant_id]
-            dimensions = tuple(
-                item.model_dump(mode="json")
-                for group_name in RETHINK_DIMENSION_GROUPS
-                for item in groups[group_name].dimension_assessments
-            )
-            wet_support = (
-                candidate.wet_value > context.visible_baseline
-                if context.measurement_contract.optimization_direction == "higher_is_better"
-                else candidate.wet_value < context.visible_baseline
-            )
-            dry_values = [item.value for item in candidate.dry_validations]
-            dry_agrees = True
-            if dry_values:
-                dry_mean = sum(dry_values) / len(dry_values)
-                dry_support = (
-                    dry_mean > context.visible_baseline
-                    if context.measurement_contract.optimization_direction == "higher_is_better"
-                    else dry_mean < context.visible_baseline
+        def execute(group_name: str, dimensions: tuple[str, str]) -> None:
+            try:
+                groups[group_name] = self._reflect_dimension_group(
+                    context=typed, group_name=group_name, dimensions=dimensions
                 )
-                dry_agrees = dry_support == wet_support
-            relation = _relation_for_candidate(
-                intent_arm=candidate.intent_arm,
-                wet_support=wet_support,
-                dry_agrees=dry_agrees,
-            )
-            advice, group_advice = _prioritized_group_advice(groups)
-            degraded = any(
-                item.get("quality_status") == "deterministic_fallback"
-                for item in dimensions
-            )
-            output.append(
-                ReThinkReflection(
-                    reflection_id=f"R{context.round_id:02d}-{index:02d}",
-                    variant_id=candidate.variant_id,
-                    round_id=context.round_id,
-                    verdict=relation,
-                    summary=(
-                        f"Revealed value {candidate.wet_value:.4g} versus visible baseline "
-                        f"{context.visible_baseline:.4g}; eight dimensions reviewed."
-                    ),
-                    positive_findings=tuple(
-                        item["finding"]
-                        for item in dimensions
-                        if item.get("relation_to_sample_rationale") == "positive"
-                    )[:8],
-                    negative_findings=tuple(
-                        item["finding"]
-                        for item in dimensions
-                        if item.get("relation_to_sample_rationale") == "negative"
-                    )[:8],
-                    revised_reason=_bounded_join(
-                        [
-                            "Treat the original selection rationale as round- and sample-specific.",
-                            candidate.critic_explanation,
-                            *candidate.critic_suggestions[:2],
-                        ],
-                        limit=2000,
-                    ),
-                    next_round_advice=advice,
-                    next_round_action=(
-                        "retain_uncertainty_aware_exploration"
-                        if wet_support and dry_agrees
-                        else "test_matched_alternative"
-                    ),
-                    provider=self.provider_name,
-                    assessment_id=assessment.assessment_id if assessment else None,
-                    assessment_status=assessment.status if assessment else "NOT_APPLICABLE",
-                    assessment_commentary=(
-                        "Runtime-owned deterministic batch assessment; sample dimensions are advisory."
-                    ),
-                    quality_status=(
-                        "deterministic_fallback" if degraded else "model"
-                    ),
-                    dimension_assessments=dimensions,
-                    dimension_group_advice=group_advice,
+            except Exception as error:  # noqa: BLE001 - isolate one advisory group
+                groups[group_name] = _fallback_group(
+                    hypothesis_id=typed.approved_hypothesis.hypothesis_id,
+                    assessment_id=typed.hypothesis_assessment.assessment_id,
+                    group_name=group_name,
+                    dimensions=dimensions,
                 )
-            )
-        return tuple(output)
+                report_event(
+                    "rethink_dimension_group_degraded",
+                    message="ReThink dimension group degraded to a typed fallback",
+                    round_id=typed.round_id,
+                    hypothesis_id=typed.approved_hypothesis.hypothesis_id,
+                    group_name=group_name,
+                    error_type=type(error).__name__,
+                    error=str(error),
+                )
 
-    def _reflect_batch_work(
-        self,
-        *,
-        context: ReThinkContextInput,
-        work: AdaptiveBatchWork[Any],
-    ) -> tuple[ReThinkReflection, ...]:
-        batch_context = context.model_copy(update={"candidates": list(work.items)})
-        return self._reflect_batch(
-            context=batch_context,
-            batch_id=work.batch_id,
-            split_depth=work.split_depth,
+        if self.parallel_dimension_groups:
+            with ThreadPoolExecutor(max_workers=self.max_parallel_batches) as executor:
+                futures = {
+                    executor.submit(
+                        copy_context().run, partial(execute, group_name, dimensions)
+                    ): group_name
+                    for group_name, dimensions in RETHINK_DIMENSION_GROUPS.items()
+                }
+                for future in as_completed(futures):
+                    future.result()
+        else:
+            for group_name, dimensions in RETHINK_DIMENSION_GROUPS.items():
+                execute(group_name, dimensions)
+
+        ordered_groups = [groups[name] for name in RETHINK_DIMENSION_GROUPS]
+        self.last_dimension_groups = tuple(ordered_groups)
+        degraded = any(
+            entry.quality_status == "deterministic_fallback"
+            for group in ordered_groups
+            for entry in group.dimension_assessments
         )
+        reflection = HypothesisReflectionOutput(
+            hypothesis_id=typed.approved_hypothesis.hypothesis_id,
+            assessment_id=typed.hypothesis_assessment.assessment_id,
+            assessment_status=typed.hypothesis_assessment.status,
+            dimension_groups=ordered_groups,
+        ).to_reflection(
+            round_id=typed.round_id,
+            provider=self.provider_name,
+            quality_status="deterministic_fallback" if degraded else "model",
+        )
+        report_event(
+            "rethink_attempt_budget_completed",
+            message="Hypothesis-level ReThink provider attempt budget completed",
+            round_id=typed.round_id,
+            logical_group_calls=len(RETHINK_DIMENSION_GROUPS),
+            **budget.snapshot(),
+        )
+        return reflection
+
+OpenAICompatibleHypothesisReThinkClient = NativeHypothesisReThinkClient
 
 
-OpenAICompatibleReThinkClient = NativeReThinkClient
-
-
-def create_rethink_client(provider: str, **kwargs: Any):
+def create_hypothesis_rethink_client(provider: str, **kwargs: Any):
     if "runtime" in kwargs:
         runtime = str(kwargs.pop("runtime"))
         if runtime != "chat_completions":
             raise ValueError(f"Removed Agents SDK runtime is not supported: {runtime!r}")
     if provider == "mock":
-        return MockReThinkClient()
+        return MockHypothesisReThinkClient()
     if provider in {"openai", "openai_compatible", "deepseek"}:
         if provider == "deepseek":
             kwargs.setdefault("provider", "deepseek")
@@ -1072,5 +795,19 @@ def create_rethink_client(provider: str, **kwargs: Any):
                 "base_url", resolve_base_url(kwargs.get("base_url"), provider="deepseek")
             )
             kwargs.setdefault("model", resolve_model(kwargs.get("model"), provider="deepseek"))
-        return NativeReThinkClient(**kwargs)
+        return NativeHypothesisReThinkClient(**kwargs)
     raise ValueError(f"Unknown ReThink provider {provider!r}")
+
+
+# Preserve the original candidate-level public API. New integrations should use
+# the explicitly named hypothesis-level classes/factory above.
+from .rethink_sample import (  # noqa: F401
+    MockReThinkClient,
+    NativeReThinkClient,
+    OpenAICompatibleReThinkClient,
+    create_sample_rethink_client,
+)
+
+
+def create_rethink_client(provider: str, **kwargs: Any):
+    return create_sample_rethink_client(provider, **kwargs)

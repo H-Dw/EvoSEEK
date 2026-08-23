@@ -2,9 +2,36 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+
+@dataclass(frozen=True)
+class ReThinkReflection:
+    """Legacy candidate-level reflection retained for sample-mode compatibility."""
+
+    reflection_id: str
+    variant_id: str
+    round_id: int
+    verdict: str
+    summary: str
+    positive_findings: tuple[str, ...]
+    negative_findings: tuple[str, ...]
+    revised_reason: str
+    next_round_advice: str
+    provider: str
+    relation_scope: str = "candidate_rationale"
+    assessment_id: str | None = None
+    assessment_status: str | None = None
+    assessment_commentary: str = ""
+    quality_status: str = "model"
+    advisory_only: bool = True
+    selection_eligible: bool = False
+    next_round_action: str = "no_change"
+    dimension_assessments: tuple[dict[str, Any], ...] = ()
+    dimension_group_advice: tuple[dict[str, str], ...] = ()
 
 
 class AgentTraceContext(BaseModel):
@@ -98,8 +125,6 @@ class ScientistContextInput(BaseModel):
     visible_observations: list[dict[str, Any]]
     previous_hypothesis_id: str | None
     previous_hypothesis_assessment: dict[str, Any] | None
-    previous_hypothesis_reflection: dict[str, Any] | None = None
-    prior_hypothesis_memory: tuple[dict[str, Any], ...] = ()
     knowledge_graph: dict[str, Any] | None = None
     kg_interaction: dict[str, Any] | None = None
     approved_subhypotheses: tuple[dict[str, Any], ...] = ()
@@ -116,12 +141,7 @@ class ScientistContextInput(BaseModel):
     def normalize_allowed_positions(cls, value: Any) -> Any:
         return tuple(value) if isinstance(value, list) else value
 
-    @field_validator(
-        "approved_subhypotheses",
-        "cross_channel_conflicts",
-        "prior_hypothesis_memory",
-        mode="before",
-    )
+    @field_validator("approved_subhypotheses", "cross_channel_conflicts", mode="before")
     @classmethod
     def normalize_hierarchical_payloads(cls, value: Any) -> Any:
         return tuple(value) if isinstance(value, list) else value
@@ -179,41 +199,13 @@ class ReThinkAssessmentCard(BaseModel):
     hypothesis_id: str = Field(min_length=1)
     falsification_spec_id: str = Field(min_length=1)
     status: Literal["SUPPORTED", "CONTRADICTED", "INCONCLUSIVE"]
-    criterion_results: tuple[CriterionReceiptCard, ...] = ()
-    observation_ids: tuple[str, ...] = ()
     decisive_criterion_ids: tuple[str, ...] = ()
     unresolved_criterion_ids: tuple[str, ...] = ()
     evaluator_version: str = Field(min_length=1)
 
-    @field_validator(
-        "criterion_results",
-        "observation_ids",
-        "decisive_criterion_ids",
-        "unresolved_criterion_ids",
-        mode="before",
-    )
+    @field_validator("decisive_criterion_ids", "unresolved_criterion_ids", mode="before")
     @classmethod
     def normalize_criterion_ids(cls, value: Any) -> Any:
-        return tuple(value) if isinstance(value, list) else value
-
-
-class CriterionReceiptCard(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
-
-    criterion_id: str = Field(min_length=1)
-    signal: Literal["SUPPORT", "CONTRADICT", "UNRESOLVED"]
-    metric_value: float | None = None
-    comparator_value: float | None = None
-    effect_size: float | None = None
-    observation_ids: tuple[str, ...] = ()
-    qc_status: str = Field(min_length=1)
-    detector_name: str = Field(min_length=1)
-    detector_version: str = Field(min_length=1)
-    reason_code: str = Field(min_length=1)
-
-    @field_validator("observation_ids", mode="before")
-    @classmethod
-    def normalize_observation_ids(cls, value: Any) -> Any:
         return tuple(value) if isinstance(value, list) else value
 
 
@@ -280,11 +272,15 @@ class ReThinkDryValidationCard(BaseModel):
     prediction_status: Literal["evaluated"]
 
 
-class ReThinkObservationCard(BaseModel):
+class ReThinkCandidateCard(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
     variant_id: str = Field(min_length=1)
     mutation_notation: str = Field(min_length=1)
+    agent_reason: str
+    feature_analysis: str = ""
+    critic_explanation: str = ""
+    critic_suggestions: tuple[str, ...] = ()
     evidence_ids: tuple[str, ...] = ()
     wet_value: float
     dry_validations: tuple[ReThinkDryValidationCard, ...] = ()
@@ -299,82 +295,15 @@ class ReThinkObservationCard(BaseModel):
     allow_hypothesis_mismatch: bool = False
     falsification_role: Literal["target", "comparator", "not_in_primary_criterion"]
 
-    @field_validator("evidence_ids", "dry_validations", mode="before")
-    @classmethod
-    def normalize_arrays(cls, value: Any) -> Any:
-        return tuple(value) if isinstance(value, list) else value
-
-
-class ArmSummaryCard(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
-
-    arm: Literal[
-        "hypothesis_target",
-        "evidence_prior",
-        "coverage_exploration",
-        "matched_control",
-        "fallback",
-    ]
-    sample_count: int = Field(ge=1)
-    variant_ids: tuple[str, ...] = Field(min_length=1)
-    wet_mean: float
-    wet_min: float
-    wet_max: float
-    favorable_count: int = Field(ge=0)
-    dry_wet_disagreement_count: int = Field(ge=0)
-
-    @field_validator("variant_ids", mode="before")
-    @classmethod
-    def normalize_variant_ids(cls, value: Any) -> Any:
-        return tuple(value) if isinstance(value, list) else value
-
-
-class DryWetDisagreementCard(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
-
-    variant_id: str = Field(min_length=1)
-    wet_value: float
-    dry_mean: float
-    residual: float
-    max_ood_score: float = Field(ge=0)
-    model_versions: tuple[str, ...] = ()
-
-    @field_validator("model_versions", mode="before")
-    @classmethod
-    def normalize_model_versions(cls, value: Any) -> Any:
-        return tuple(value) if isinstance(value, list) else value
-
-
-class RoundEvidenceDigest(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
-
-    observation_count: int = Field(ge=0)
-    observations: tuple[ReThinkObservationCard, ...] = ()
-    arm_summaries: tuple[ArmSummaryCard, ...] = ()
-    dry_wet_disagreements: tuple[DryWetDisagreementCard, ...] = ()
-    criterion_receipts: tuple[CriterionReceiptCard, ...] = ()
-    evidence_ids: tuple[str, ...] = ()
-
     @field_validator(
-        "observations",
-        "arm_summaries",
-        "dry_wet_disagreements",
-        "criterion_receipts",
-        "evidence_ids",
-        mode="before",
+        "evidence_ids", "dry_validations", "critic_suggestions", mode="before"
     )
     @classmethod
     def normalize_arrays(cls, value: Any) -> Any:
         return tuple(value) if isinstance(value, list) else value
 
-    @model_validator(mode="after")
-    def validate_counts(self) -> RoundEvidenceDigest:
-        if self.observation_count != len(self.observations):
-            raise ValueError("RoundEvidenceDigest observation_count must match observations")
-        return self
 
-
-class HypothesisReflectionContextInput(BaseModel):
+class ReThinkContextInput(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
     run_id: str
@@ -389,13 +318,13 @@ class HypothesisReflectionContextInput(BaseModel):
     final_critic_decision: ReThinkCriticDecisionCard
     hypothesis_assessment: ReThinkAssessmentCard | None = None
     falsification_spec: ReThinkFalsificationSpecCard | None = None
-    round_evidence_digest: RoundEvidenceDigest
+    candidates: list[ReThinkCandidateCard]
 
     @model_validator(mode="after")
-    def consistent_hypothesis_scope(self) -> HypothesisReflectionContextInput:
-        ids = [item.variant_id for item in self.round_evidence_digest.observations]
+    def unique_candidates(self) -> ReThinkContextInput:
+        ids = [item.variant_id for item in self.candidates]
         if len(ids) != len(set(ids)):
-            raise ValueError("ReThink observations must have unique variant_id values")
+            raise ValueError("ReThink candidates must have unique variant_id values")
         if len(
             {
                 self.approved_hypothesis is None,
@@ -426,10 +355,4 @@ class HypothesisReflectionContextInput(BaseModel):
 
     @property
     def expected_variant_ids(self) -> frozenset[str]:
-        return frozenset(
-            item.variant_id for item in self.round_evidence_digest.observations
-        )
-
-
-# Additive compatibility exports for the original candidate-level ReThink API.
-from .rethink_sample_io import ReThinkCandidateCard, ReThinkContextInput  # noqa: F401
+        return frozenset(item.variant_id for item in self.candidates)

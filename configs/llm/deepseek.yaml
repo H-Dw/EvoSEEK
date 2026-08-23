@@ -29,3 +29,4 @@ rethink_max_parallel_batches: 8
 rethink_max_calls_per_round: 256
 rethink_call_reserve: 96
 rethink_dimension_parallel: true
+rethink_parallel_dimension_groups: true

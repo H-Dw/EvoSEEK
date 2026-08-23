@@ -220,6 +220,36 @@ class ScientistAgent:
                 if state.hypothesis_assessments
                 else None
             ),
+            "previous_hypothesis_reflection": (
+                {
+                    "hypothesis_id": state.hypothesis_reflections[-1].hypothesis_id,
+                    "assessment_id": state.hypothesis_reflections[-1].assessment_id,
+                    "assessment_status": state.hypothesis_reflections[-1].assessment_status,
+                    "summary": state.hypothesis_reflections[-1].summary,
+                    "retained_claims": list(
+                        state.hypothesis_reflections[-1].retained_claims
+                    ),
+                    "invalidated_assumptions": list(
+                        state.hypothesis_reflections[-1].invalidated_assumptions
+                    ),
+                    "unresolved_questions": list(
+                        state.hypothesis_reflections[-1].unresolved_questions
+                    ),
+                    "recommended_actions": list(
+                        state.hypothesis_reflections[-1].recommended_actions
+                    ),
+                    "observation_ids": list(
+                        state.hypothesis_reflections[-1].supporting_observation_ids
+                    ),
+                    "evidence_ids": list(
+                        state.hypothesis_reflections[-1].supporting_evidence_ids
+                    ),
+                    "advisory_only": True,
+                    "selection_eligible": False,
+                }
+                if state.hypothesis_reflections
+                else None
+            ),
         }
         assert_sanitized(context)
         return context
@@ -261,6 +291,19 @@ class ScientistAgent:
             interaction_payload = asdict(kg_interaction)
             assert_sanitized(interaction_payload, "context.kg_interaction")
             context["kg_interaction"] = interaction_payload
+            memory_by_assessment: dict[str, dict[str, Any]] = {}
+            for pack in kg_interaction.packs:
+                metadata = getattr(pack, "metadata", {})
+                for item in metadata.get("prior_hypothesis_memory", ()):
+                    if not isinstance(item, dict):
+                        continue
+                    key = str(item.get("assessment_id", item.get("hypothesis_id", "")))
+                    if key:
+                        memory_by_assessment[key] = item
+            if memory_by_assessment:
+                memory_payload = tuple(memory_by_assessment.values())
+                assert_sanitized(memory_payload, "context.prior_hypothesis_memory")
+                context["prior_hypothesis_memory"] = memory_payload
             self.last_knowledge_query_ids = tuple(pack.query_id for pack in kg_interaction.packs)
             self.last_knowledge_query_id = (
                 self.last_knowledge_query_ids[-1] if self.last_knowledge_query_ids else None
@@ -269,6 +312,9 @@ class ScientistAgent:
             graph_context = self.knowledge_graph.hypothesis_context(round_id=state.round_id)
             assert_sanitized(graph_context, "context.knowledge_graph")
             context["knowledge_graph"] = graph_context
+            context["prior_hypothesis_memory"] = tuple(
+                graph_context.get("prior_hypothesis_memory", ())
+            )
             self.last_knowledge_query_id = str(graph_context["query_id"])
             self.last_knowledge_query_ids = (self.last_knowledge_query_id,)
         else:

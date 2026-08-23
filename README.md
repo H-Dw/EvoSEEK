@@ -93,6 +93,25 @@ python -m pytest tests/unit -q
 
 Data and model assets are still prepared per §3 and §4; the default `python scripts/run_demo.py` requires `[llm]`, `[kermut]`, `DEEPSEEK_API_KEY` in `.env`, and Kermut's conditional-probability / coordinate files.
 
+### 1.6 ReThink compatibility and hypothesis mode
+
+ReThink has two post-measurement modes. `validation.rethink_mode: sample` is the
+default and preserves the original candidate-level reflection artifacts and KG
+links. Set `validation.rethink_mode: hypothesis` to opt into one collection-level
+reflection per assessed round: the runtime builds a deterministic wet/dry evidence
+digest, runs four parallel two-dimension analyses, and stores the resulting learning
+against the hypothesis assessment rather than attaching one reflection to every
+sample. `validation.rethink_enabled: false` disables either mode.
+
+The offline three-round GB1 smoke configuration is
+`configs/experiments/gb1_rethink_hypothesis_smoke.yaml`. Its generation and round
+validation paths use no fitness predictor; the integration test replays GB1 benchmark
+truth only for the mandatory final evaluator:
+
+```bash
+PYTHONPATH=. pytest -q tests/integration/test_gb1_rethink_multiround.py
+```
+
 ## 2. Quick Start: Single-Protein Inference
 
 To run inference on a single test protein you can skip data downloads, fold manifests, and the oracle entirely. The open-design runner enumerates every single substitution of a user-supplied reference sequence and ranks the generated sequences — from knowledge-graph evidence alone in the default kg_base preset, or with a calibrated posterior fitted on your prior labels when active-learning mode is enabled. All inputs — sequence, optional structure, optional MSA, prior knowledge, and the RAG corpus — are specified as paths inside YAML configs; the CLI takes no sequence input.

@@ -111,6 +111,7 @@ def write_campaign_outputs(
                 "wet_validation": [record.value for record in wet],
                 "rethink_verdict": wet[0].reflection_verdict if wet else None,
                 "rethink_summary": wet[0].reflection_summary if wet else "",
+                "assessment_id": wet[0].assessment_id if wet else None,
             }
             rows.append(row)
             top_rows.append(row)
@@ -178,12 +179,28 @@ def write_campaign_outputs(
             for reflection in (
                 item for item in state.rethink_reflections if item.round_id == round_id
             ):
+                lines.append(
+                    f"- `{variants[reflection.variant_id].mutation_notation}`: "
+                    f"**{reflection.verdict}** — {reflection.summary}"
+                )
+            if any(
+                item.round_id == round_id for item in state.rethink_reflections
+            ):
+                lines.append("")
+            for reflection in (
+                item for item in state.hypothesis_reflections if item.round_id == round_id
+            ):
                 lines.extend(
                     [
                         (
-                            f"- `{variants[reflection.variant_id].mutation_notation}`: "
-                            f"**{reflection.verdict}** — {reflection.summary}"
+                            f"Hypothesis reflection ({reflection.assessment_status}): "
+                            f"{reflection.summary}"
                         ),
+                        "",
+                        "- Retained: " + "; ".join(reflection.retained_claims),
+                        "- Invalidated: " + "; ".join(reflection.invalidated_assumptions),
+                        "- Unresolved: " + "; ".join(reflection.unresolved_questions),
+                        "- Next actions: " + "; ".join(reflection.recommended_actions),
                     ]
                 )
             lines.append("")

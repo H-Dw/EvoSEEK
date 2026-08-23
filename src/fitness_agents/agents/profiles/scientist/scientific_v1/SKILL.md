@@ -15,8 +15,11 @@ Read these inputs before reasoning:
 2. task objective, measurement language, design constraints, and mutable positions;
 3. `context.visible_observations` and the previous hypothesis assessment;
 4. supplied evidence records and their provenance, scope, quality, and uncertainty fields;
-5. `context.kg_interaction` or `context.knowledge_graph` only when present;
-6. `context.critic_revision` only during a bounded revision.
+5. `context.previous_hypothesis_assessment`, `context.previous_hypothesis_reflection`,
+   and `prior_hypothesis_memory` from KG metadata when present; treat reflection as
+   advisory reasoning (`selection_eligible=false`), never as measured fitness;
+6. `context.kg_interaction` or `context.knowledge_graph` only when present;
+7. `context.critic_revision` only during a bounded revision.
 
 Treat configured, executed, visible, and present as distinct states. An enabled source or tool is
 not evidence that it ran. An executed tool is not evidence that its result is visible. Missing or

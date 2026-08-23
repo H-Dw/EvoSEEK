@@ -998,6 +998,7 @@ class ValidationConfig:
     dry_weight_cap: float = 0.20
     recency_decay: float = 0.85
     rethink_enabled: bool = True
+    rethink_mode: str = "sample"
     dry_reliability_floor: float = 0.05
 
     def __post_init__(self) -> None:
@@ -1007,6 +1008,8 @@ class ValidationConfig:
             raise ValueError("validation.dry_weight_cap must be lower than wet_weight")
         if not 0 < self.recency_decay <= 1:
             raise ValueError("validation.recency_decay must be in (0, 1]")
+        if self.rethink_mode not in {"sample", "hypothesis"}:
+            raise ValueError("validation.rethink_mode must be sample or hypothesis")
         if not 0 <= self.dry_reliability_floor <= 1:
             raise ValueError("validation.dry_reliability_floor must be in [0, 1]")
 
@@ -1307,7 +1310,8 @@ class LLMConfig:
     rethink_max_parallel_batches: int = 8
     rethink_max_calls_per_round: int = 256
     rethink_call_reserve: int = 96
-    rethink_dimension_parallel: bool = True
+    rethink_parallel_dimension_groups: bool = True
+    rethink_dimension_parallel: bool | None = None
 
     def __post_init__(self) -> None:
         if self.max_transport_retries not in {0, 1, 2}:
@@ -1339,10 +1343,17 @@ class LLMConfig:
             raise ValueError("llm.rethink_reasoning_batch_size must be between 1 and 8")
         if not 1 <= self.rethink_max_parallel_batches <= 16:
             raise ValueError("llm.rethink_max_parallel_batches must be between 1 and 16")
-        if self.rethink_max_calls_per_round < 16:
-            raise ValueError("llm.rethink_max_calls_per_round must be at least 16")
+        if self.rethink_dimension_parallel is not None:
+            self.rethink_parallel_dimension_groups = self.rethink_dimension_parallel
+        if self.rethink_max_calls_per_round < 4:
+            raise ValueError("llm.rethink_max_calls_per_round must be at least 4")
         if not 0 <= self.rethink_call_reserve < self.rethink_max_calls_per_round:
             raise ValueError("llm.rethink_call_reserve must leave a positive call budget")
+        required_rethink_calls = 4 * (2 if self.rethink_thinking == "enabled" else 1)
+        if self.rethink_max_calls_per_round - self.rethink_call_reserve < required_rethink_calls:
+            raise ValueError(
+                "llm ReThink usable call budget must cover four dimension groups"
+            )
 
 
 @dataclass

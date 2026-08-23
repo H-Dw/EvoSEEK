@@ -6,13 +6,17 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from fitness_agents.contracts.interfaces import LLMClient, ReThinkClient
+from fitness_agents.contracts.interfaces import (
+    HypothesisReThinkClient,
+    LLMClient,
+    ReThinkClient,
+)
 
 
 @dataclass(frozen=True)
 class RoleClientBundle:
     scientist: LLMClient
-    rethink: ReThinkClient
+    rethink: ReThinkClient | HypothesisReThinkClient
 
 
 class ClientRegistry:
@@ -41,7 +45,7 @@ def create_role_client_bundle(
     """Build both cognitive roles from one explicit provider allowlist."""
 
     from .llm import create_llm_client
-    from .rethink import create_rethink_client
+    from .rethink import create_hypothesis_rethink_client
 
     registry = ClientRegistry()
 
@@ -49,7 +53,7 @@ def create_role_client_bundle(
         rethink_settings = {**settings, **dict(rethink_options or {})}
         return RoleClientBundle(
             scientist=create_llm_client(provider, **settings),
-            rethink=create_rethink_client(provider, **rethink_settings),
+            rethink=create_hypothesis_rethink_client(provider, **rethink_settings),
         )
 
     registry.register(provider, build)
