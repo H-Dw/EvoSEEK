@@ -64,7 +64,9 @@ class SQLiteRetrievalOverlay:
         with self.connection:
             self.connection.execute("DELETE FROM document_policy")
             for document in documents:
-                reasons = guard.matches(text=document["text"], path=document["path"])
+                reasons = guard.validate_result(
+                    text=document["text"], path=document["path"]
+                )
                 allowed = not (
                     guard.enabled and quarantine_target_documents and bool(reasons)
                 )

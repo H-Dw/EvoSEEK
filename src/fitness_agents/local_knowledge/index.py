@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import sqlite3
 from pathlib import Path
@@ -10,6 +11,7 @@ from typing import Any
 import numpy as np
 
 from fitness_agents.config import LocalKnowledgeConfig
+from fitness_agents.safety import discover_workspace_access_policy
 
 from .chunking import CHUNKER_VERSION, chunk_document
 from .contracts import DocumentChunk, IndexBuildReport
@@ -17,13 +19,109 @@ from .leakage import TargetLeakageGuard
 from .parsers import AutoLocalParser, discover_local_files
 from .prompt_safety import instruction_like_markers
 from .protocols import EmbeddingBackend
+from .runtime_manifest import load_runtime_file_manifest
 
-INDEX_SCHEMA_VERSION = "local-knowledge-index:v5"
-FTS_TABLE = "chunks_fts_en_v5"
+INDEX_SCHEMA_VERSION = "local-knowledge-index:v7"
+LEGACY_INDEX_SCHEMA_VERSIONS = frozenset({"local-knowledge-index:v6"})
+FTS_TABLE = "chunks_fts_en_v6"
+
+FACET_NAMES = frozenset(
+    {
+        "record_type",
+        "knowledge_type",
+        "question_leaf_id",
+        "decision_slot",
+        "task_route",
+        "feature_channel",
+        "required_input",
+        "permission",
+        "expected_direction",
+        "stage",
+        "evidence_role",
+    }
+)
 
 
 def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+
+
+def _is_reparse_path(path: Path) -> bool:
+    is_junction = getattr(path, "is_junction", None)
+    return path.is_symlink() or bool(is_junction and is_junction())
+
+
+def _access_policy_hashes(config: LocalKnowledgeConfig) -> list[str]:
+    return sorted(
+        {
+            discover_workspace_access_policy(root.path).policy_hash
+            for root in config.roots
+        }
+    )
+
+
+def _root_security_bindings(config: LocalKnowledgeConfig) -> list[dict[str, Any]]:
+    from fitness_agents.deep_research.policy import ExternalEvidenceScopePolicy
+
+    external_policy_hash = ExternalEvidenceScopePolicy().policy_hash
+    bindings: list[dict[str, Any]] = []
+    for root in config.roots:
+        configured_root = root.path.absolute()
+        access_policy = discover_workspace_access_policy(configured_root)
+        root_decision = access_policy.decide(configured_root)
+        if root.access_policy_mode == "required" and (
+            not access_policy.policy_sources
+            or root_decision.project_relative_path is None
+        ):
+            raise PermissionError(
+                "Local knowledge root is not bound to a workspace access policy"
+            )
+        access_policy.require_allowed(configured_root)
+        if _is_reparse_path(configured_root):
+            raise ValueError(
+                "Local knowledge roots must not be symlinks or junctions"
+            )
+        resolved_root = configured_root.resolve()
+        runtime_manifest = load_runtime_file_manifest(
+            resolved_root,
+            access_policy=access_policy,
+            expected_external_policy_hash=external_policy_hash,
+        )
+        if runtime_manifest is None and root.runtime_manifest_mode == "required":
+            raise FileNotFoundError(
+                "Local knowledge root requires runtime-files.json"
+            )
+        root_id = root.root_id or re.sub(
+            r"[^A-Za-z0-9_-]+", "-", resolved_root.name
+        ).strip("-").upper() or "ROOT"
+        canonical_root = os.path.normcase(os.path.abspath(resolved_root))
+        bindings.append(
+            {
+                "root_id": root_id,
+                "canonical_root_sha256": hashlib.sha256(
+                    canonical_root.encode("utf-8")
+                ).hexdigest(),
+                "access_policy_mode": root.access_policy_mode,
+                "workspace_access_policy_hash": access_policy.policy_hash,
+                "runtime_manifest_mode": root.runtime_manifest_mode,
+                "runtime_manifest_sha256": (
+                    runtime_manifest.manifest_sha256
+                    if runtime_manifest is not None
+                    else None
+                ),
+                "external_policy_hash": (
+                    runtime_manifest.external_policy_hash
+                    if runtime_manifest is not None
+                    else None
+                ),
+                "source_release_id": (
+                    runtime_manifest.source_release_id
+                    if runtime_manifest is not None
+                    else None
+                ),
+            }
+        )
+    return sorted(bindings, key=lambda item: (item["root_id"], item["canonical_root_sha256"]))
 
 
 def preflight_local_knowledge(config: LocalKnowledgeConfig) -> dict[str, Any]:
@@ -32,9 +130,14 @@ def preflight_local_knowledge(config: LocalKnowledgeConfig) -> dict[str, Any]:
     parser = AutoLocalParser(rich_document_backend=config.ingestion.rich_document_backend)
     documents: dict[str, str] = {}
     chunks: dict[str, str] = {}
-    for discovered in discover_local_files(
-        config.roots, follow_symlinks=config.ingestion.follow_symlinks
-    ):
+    policy_events: list[dict[str, str]] = []
+    root_security_bindings = _root_security_bindings(config)
+    files = discover_local_files(
+        config.roots,
+        follow_symlinks=config.ingestion.follow_symlinks,
+        policy_events=policy_events,
+    )
+    for discovered in files:
         document = parser.parse(discovered)
         if document.document_id in documents:
             raise ValueError(
@@ -61,6 +164,16 @@ def preflight_local_knowledge(config: LocalKnowledgeConfig) -> dict[str, Any]:
         "chunk_count": len(chunks),
         "document_ids_unique": True,
         "chunk_ids_unique": True,
+        "policy_denied_path_count": len(policy_events),
+        "access_policy_hashes": _access_policy_hashes(config),
+        "runtime_manifest_hashes": sorted(
+            {
+                item.runtime_manifest_sha256
+                for item in files
+                if item.runtime_manifest_sha256 is not None
+            }
+        ),
+        "root_security_bindings": root_security_bindings,
     }
 
 
@@ -84,7 +197,7 @@ class SQLiteLocalKnowledgeIndex:
         self.connection.row_factory = sqlite3.Row
         if self.read_only:
             schema_version = self._metadata("schema_version")
-            if schema_version != INDEX_SCHEMA_VERSION:
+            if schema_version not in {INDEX_SCHEMA_VERSION, *LEGACY_INDEX_SCHEMA_VERSIONS}:
                 raise RuntimeError(
                     "Prebuilt local knowledge corpus is incompatible; "
                     f"expected={INDEX_SCHEMA_VERSION!r}, actual={schema_version!r}"
@@ -130,6 +243,15 @@ class SQLiteLocalKnowledgeIndex:
                     vector BLOB NOT NULL,
                     FOREIGN KEY(chunk_id) REFERENCES chunks(chunk_id)
                 );
+                CREATE TABLE IF NOT EXISTS chunk_facets (
+                    chunk_id TEXT NOT NULL,
+                    facet_name TEXT NOT NULL,
+                    facet_value TEXT NOT NULL,
+                    PRIMARY KEY(chunk_id, facet_name, facet_value),
+                    FOREIGN KEY(chunk_id) REFERENCES chunks(chunk_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_local_chunk_facets_lookup
+                    ON chunk_facets(facet_name, facet_value, chunk_id);
                 CREATE VIRTUAL TABLE IF NOT EXISTS {FTS_TABLE} USING fts5(
                     chunk_id UNINDEXED,
                     text,
@@ -161,6 +283,21 @@ class SQLiteLocalKnowledgeIndex:
     def manifest_hash(self) -> str:
         return self._metadata("manifest_hash") or "unbuilt"
 
+    def assert_runtime_binding(self, config: LocalKnowledgeConfig) -> None:
+        """Reject a prebuilt corpus whose source-policy binding is not current."""
+
+        raw_manifest = self._metadata("manifest")
+        if raw_manifest is None:
+            raise RuntimeError("Prebuilt local knowledge corpus has no manifest")
+        stored_manifest = json.loads(raw_manifest)
+        stored_bindings = stored_manifest.get("root_security_bindings")
+        expected_bindings = _root_security_bindings(config)
+        if stored_bindings != expected_bindings:
+            raise RuntimeError(
+                "Prebuilt local knowledge corpus security binding is missing or stale; "
+                "rebuild from the exact active runtime manifests"
+            )
+
     def _build_fingerprint(
         self,
         config: LocalKnowledgeConfig,
@@ -168,6 +305,9 @@ class SQLiteLocalKnowledgeIndex:
         embedding_backend: EmbeddingBackend | None,
         *,
         preserved_embedding_fingerprint: dict[str, Any] | None = None,
+        access_policy_hashes: list[str] | None = None,
+        runtime_manifest_hashes: list[str] | None = None,
+        root_security_bindings: list[dict[str, Any]] | None = None,
     ) -> str:
         payload = {
             "schema_version": INDEX_SCHEMA_VERSION,
@@ -177,6 +317,9 @@ class SQLiteLocalKnowledgeIndex:
             "chunk_overlap": config.ingestion.chunk_overlap,
             "required_language": config.ingestion.required_language,
             "instruction_content_policy": config.retrieval.instruction_content_policy,
+            "access_policy_hashes": access_policy_hashes or [],
+            "runtime_manifest_hashes": runtime_manifest_hashes or [],
+            "root_security_bindings": root_security_bindings or [],
             "embedding": (
                 getattr(embedding_backend, "fingerprint", None)
                 if embedding_backend is not None
@@ -210,8 +353,25 @@ class SQLiteLocalKnowledgeIndex:
         parser = AutoLocalParser(
             rich_document_backend=config.ingestion.rich_document_backend
         )
+        policy_events: list[dict[str, str]] = []
         files = discover_local_files(
-            config.roots, follow_symlinks=config.ingestion.follow_symlinks
+            config.roots,
+            follow_symlinks=config.ingestion.follow_symlinks,
+            policy_events=policy_events,
+        )
+        root_security_bindings = _root_security_bindings(config)
+        access_policy_hashes = sorted(
+            {
+                item["workspace_access_policy_hash"]
+                for item in root_security_bindings
+            }
+        )
+        runtime_manifest_hashes = sorted(
+            {
+                item.runtime_manifest_sha256
+                for item in files
+                if item.runtime_manifest_sha256 is not None
+            }
         )
         existing = {
             str(row["path"]): (str(row["document_id"]), str(row["file_hash"]))
@@ -233,6 +393,9 @@ class SQLiteLocalKnowledgeIndex:
             parser,
             embedding_backend,
             preserved_embedding_fingerprint=preserved_embedding,
+            access_policy_hashes=access_policy_hashes,
+            runtime_manifest_hashes=runtime_manifest_hashes,
+            root_security_bindings=root_security_bindings,
         )
         if preserved_embedding is not None:
             changed_paths = [
@@ -255,6 +418,8 @@ class SQLiteLocalKnowledgeIndex:
         indexed_chunks = 0
         unchanged_documents = 0
         warnings: list[str] = []
+        if policy_events:
+            warnings.append(f"policy_denied_paths:{len(policy_events)}")
         manifest_entries: list[dict[str, Any]] = []
 
         prepared: list[tuple[Any, Any, tuple[DocumentChunk, ...]]] = []
@@ -396,6 +561,12 @@ class SQLiteLocalKnowledgeIndex:
                 ),
                 "actual_chunk_count": chunk_count,
                 "actual_embedding_count": embedding_count,
+                "access_policy": {
+                    "denied_path_count": len(policy_events),
+                    "policy_hashes": access_policy_hashes,
+                    "runtime_manifest_hashes": runtime_manifest_hashes,
+                },
+                "root_security_bindings": root_security_bindings,
                 "documents": sorted(manifest_entries, key=lambda item: item["path"]),
             }
             manifest_hash = hashlib.sha256(
@@ -424,7 +595,10 @@ class SQLiteLocalKnowledgeIndex:
     def prebuilt_report(self) -> IndexBuildReport:
         """Return a compatibility/count receipt without mutating the corpus."""
 
-        if self._metadata("schema_version") != INDEX_SCHEMA_VERSION:
+        if self._metadata("schema_version") not in {
+            INDEX_SCHEMA_VERSION,
+            *LEGACY_INDEX_SCHEMA_VERSIONS,
+        }:
             raise RuntimeError("Local knowledge corpus schema is incompatible")
         documents = int(
             self.connection.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
@@ -453,6 +627,10 @@ class SQLiteLocalKnowledgeIndex:
             self.connection.execute(
                 f"DELETE FROM {FTS_TABLE} WHERE chunk_id = ?", (chunk_id,)
             )
+            if self._table_exists("chunk_facets"):
+                self.connection.execute(
+                    "DELETE FROM chunk_facets WHERE chunk_id = ?", (chunk_id,)
+                )
         self.connection.execute(
             "DELETE FROM embeddings WHERE chunk_id IN "
             "(SELECT chunk_id FROM chunks WHERE document_id = ?)",
@@ -466,6 +644,12 @@ class SQLiteLocalKnowledgeIndex:
             "SELECT value FROM index_metadata WHERE key = ?", (key,)
         ).fetchone()
         return str(row[0]) if row else None
+
+    def _table_exists(self, table: str) -> bool:
+        row = self.connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?", (table,)
+        ).fetchone()
+        return row is not None
 
     def _insert_chunk(self, chunk: DocumentChunk) -> None:
         self.connection.execute(
@@ -492,6 +676,54 @@ class SQLiteLocalKnowledgeIndex:
             f"INSERT INTO {FTS_TABLE}(chunk_id, text, artifact_uri) VALUES (?, ?, ?)",
             (chunk.chunk_id, chunk.text, chunk.artifact_uri),
         )
+        facets = self._facets_from_metadata(chunk.metadata, chunk.knowledge_type)
+        self.connection.executemany(
+            "INSERT OR IGNORE INTO chunk_facets(chunk_id, facet_name, facet_value) "
+            "VALUES (?, ?, ?)",
+            (
+                (chunk.chunk_id, name, value)
+                for name, values in facets.items()
+                for value in values
+            ),
+        )
+
+    @staticmethod
+    def _facets_from_metadata(
+        metadata: dict[str, Any], knowledge_type: str
+    ) -> dict[str, tuple[str, ...]]:
+        output: dict[str, tuple[str, ...]] = {"knowledge_type": (knowledge_type,)}
+        for name in FACET_NAMES.difference({"knowledge_type"}):
+            value = metadata.get(name)
+            if value is None:
+                continue
+            raw_values = value if isinstance(value, (list, tuple, set)) else (value,)
+            normalized = tuple(
+                dict.fromkeys(str(item).strip() for item in raw_values if str(item).strip())
+            )
+            if normalized:
+                output[name] = normalized
+        return output
+
+    @staticmethod
+    def _facet_filter_sql(
+        facets: dict[str, tuple[str, ...]], parameters: list[Any]
+    ) -> str:
+        clauses: list[str] = []
+        for index, (name, values) in enumerate(sorted(facets.items())):
+            if name not in FACET_NAMES:
+                raise ValueError(f"Unsupported local-knowledge facet: {name}")
+            if not values:
+                continue
+            alias = f"cf{index}"
+            placeholders = ",".join("?" for _ in values)
+            clauses.append(
+                f" AND EXISTS (SELECT 1 FROM chunk_facets {alias} "
+                f"WHERE {alias}.chunk_id = chunks.chunk_id "
+                f"AND {alias}.facet_name = ? "
+                f"AND {alias}.facet_value IN ({placeholders}))"
+            )
+            parameters.extend((name, *values))
+        return "".join(clauses)
 
     @staticmethod
     def _fts_query(query: str) -> str:
@@ -504,6 +736,7 @@ class SQLiteLocalKnowledgeIndex:
         *,
         limit: int,
         knowledge_types: tuple[str, ...] = (),
+        facets: dict[str, tuple[str, ...]] | None = None,
     ) -> tuple[tuple[str, float], ...]:
         fts_query = self._fts_query(query)
         if not fts_query:
@@ -514,6 +747,11 @@ class SQLiteLocalKnowledgeIndex:
             placeholders = ",".join("?" for _ in knowledge_types)
             filter_sql = f" AND chunks.knowledge_type IN ({placeholders})"
             parameters.extend(knowledge_types)
+        normalized_facets = dict(facets or {})
+        if normalized_facets:
+            if not self._table_exists("chunk_facets"):
+                raise RuntimeError("Facet filtering requires a v7 local-knowledge index")
+            filter_sql += self._facet_filter_sql(normalized_facets, parameters)
         parameters.append(limit)
         rows = self.connection.execute(
             f"SELECT {FTS_TABLE}.chunk_id, bm25({FTS_TABLE}) AS rank FROM {FTS_TABLE} "
@@ -530,6 +768,7 @@ class SQLiteLocalKnowledgeIndex:
         limit: int,
         embedding_backend: EmbeddingBackend,
         knowledge_types: tuple[str, ...] = (),
+        facets: dict[str, tuple[str, ...]] | None = None,
         minimum_similarity: float = -1.0,
         max_exact_chunks: int = 50000,
     ) -> tuple[tuple[str, float], ...]:
@@ -542,6 +781,11 @@ class SQLiteLocalKnowledgeIndex:
             placeholders = ",".join("?" for _ in knowledge_types)
             filter_sql = f" AND chunks.knowledge_type IN ({placeholders})"
             parameters.extend(knowledge_types)
+        normalized_facets = dict(facets or {})
+        if normalized_facets:
+            if not self._table_exists("chunk_facets"):
+                raise RuntimeError("Facet filtering requires a v7 local-knowledge index")
+            filter_sql += self._facet_filter_sql(normalized_facets, parameters)
         rows = self.connection.execute(
             "SELECT embeddings.chunk_id, embeddings.dimension, embeddings.vector "
             "FROM embeddings JOIN chunks ON chunks.chunk_id = embeddings.chunk_id "
@@ -582,6 +826,20 @@ class SQLiteLocalKnowledgeIndex:
         rows = self.connection.execute(
             f"SELECT * FROM chunks WHERE chunk_id IN ({placeholders})", chunk_ids
         ).fetchall()
+        facet_rows = (
+            self.connection.execute(
+                f"SELECT chunk_id, facet_name, facet_value FROM chunk_facets "
+                f"WHERE chunk_id IN ({placeholders}) ORDER BY facet_name, facet_value",
+                chunk_ids,
+            ).fetchall()
+            if self._table_exists("chunk_facets")
+            else ()
+        )
+        facets_by_chunk: dict[str, dict[str, list[str]]] = {}
+        for facet in facet_rows:
+            facets_by_chunk.setdefault(str(facet["chunk_id"]), {}).setdefault(
+                str(facet["facet_name"]), []
+            ).append(str(facet["facet_value"]))
         return {
             str(row["chunk_id"]): {
                 "chunk_id": str(row["chunk_id"]),
@@ -596,6 +854,12 @@ class SQLiteLocalKnowledgeIndex:
                 "file_hash": str(row["file_hash"]),
                 "knowledge_type": str(row["knowledge_type"]),
                 "metadata": json.loads(row["metadata_json"]),
+                "facets": {
+                    name: tuple(values)
+                    for name, values in facets_by_chunk.get(
+                        str(row["chunk_id"]), {}
+                    ).items()
+                },
             }
             for row in rows
         }
@@ -615,6 +879,28 @@ class SQLiteLocalKnowledgeIndex:
             }
             for row in rows
         )
+
+    def facet_catalog(self) -> dict[str, tuple[str, ...]]:
+        """Return controlled values present in this corpus without exposing records."""
+
+        if not self._table_exists("chunk_facets"):
+            return {
+                "knowledge_type": tuple(
+                    str(row[0])
+                    for row in self.connection.execute(
+                        "SELECT DISTINCT knowledge_type FROM chunks ORDER BY knowledge_type"
+                    )
+                )
+            }
+        output: dict[str, list[str]] = {}
+        for row in self.connection.execute(
+            "SELECT DISTINCT facet_name, facet_value FROM chunk_facets "
+            "ORDER BY facet_name, facet_value"
+        ):
+            output.setdefault(str(row["facet_name"]), []).append(
+                str(row["facet_value"])
+            )
+        return {name: tuple(values) for name, values in output.items()}
 
     def stats(self) -> dict[str, Any]:
         counts = {
@@ -640,6 +926,18 @@ class SQLiteLocalKnowledgeIndex:
                 "GROUP BY knowledge_type ORDER BY knowledge_type"
             )
         }
+        counts["facets"] = (
+            {
+                f"{row['facet_name']}={row['facet_value']}": int(row["count"])
+                for row in self.connection.execute(
+                    "SELECT facet_name, facet_value, COUNT(*) AS count "
+                    "FROM chunk_facets GROUP BY facet_name, facet_value "
+                    "ORDER BY facet_name, facet_value"
+                )
+            }
+            if self._table_exists("chunk_facets")
+            else {}
+        )
         return counts
 
     def close(self) -> None:

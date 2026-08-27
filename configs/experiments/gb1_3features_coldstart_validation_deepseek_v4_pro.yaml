@@ -1,0 +1,153 @@
+# Paired 3features no-RAG/RAG validation experiment.
+# The benchmark harness toggles only local_knowledge.enabled between conditions.
+# No fitness predictor participates in generation or post-selection validation.
+mode: knowledge_agent
+seed: 11
+rounds: 3
+budget_per_round: 16
+candidate_limit: 32
+scientist_prompt_evidence_limit: 32
+acquisition: greedy
+ucb_beta: 1.5
+diversity_lambda: 0.10
+task_config: configs/task/gb1_binding_reasoning_routes_al96wt.yaml
+model_config: configs/model/baseline.yaml
+# Ordered composition: real three-feature resources first, then the bounded
+# directive-RAG policy/index. Nested mappings are merged recursively.
+knowledge_config:
+  - configs/knowledge/gb1_features.example.yaml
+  - configs/knowledge/gb1.qwen-directive-v3.yaml
+output_root: artifacts/gb1-3features-coldstart-validation-deepseek-v4-pro
+llm_config: configs/llm/deepseek.yaml
+llm:
+  model: deepseek-v4-pro
+  request_timeout_seconds: 240.0
+  max_transport_retries: 15
+  retry_backoff_seconds: 2.0
+  rethink_max_parallel_batches: 1
+  rethink_dimension_parallel: false
+  rethink_parallel_dimension_groups: false
+critic_config: configs/critic/deepseek_remote.yaml
+critic:
+  provider: deepseek
+  model: deepseek-v4-pro
+  mode: remote
+  policy_gate_enabled: false
+  fallback_policy: none
+  # This field is the Batch Critic transport-retry budget; scientific
+  # revision and structured-output retry limits remain independently capped.
+  max_model_retries: 15
+  retry_backoff_seconds: 2.0
+  max_revision_attempts: 2
+  max_semantic_retries: 2
+  on_reject: abort_round
+  on_exhausted: abort_round
+  request_timeout_seconds: 240.0
+knowledge_enabled: true
+score_shuffle: false
+evidence_deletion: false
+run_label: GB1-3FEATURES-COLDSTART-VALIDATION-DEEPSEEK-V4-PRO
+condition: paired_benchmark
+prior_schedule:
+  mode: cold_start
+  keep_wild_type: true
+  # Round-1 WT-only evidence can legitimately support no residue direction.
+  # In that exact state, collect a deterministic coverage batch instead of
+  # forcing an unsupported hypothesis. Later rounds remain fail-closed.
+  no_supported_hypothesis_policy: coverage_exploration
+active_learning:
+  enabled: false
+generation:
+  selection_driver: agent_uq
+  use_fitness_predictors: false
+  predictor_models: []
+  hypothesis_weight: 1.0
+  evidence_weight: 0.65
+  prior_weight: 0.80
+  uncertainty_beta: 0.75
+  predictor_weight: 0.0
+  gp_length_scale: 1.0
+  hypothesis_recency_decay: 0.85
+  quota_allocation:
+    enabled: true
+    hypothesis_target: 8
+    evidence_prior: 3
+    coverage_exploration: 3
+    matched_control: 2
+    strong_hypothesis_threshold: 0.75
+    matched_control_reserve_multiplier: 2
+validation:
+  enabled: false
+  predictor_models: []
+  wet_weight: 1.0
+  dry_weight_cap: 0.20
+  recency_decay: 0.85
+  rethink_enabled: true
+evaluation:
+  metrics: [spearman, pearson, mse, rmse, ndcg, top_k_hit, top_k_recall,
+    regret_at_k, interval_90_coverage, gaussian_nll]
+  top_k: 10
+output:
+  artifacts: [json, csv, markdown, svg, reasoning]
+  top_k: 16
+hierarchical_hypothesis:
+  enabled: true
+  required_channels: [physchem, conservation, structure]
+  # DeepSeek v4 pro is scheduled serially for transport stability. This changes
+  # call timing only; channel inputs, scoring, quotas and wet budget are fixed.
+  max_parallel_branches: 1
+  child_sample_batch_size: 8
+  child_max_parallel_batches: 1
+  max_child_revision_attempts: 1
+  max_main_revision_attempts: 2
+  formal_fail_closed: true
+  subcritic_mode: remote
+  child_scientist_profiles:
+    physchem: physchem_v1
+    conservation: conservation_v1
+    structure: structure_v1
+  child_critic_profiles:
+    physchem: physchem_v1
+    conservation: conservation_v1
+    structure: structure_v1
+  main_scientist_profile: synthesis_v1
+  main_critic_profile: hypothesis_v1
+  child_max_tokens: 32768
+  child_critic_max_tokens: 32768
+  main_critic_max_tokens: 32768
+  main_max_input_chars: 160000
+  child_max_input_chars: 120000
+  critic_max_input_chars: 120000
+kg_interaction:
+  enabled: true
+  enabled_operators:
+    - hypothesis_context
+    - explain_variant
+    - compare_variants
+    - query_physchem_delta
+    - query_evolutionary_profile
+    - query_structure_environment
+    - query_feature_bundle
+    - query_kg_truncation_audit
+    - query_assay_association
+    - query_evidence_provenance
+    - query_local_knowledge
+    - query_structured_claims
+  feature_tool_strategy: independent_and_joint
+  feature_channels: [physchem, conservation, structure]
+  feature_variant_limit: 2
+  truncation_audit_enabled: true
+  truncation_audit_items:
+    - physchem
+    - conservation
+    - structure
+    - HAS_PHYSCHEM_DELTA
+    - HAS_EVOLUTIONARY_CONTEXT
+    - OCCURS_IN_ENVIRONMENT
+    - MutationEffectEstimate
+    - HAS_EPISTASIS_ESTIMATE
+  truncation_audit_sample_rows: 3
+  max_tool_calls: 18
+  max_rows: 24
+  use_counterevidence: true
+  stop_when_sufficient: false

@@ -1,0 +1,4 @@
+interface:
+  display_name: "GB1 Directive Research"
+  short_description: "Build auditable, non-label-leaking GB1 decision cards"
+  default_prompt: "Use $gb1-directive-research to build or iterate a research-candidate GB1 evidence bundle and evaluate it with the paired no-RAG/RAG protocol."

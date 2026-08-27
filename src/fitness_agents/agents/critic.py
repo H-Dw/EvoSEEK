@@ -5,7 +5,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import asdict, replace
 from enum import Enum
 from pathlib import Path
-from typing import Any, get_args
+from typing import TYPE_CHECKING, Any, get_args
 
 import yaml
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
@@ -24,9 +24,9 @@ from fitness_agents.contracts.hypothesis_pipeline import (
     CRITIC_EXPLANATION_MAX,
     CRITIC_NESTED_TEXT_MAX,
     CRITIC_RATIONALE_MAX,
+    SAMPLE_REVIEW_PROSE_MAX,
     CriticRatingRegion,
     ReviewVerdictName,
-    SAMPLE_REVIEW_PROSE_MAX,
     verdict_for_rating,
 )
 from fitness_agents.contracts.mutation_evidence import (
@@ -60,6 +60,9 @@ from .short_ids import (
     ShortIdMap,
     rewrite_exact_ids,
 )
+
+if TYPE_CHECKING:
+    from fitness_agents.config import CriticConfig
 
 
 def _ensure_rating(decision: CritiqueDecision) -> CritiqueDecision:
@@ -466,6 +469,281 @@ class CritiqueDecisionOutput(CritiqueDecisionBodyOutput):
 CRITIQUE_DECISION_SCHEMA: dict[str, Any] = CritiqueDecisionBodyOutput.model_json_schema()
 
 
+def _normalize_runtime_owned_critic_payload(
+    payload: dict[str, Any],
+    *,
+    review_context: BatchReviewContext,
+    deterministic_codes: set[str],
+    draft: DraftBatch | None = None,
+    hard_conflict_codes: set[str] | None = None,
+) -> tuple[dict[str, Any], tuple[str, ...]]:
+    """Remove Critic findings directly contradicted by runtime-owned facts."""
+
+    normalized = dict(payload)
+    removed_codes: set[str] = set()
+    depth_is_runtime_valid = "MUTATION_DEPTH_MISMATCH" not in deterministic_codes
+    diversity_is_runtime_valid = bool(
+        review_context.diversity is not None
+        and review_context.diversity.threshold_satisfied
+    )
+    invalid_diversity_codes = {"INSUFFICIENT_DIVERSITY", "BATCH_MODE_COLLAPSE"}
+    falsification_is_runtime_valid = bool(
+        draft is not None and draft.falsification_spec is not None
+    )
+    out_of_scope_issue_codes = set()
+    if not review_context.review_controls:
+        out_of_scope_issue_codes.add("INSUFFICIENT_CONTROL")
+    if not review_context.review_diversity:
+        out_of_scope_issue_codes.update(invalid_diversity_codes)
+    runtime_owned_residue_codes = {
+        "FORBIDDEN_POSITION",
+        "FROM_RESIDUE_MISMATCH",
+        "INVALID_AMINO_ACID",
+        "INVALID_MUTATION_NOTATION",
+        "MULTIPLE_EDITS_SAME_POSITION",
+        "MUTABLE_POSITION_MAPPING_INVALID",
+        "MUTATION_NOTATION_MISMATCH",
+        "RESIDUE_LENGTH_MISMATCH",
+        "TO_RESIDUE_MISMATCH",
+    }
+    removed_candidate_issue_targets: set[str] = set()
+    rationale_evidence_candidates = {
+        item.candidate_id
+        for item in (draft.design_rationales if draft is not None else ())
+        if item.evidence_ids
+    }
+    all_rationales_have_evidence = bool(
+        draft is not None
+        and draft.design_rationales
+        and len(rationale_evidence_candidates) == len(draft.design_rationales)
+    )
+
+    def keep_issue(item: dict[str, Any]) -> bool:
+        code = str(item.get("code", ""))
+        invalid = (
+            (depth_is_runtime_valid and code == "MUTATION_DEPTH_MISMATCH")
+            or (diversity_is_runtime_valid and code in invalid_diversity_codes)
+            or code in out_of_scope_issue_codes
+            or (falsification_is_runtime_valid and code == "HYPOTHESIS_UNTESTABLE")
+        )
+        if code == "MISSING_RATIONALE_EVIDENCE":
+            candidate_id = str(item.get("candidate_id", ""))
+            invalid = invalid or (
+                candidate_id in rationale_evidence_candidates
+                or (not candidate_id and all_rationales_have_evidence)
+            )
+        if code in runtime_owned_residue_codes and code not in deterministic_codes:
+            invalid = True
+        if code == "HARD_RESIDUE_CONSTRAINT_VIOLATION" and not (
+            hard_conflict_codes or set()
+        ):
+            invalid = True
+        if invalid:
+            removed_codes.add(code)
+            candidate_id = str(item.get("candidate_id", ""))
+            if candidate_id:
+                removed_candidate_issue_targets.add(candidate_id)
+        return not invalid
+
+    normalized["candidate_issues"] = [
+        item for item in payload.get("candidate_issues", []) if keep_issue(item)
+    ]
+    normalized["batch_level_risks"] = [
+        item for item in payload.get("batch_level_risks", []) if keep_issue(item)
+    ]
+
+    non_candidate_defect_codes = {
+        "EVIDENCE_POLARITY_CONFLICT",
+        "MISSING_RATIONALE_EVIDENCE",
+        "COUNTEREVIDENCE_IGNORED",
+        "UNSUPPORTED_CLAIM",
+        "HYPOTHESIS_UNTESTABLE",
+    }
+    candidate_codes: dict[str, set[str]] = {}
+    for item in normalized["candidate_issues"]:
+        candidate_codes.setdefault(str(item.get("candidate_id", "")), set()).add(
+            str(item.get("code", ""))
+        )
+    batch_codes = {
+        str(item.get("code", "")) for item in normalized["batch_level_risks"]
+    }
+
+    def route_non_candidate_change(item: dict[str, Any]) -> dict[str, Any]:
+        change = dict(item)
+        action = str(change.get("action", ""))
+        if action not in {
+            RequiredChangeAction.EXCLUDE_CANDIDATE.value,
+            RequiredChangeAction.REPLACE_CANDIDATE.value,
+        }:
+            return change
+        target_codes = {
+            code
+            for target_id in change.get("target_ids", [])
+            for code in candidate_codes.get(str(target_id), set())
+        }
+        relevant_codes = target_codes or batch_codes.intersection(
+            non_candidate_defect_codes
+        )
+        if not relevant_codes or not relevant_codes.issubset(
+            non_candidate_defect_codes
+        ):
+            return change
+        if relevant_codes.intersection(
+            {"COUNTEREVIDENCE_IGNORED", "EVIDENCE_POLARITY_CONFLICT"}
+        ):
+            routed_action = RequiredChangeAction.ADD_COUNTEREVIDENCE_SEARCH.value
+        elif "HYPOTHESIS_UNTESTABLE" in relevant_codes:
+            routed_action = RequiredChangeAction.MAKE_FALSIFICATION_EXECUTABLE.value
+        else:
+            routed_action = RequiredChangeAction.REQUEST_EVIDENCE.value
+        change.update(
+            {
+                "action": routed_action,
+                "target_ids": [],
+                "parameters": {},
+                "rationale": (
+                    "Runtime action routing maps evidence and hypothesis defects "
+                    "to their executable repair path."
+                ),
+            }
+        )
+        removed_codes.add(f"action:{action}->{routed_action}")
+        return change
+
+    invalid_actions: set[str] = set()
+    if depth_is_runtime_valid:
+        invalid_actions.add(RequiredChangeAction.REDUCE_MUTATION_DEPTH.value)
+    if diversity_is_runtime_valid:
+        invalid_actions.add(RequiredChangeAction.INCREASE_DIVERSITY.value)
+    if not review_context.review_controls:
+        invalid_actions.add(RequiredChangeAction.ADD_CONTROL.value)
+    if not review_context.review_diversity:
+        invalid_actions.add(RequiredChangeAction.INCREASE_DIVERSITY.value)
+    if not review_context.exploration_quota_supported:
+        invalid_actions.add(RequiredChangeAction.ADD_EXPLORATION_QUOTA.value)
+    if falsification_is_runtime_valid:
+        invalid_actions.add(RequiredChangeAction.MAKE_FALSIFICATION_EXECUTABLE.value)
+    retained_changes = []
+    for raw_item in payload.get("required_changes", []):
+        item = route_non_candidate_change(raw_item)
+        action = str(item.get("action", ""))
+        targets = {str(target) for target in item.get("target_ids", [])}
+        if (
+            action
+            in {
+                RequiredChangeAction.EXCLUDE_CANDIDATE.value,
+                RequiredChangeAction.REPLACE_CANDIDATE.value,
+            }
+            and targets
+            and targets.issubset(removed_candidate_issue_targets)
+            and not any(candidate_codes.get(target) for target in targets)
+        ):
+            removed_codes.add(f"action:{action}:runtime_issue_removed")
+            continue
+        if action in invalid_actions:
+            removed_codes.add(f"action:{action}")
+            continue
+        if (
+            not review_context.evidence_acquisition_supported
+            and action
+            in {
+                RequiredChangeAction.REQUEST_EVIDENCE.value,
+                RequiredChangeAction.ADD_COUNTEREVIDENCE_SEARCH.value,
+            }
+        ):
+            removed_codes.add(f"action:{action}:unsupported")
+            continue
+        retained_changes.append(item)
+
+    # A soft evidence conflict remains an auditable credibility warning, but
+    # regenerating prose cannot acquire new evidence.  Do not treat that as an
+    # executable repair when every actual deterministic gate already passes.
+    evidence_warning_only = (
+        not normalized["candidate_issues"]
+        and not normalized["batch_level_risks"]
+        and not normalized.get("unsupported_claims", [])
+        and not (hard_conflict_codes or set())
+    )
+    if evidence_warning_only:
+        non_effective_actions = {
+            RequiredChangeAction.REGENERATE_WITH_CONSTRAINTS.value,
+            RequiredChangeAction.REQUEST_EVIDENCE.value,
+            RequiredChangeAction.ADD_COUNTEREVIDENCE_SEARCH.value,
+            RequiredChangeAction.RELAX_SOFT_PRIOR.value,
+        }
+        effective_changes = []
+        for item in retained_changes:
+            action = str(item.get("action", ""))
+            if action in non_effective_actions:
+                removed_codes.add(f"action:{action}:evidence_warning_only")
+                continue
+            effective_changes.append(item)
+        retained_changes = effective_changes
+    normalized["required_changes"] = retained_changes
+
+    if (
+        falsification_is_runtime_valid
+        and str(normalized.get("falsification_readiness"))
+        != FalsificationReadiness.READY.value
+    ):
+        normalized["falsification_readiness"] = FalsificationReadiness.READY.value
+        removed_codes.add("falsification_readiness:runtime_verified")
+
+    rating = dict(payload.get("rating", {}))
+    soft_nonblocking_codes = {
+        "COUNTEREVIDENCE_IGNORED",
+        "EVIDENCE_POLARITY_CONFLICT",
+        "MISSING_RATIONALE_EVIDENCE",
+        "UNSUPPORTED_CLAIM",
+    }
+    remaining_issue_codes = {
+        str(item.get("code", ""))
+        for item in (
+            *normalized["candidate_issues"],
+            *normalized["batch_level_risks"],
+        )
+    }
+    only_soft_nonblocking_findings = remaining_issue_codes.issubset(
+        soft_nonblocking_codes
+    )
+    if only_soft_nonblocking_findings and not review_context.evidence_acquisition_supported:
+        for item in (
+            *normalized["candidate_issues"],
+            *normalized["batch_level_risks"],
+        ):
+            if str(item.get("code", "")) in soft_nonblocking_codes:
+                item["severity"] = IssueSeverity.WARNING.value
+    can_approve = (
+        bool(removed_codes)
+        and str(payload.get("verdict")) == ReviewVerdict.REVISE.value
+        and only_soft_nonblocking_findings
+        and not normalized["required_changes"]
+        and str(normalized.get("falsification_readiness"))
+        == FalsificationReadiness.READY.value
+        and not rating.get("text_errors", [])
+        and not (hard_conflict_codes or set())
+    )
+    if can_approve:
+        normalized["verdict"] = ReviewVerdict.APPROVE.value
+        rating.update(
+            {
+                "score": 4,
+                "rationale": (
+                    "No executable in-loop repair remains; deterministic gates pass, "
+                    "falsification is ready, and soft evidence warnings remain audited."
+                ),
+                "suggestions": [],
+                "text_errors": [],
+            }
+        )
+        normalized["rating"] = rating
+        normalized["explanation"] = (
+            "Deterministic normalization removed unsupported repair actions; soft "
+            "evidence warnings remain visible and no required change remains."
+        )
+    return normalized, tuple(sorted(removed_codes))
+
+
 def load_critic_profile(profile: str) -> str:
     root = Path(__file__).with_name("critic_profiles") / profile
     skill = root / "SKILL.md"
@@ -741,6 +1019,189 @@ class RuleBasedCriticClient:
         return _decision_from_payload(normalized, draft=draft)
 
 
+class DeterministicBatchPolicyGate:
+    """Deterministic owner of ordinary Batch Critic approval receipts.
+
+    The gate intentionally does not claim to perform semantic entailment.  It
+    combines the existing hard-validation receipt with runtime-owned control,
+    diversity, prediction, and falsification receipts.  A separate policy-gated
+    client may escalate an otherwise approvable draft to an LLM auditor.
+    """
+
+    provider_name = "deterministic_batch_policy_gate"
+
+    def __init__(self) -> None:
+        self.rule = RuleBasedCriticClient()
+
+    @staticmethod
+    def _abort(decision: CritiqueDecision, summary: str) -> CritiqueDecision:
+        return replace(
+            decision,
+            verdict=ReviewVerdict.REJECT,
+            falsification_readiness=FalsificationReadiness.UNTESTABLE,
+            required_changes=(
+                RequiredChange(
+                    action=RequiredChangeAction.ABORT_ROUND,
+                    target_ids=(),
+                    parameters={},
+                    rationale=summary,
+                ),
+            ),
+            confidence=1.0,
+            summary=summary,
+            rating_score=1,
+            rating_rationale=summary,
+            rating_suggestions=(),
+            rating_text_errors=(),
+        )
+
+    def review(
+        self,
+        *,
+        context: dict[str, Any],
+        output_schema: dict[str, Any],
+        validator: Any | None = None,
+    ) -> CritiqueDecision:
+        del validator
+        decision = self.rule.review(context=context, output_schema=output_schema)
+        if decision.verdict is not ReviewVerdict.APPROVE:
+            return decision
+
+        draft: DraftBatch = context["draft"]
+        review_context_raw = context.get("batch_review_context")
+        review_context = (
+            BatchReviewContext.model_validate(review_context_raw)
+            if review_context_raw is not None
+            else None
+        )
+        if review_context is None:
+            return self._abort(
+                decision,
+                "Batch Policy Gate requires a runtime-owned BatchReviewContext; "
+                "the batch cannot be approved without its policy receipts.",
+            )
+        if review_context.review_controls and review_context.control_feasibility is None:
+            return self._abort(
+                decision,
+                "Control review is enabled but its runtime feasibility receipt is missing.",
+            )
+        if (
+            review_context.review_controls
+            and review_context.control_feasibility is not None
+            and not review_context.control_feasibility.feasible
+        ):
+            return self._abort(
+                decision,
+                "The runtime control-feasibility receipt proves that the requested "
+                "control policy cannot be satisfied.",
+            )
+        if review_context.review_diversity and review_context.diversity is None:
+            return self._abort(
+                decision,
+                "Diversity review is enabled but its runtime diversity receipt is missing.",
+            )
+        if (
+            review_context.review_diversity
+            and review_context.diversity is not None
+            and not review_context.diversity.threshold_satisfied
+            and review_context.diversity.threshold_feasible_in_pool
+        ):
+            diversity = review_context.diversity
+            rationale = (
+                "The selected batch misses the preregistered minimum distance even "
+                "though that threshold is feasible in the frozen candidate pool."
+            )
+            diversity_risks = tuple(
+                item
+                for item in decision.batch_level_risks
+                if getattr(item.code, "value", str(item.code))
+                != "INSUFFICIENT_DIVERSITY"
+            )
+            return replace(
+                decision,
+                verdict=ReviewVerdict.REVISE,
+                falsification_readiness=FalsificationReadiness.READY,
+                batch_level_risks=(
+                    *diversity_risks,
+                    BatchRisk(
+                        risk_id="R-POLICY-DIVERSITY",
+                        code="INSUFFICIENT_DIVERSITY",
+                        severity=IssueSeverity.ERROR,
+                        statement=rationale,
+                        candidate_ids=draft.candidate_ids,
+                    ),
+                ),
+                required_changes=(
+                    RequiredChange(
+                        action=RequiredChangeAction.INCREASE_DIVERSITY,
+                        target_ids=(),
+                        parameters={
+                            "minimum_batch_distance": (
+                                diversity.required_minimum_batch_distance
+                            )
+                        },
+                        rationale=rationale,
+                    ),
+                ),
+                confidence=1.0,
+                summary=rationale,
+                rating_score=3,
+                rating_rationale=rationale,
+                rating_suggestions=(rationale,),
+            )
+
+        predictions = review_context.prediction_status_by_id
+        intents = review_context.candidate_intent_by_id
+        variants: Mapping[str, Variant] = context.get("variants", {})
+        sample_reviews = []
+        for candidate_id in draft.candidate_ids:
+            variant = variants.get(candidate_id)
+            prediction = predictions.get(candidate_id)
+            intent = intents.get(candidate_id)
+            feature_bits = []
+            if variant is not None:
+                feature_bits.append(
+                    f"mutation={variant.mutation_notation}; depth={variant.mutation_count}"
+                )
+            if intent is not None:
+                feature_bits.append(f"arm={intent.arm}")
+            if prediction is not None:
+                feature_bits.append(
+                    "prediction="
+                    f"{prediction.source_kind}/{prediction.prediction_status}/"
+                    f"{prediction.calibration_status}"
+                )
+            sample_reviews.append(
+                {
+                    "candidate_id": candidate_id,
+                    "feature_analysis": _clip_text(
+                        "; ".join(feature_bits) or "Runtime candidate contract present.",
+                        SAMPLE_REVIEW_PROSE_MAX,
+                    ),
+                    "critic_explanation": (
+                        "Deterministic candidate, prediction, evidence-ID, and batch-policy "
+                        "checks passed; semantic entailment was not required by policy."
+                    ),
+                    "suggestions": [],
+                }
+            )
+        summary = (
+            "Approved by the deterministic Batch Policy Gate after hard validation and "
+            "runtime-owned control, diversity, prediction, evidence-ID, and falsification "
+            "checks passed; no configured semantic-risk trigger required LLM review."
+        )
+        return replace(
+            decision,
+            confidence=1.0,
+            summary=summary,
+            rating_score=5,
+            rating_rationale=summary,
+            rating_suggestions=(),
+            rating_text_errors=(),
+            sample_reviews=tuple(sample_reviews),
+        )
+
+
 class OpenAICriticClient:
     provider_name = "openai_critic"
 
@@ -859,6 +1320,30 @@ class OpenAICriticClient:
                 evidence_map,
                 decode=True,
             )
+            deterministic_codes = {
+                getattr(item.code, "value", str(item.code))
+                for item in context["conflict_report"].conflicts
+            }
+            hard_conflict_codes = {
+                getattr(item.code, "value", str(item.code))
+                for item in context["conflict_report"].hard_conflicts
+            }
+            decoded, removed_codes = _normalize_runtime_owned_critic_payload(
+                decoded,
+                review_context=review_context,
+                deterministic_codes=deterministic_codes,
+                draft=draft,
+                hard_conflict_codes=hard_conflict_codes,
+            )
+            if removed_codes:
+                report_event(
+                    "critic_runtime_fact_normalized",
+                    message="Critic findings contradicted by runtime facts were normalized",
+                    persist=True,
+                    round_id=draft.round_id,
+                    review_attempt=draft.review_attempt,
+                    removed_codes=list(removed_codes),
+                )
             if validator is not None:
                 try:
                     validator(decoded)
@@ -875,6 +1360,18 @@ class OpenAICriticClient:
                             ("reject", "required_changes"),
                             ("falsification", "falsification_readiness"),
                             ("outside the configured", "required_changes[].action"),
+                            (
+                                "outside the allowed mutation positions",
+                                "required_changes[].parameters.excluded_substitutions[]",
+                            ),
+                            (
+                                "does not match the runtime wild type",
+                                "required_changes[].parameters.excluded_substitutions[].from_residue",
+                            ),
+                            (
+                                "candidate replacement or exclusion requires",
+                                "required_changes[].action",
+                            ),
                         )
                         if marker in message
                     ) or ("runtime_invariant",)
@@ -940,6 +1437,11 @@ class OpenAICriticClient:
                 "Batch diversity is outside this review scope. Do not emit "
                 "INSUFFICIENT_DIVERSITY, BATCH_MODE_COLLAPSE, or INCREASE_DIVERSITY."
             )
+        if not review_context.exploration_quota_supported:
+            excluded_review_instructions.append(
+                "Exploration quota changes are not executable in this runtime. Do not emit "
+                "ADD_EXPLORATION_QUOTA."
+            )
 
         payload = complete_json(
             client=self.client,
@@ -977,6 +1479,9 @@ class OpenAICriticClient:
                         "soft prior. HARD_RESIDUE_CONSTRAINT_VIOLATION is legal only when the "
                         "hypothesis contains explicit hard_residue_constraints and the issue cites "
                         "a listed deterministic hard-conflict C label."
+                        + " mutation_contract is runtime-owned: excluded substitutions must use "
+                        "only its allowed_positions, and an optional from_residue must equal its "
+                        "wild_type_by_position value."
                         + (
                             "\n\nRuntime-scoped exclusions:\n"
                             + "\n".join(excluded_review_instructions)
@@ -1041,6 +1546,215 @@ class OpenAICriticClient:
         return _decision_from_payload(payload, draft=draft)
 
 
+class PolicyGatedCriticClient:
+    """Run the remote semantic auditor only when deterministic risk policy asks."""
+
+    provider_name = "policy_gated_semantic_auditor"
+
+    def __init__(
+        self,
+        *,
+        policy_gate: DeterministicBatchPolicyGate,
+        semantic_auditor: OpenAICriticClient,
+        risk_codes: Sequence[str],
+        audit_on_revision: bool = True,
+        audit_on_uncalibrated_predictions: bool = True,
+        quality_statuses: Sequence[str] = (),
+        applicability_statuses: Sequence[str] = (),
+        mutation_count_threshold: int | None = None,
+        warning_count_threshold: int | None = None,
+    ) -> None:
+        self.policy_gate = policy_gate
+        self.semantic_auditor = semantic_auditor
+        self.risk_codes = frozenset(str(item) for item in risk_codes)
+        self.audit_on_revision = audit_on_revision
+        self.audit_on_uncalibrated_predictions = audit_on_uncalibrated_predictions
+        self.quality_statuses = frozenset(
+            str(item).lower() for item in quality_statuses
+        )
+        self.applicability_statuses = frozenset(
+            str(item).lower() for item in applicability_statuses
+        )
+        self.mutation_count_threshold = mutation_count_threshold
+        self.warning_count_threshold = warning_count_threshold
+        self.semantic_audit_count = 0
+        self.policy_approval_count = 0
+
+    def _risk_triggers(self, context: Mapping[str, Any]) -> tuple[str, ...]:
+        triggers: set[str] = set()
+        report: ConflictReport = context["conflict_report"]
+        for conflict in report.conflicts:
+            code = getattr(conflict.code, "value", str(conflict.code))
+            if code in self.risk_codes:
+                triggers.add(f"conflict:{code}")
+
+        review_context_raw = context.get("batch_review_context")
+        review_context = (
+            BatchReviewContext.model_validate(review_context_raw)
+            if review_context_raw is not None
+            else None
+        )
+        if (
+            self.audit_on_revision
+            and review_context is not None
+            and review_context.revision_feedback is not None
+        ):
+            triggers.add("revision_feedback")
+        if self.audit_on_uncalibrated_predictions and review_context is not None:
+            risky_calibration = sorted(
+                {
+                    card.calibration_status
+                    for card in review_context.prediction_status_by_id.values()
+                    if card.decision_eligible
+                    and card.calibration_status in {"unknown", "uncalibrated"}
+                }
+            )
+            triggers.update(f"prediction_calibration:{item}" for item in risky_calibration)
+
+        evidence_by_candidate: Mapping[str, Sequence[Evidence]] = context.get(
+            "evidence", {}
+        )
+        evidence = [
+            item
+            for items in evidence_by_candidate.values()
+            for item in items
+        ]
+        evidence.extend(context.get("context_evidence", ()))
+        for item in evidence:
+            quality = str(item.quality_status).lower()
+            applicability = str(item.applicability).lower()
+            if quality in self.quality_statuses:
+                triggers.add(f"evidence_quality:{quality}")
+            if applicability in self.applicability_statuses:
+                triggers.add(f"evidence_applicability:{applicability}")
+        for candidate_id, items in evidence_by_candidate.items():
+            polarities = {
+                item.polarity
+                for item in items
+                if item.polarity in {"support", "contradict"}
+            }
+            if polarities == {"support", "contradict"}:
+                triggers.add(f"mixed_evidence_polarity:{candidate_id}")
+        context_claim_polarities: dict[str, set[str]] = {}
+        for item in context.get("context_evidence", ()):
+            if item.claim_id and item.polarity in {"support", "contradict"}:
+                context_claim_polarities.setdefault(item.claim_id, set()).add(
+                    item.polarity
+                )
+        if any(
+            polarities == {"support", "contradict"}
+            for polarities in context_claim_polarities.values()
+        ):
+            triggers.add("mixed_context_claim_polarity")
+
+        if self.mutation_count_threshold is not None:
+            variants: Mapping[str, Variant] = context.get("variants", {})
+            maximum_depth = max(
+                (item.mutation_count for item in variants.values()), default=0
+            )
+            if maximum_depth >= self.mutation_count_threshold:
+                triggers.add(f"mutation_depth:{maximum_depth}")
+        if self.warning_count_threshold is not None:
+            warning_count = sum(len(item.warnings) for item in evidence)
+            if warning_count >= self.warning_count_threshold:
+                triggers.add(f"evidence_warnings:{warning_count}")
+        return tuple(sorted(triggers))
+
+    def review(
+        self,
+        *,
+        context: dict[str, Any],
+        output_schema: dict[str, Any],
+        validator: Any | None = None,
+    ) -> CritiqueDecision:
+        policy_decision = self.policy_gate.review(
+            context=context,
+            output_schema=output_schema,
+            validator=validator,
+        )
+        if policy_decision.verdict is not ReviewVerdict.APPROVE:
+            report_event(
+                "batch_policy_gate_completed",
+                message="deterministic Batch Policy Gate issued a terminal decision",
+                persist=True,
+                verdict=policy_decision.verdict.value,
+                semantic_audit_required=False,
+                risk_triggers=[],
+            )
+            return policy_decision
+
+        triggers = self._risk_triggers(context)
+        if not triggers:
+            self.policy_approval_count += 1
+            report_event(
+                "batch_semantic_audit_skipped",
+                message="low-risk batch approved by deterministic policy",
+                persist=True,
+                verdict=policy_decision.verdict.value,
+                semantic_audit_required=False,
+                risk_triggers=[],
+            )
+            return policy_decision
+
+        self.semantic_audit_count += 1
+        report_event(
+            "batch_semantic_audit_started",
+            message="deterministic risk policy escalated the batch to the LLM auditor",
+            persist=True,
+            semantic_audit_required=True,
+            risk_triggers=list(triggers),
+            semantic_auditor=getattr(self.semantic_auditor, "provider_name", None),
+        )
+        try:
+            decision = self.semantic_auditor.review(
+                context=context,
+                output_schema=output_schema,
+                validator=validator,
+            )
+        except Exception as error:  # noqa: BLE001 - escalation must fail closed
+            summary = _clip_text(
+                "Semantic audit was required by deterministic risk policy but did not "
+                f"complete ({type(error).__name__}); the batch cannot be approved.",
+                _RULE_SUMMARY_CAP,
+            )
+            report_event(
+                "batch_semantic_audit_failed",
+                message="required LLM semantic audit failed closed",
+                persist=True,
+                semantic_audit_required=True,
+                risk_triggers=list(triggers),
+                error_type=type(error).__name__,
+            )
+            return replace(
+                policy_decision,
+                verdict=ReviewVerdict.REJECT,
+                falsification_readiness=FalsificationReadiness.UNTESTABLE,
+                required_changes=(
+                    RequiredChange(
+                        action=RequiredChangeAction.ABORT_ROUND,
+                        target_ids=(),
+                        parameters={},
+                        rationale=summary,
+                    ),
+                ),
+                confidence=1.0,
+                summary=summary,
+                rating_score=1,
+                rating_rationale=summary,
+                rating_suggestions=(),
+                rating_text_errors=(),
+            )
+        report_event(
+            "batch_semantic_audit_completed",
+            message="LLM semantic audit completed after deterministic escalation",
+            persist=True,
+            verdict=decision.verdict.value,
+            semantic_audit_required=True,
+            risk_triggers=list(triggers),
+        )
+        return decision
+
+
 def _decision_from_payload(payload: dict[str, Any], *, draft: DraftBatch) -> CritiqueDecision:
     if "rating" not in payload and "verdict" in payload:
         legacy_verdict = ReviewVerdict(payload["verdict"])
@@ -1082,7 +1796,7 @@ def _decision_from_payload(payload: dict[str, Any], *, draft: DraftBatch) -> Cri
                 conflict_ids=tuple(item["conflict_ids"]),
                 suggested_action=(
                     RequiredChangeAction(item["suggested_action"])
-                    if item["suggested_action"]
+                    if item.get("suggested_action")
                     else None
                 ),
             )
@@ -1168,6 +1882,8 @@ class CriticAgent:
         hypothesis: Any | None = None,
         activation_state: RoleActivationState | dict[str, Any] | None = None,
         batch_review_context: BatchReviewContext | dict[str, Any] | None = None,
+        allowed_positions: set[int] | None = None,
+        wild_type_by_position: Mapping[int, str] | None = None,
     ) -> CritiqueDecision:
         validated_activation = RoleActivationState.model_validate(
             activation_state or RoleActivationState(role="critic")
@@ -1188,6 +1904,15 @@ class CriticAgent:
                 if batch_review_context is not None
                 else None
             ),
+            "mutation_contract": {
+                "allowed_positions": sorted(allowed_positions or ()),
+                "wild_type_by_position": {
+                    str(position): residue
+                    for position, residue in sorted(
+                        (wild_type_by_position or {}).items()
+                    )
+                },
+            },
         }
         visible_ids = {
             entry.evidence_id
@@ -1198,6 +1923,52 @@ class CriticAgent:
         last_error: Exception | None = None
 
         def _validate_review_scope(decision: CritiqueDecision) -> None:
+            candidate_codes: dict[str, set[str]] = {}
+            for issue in decision.candidate_issues:
+                candidate_codes.setdefault(issue.candidate_id, set()).add(
+                    getattr(issue.code, "value", str(issue.code))
+                )
+            for change in decision.required_changes:
+                if change.action not in {
+                    RequiredChangeAction.EXCLUDE_CANDIDATE,
+                    RequiredChangeAction.REPLACE_CANDIDATE,
+                }:
+                    continue
+                non_candidate_defect_codes = {
+                    "MISSING_RATIONALE_EVIDENCE",
+                    "COUNTEREVIDENCE_IGNORED",
+                    "UNSUPPORTED_CLAIM",
+                    "HYPOTHESIS_UNTESTABLE",
+                }
+                unjustified_targets = [
+                    target_id
+                    for target_id in change.target_ids
+                    if not candidate_codes.get(target_id)
+                    or candidate_codes[target_id].issubset(non_candidate_defect_codes)
+                ]
+                if unjustified_targets:
+                    raise ValueError(
+                        "Candidate replacement or exclusion requires a candidate-scoped "
+                        "defect; evidence and hypothesis defects cannot justify it"
+                    )
+            for change in decision.required_changes:
+                for raw_card in change.parameters.get("excluded_substitutions", ()):
+                    card = ResidueSubstitutionCard.model_validate(raw_card)
+                    if allowed_positions is not None and card.position not in allowed_positions:
+                        raise ValueError(
+                            f"excluded residue position {card.position} is outside the "
+                            "allowed mutation positions"
+                        )
+                    expected_from = (wild_type_by_position or {}).get(card.position)
+                    if (
+                        card.from_residue is not None
+                        and expected_from is not None
+                        and card.from_residue != expected_from
+                    ):
+                        raise ValueError(
+                            "excluded substitution from_residue does not match the "
+                            f"runtime wild type at position {card.position}"
+                        )
             review_context = context.get("batch_review_context")
             if review_context is not None:
                 typed_context = BatchReviewContext.model_validate(review_context)
@@ -1209,6 +1980,38 @@ class CriticAgent:
                     getattr(item.code, "value", str(item.code))
                     for item in decision.batch_level_risks
                 )
+                deterministic_codes = {
+                    getattr(item.code, "value", str(item.code))
+                    for item in context["conflict_report"].conflicts
+                }
+                if (
+                    "MUTATION_DEPTH_MISMATCH" in issue_codes
+                    and "MUTATION_DEPTH_MISMATCH" not in deterministic_codes
+                ):
+                    raise ValueError(
+                        "Mutation depth is runtime-owned; the Critic cannot invent a "
+                        "MUTATION_DEPTH_MISMATCH without a deterministic conflict"
+                    )
+                diversity = typed_context.diversity
+                diversity_codes = {"INSUFFICIENT_DIVERSITY", "BATCH_MODE_COLLAPSE"}
+                if (
+                    diversity is not None
+                    and diversity.threshold_satisfied
+                    and issue_codes.intersection(diversity_codes)
+                ):
+                    raise ValueError(
+                        "The deterministic diversity threshold is satisfied; the Critic "
+                        "cannot emit a diversity failure"
+                    )
+                if (
+                    diversity is not None
+                    and not diversity.threshold_feasible_in_pool
+                    and RequiredChangeAction.INCREASE_DIVERSITY in actions
+                ):
+                    raise ValueError(
+                        "The deterministic diversity threshold is infeasible in the pool; "
+                        "the Critic cannot request INCREASE_DIVERSITY"
+                    )
                 if not typed_context.review_controls and (
                     RequiredChangeAction.ADD_CONTROL in actions
                     or "INSUFFICIENT_CONTROL" in issue_codes
@@ -1224,6 +2027,24 @@ class CriticAgent:
                 ):
                     raise ValueError(
                         "Batch diversity is outside the configured batch review scope"
+                    )
+                if (
+                    not typed_context.exploration_quota_supported
+                    and RequiredChangeAction.ADD_EXPLORATION_QUOTA in actions
+                ):
+                    raise ValueError(
+                        "Exploration quota changes are outside the configured batch "
+                        "review scope"
+                    )
+                if not typed_context.evidence_acquisition_supported and actions.intersection(
+                    {
+                        RequiredChangeAction.REQUEST_EVIDENCE,
+                        RequiredChangeAction.ADD_COUNTEREVIDENCE_SEARCH,
+                    }
+                ):
+                    raise ValueError(
+                        "Evidence acquisition actions are outside the configured batch "
+                        "review scope"
                     )
 
         def _payload_validator(payload: dict[str, Any]) -> None:
@@ -1368,3 +2189,59 @@ class CriticAgent:
             },
             draft=draft,
         )
+
+
+def create_batch_critic_agent(config: CriticConfig) -> CriticAgent:
+    """Build the configured Batch Critic without duplicating routing policy."""
+
+    rule_critic = RuleBasedCriticClient()
+    if config.mode != "remote" or not config.enabled:
+        return CriticAgent(rule_critic, max_retries=0)
+
+    remote_critic = OpenAICriticClient(
+        model=config.model,
+        profile=config.profile,
+        temperature=config.temperature,
+        base_url=config.base_url,
+        provider=config.provider,
+        max_tokens=config.max_tokens,
+        reasoning_effort=None,
+        thinking="disabled",
+        api_key=config.api_key,
+        max_transport_retries=config.max_model_retries,
+        max_truncation_retries=config.max_truncation_retries,
+        max_syntax_retries=config.max_syntax_retries,
+        max_schema_retries=config.max_schema_retries,
+        max_semantic_retries=config.max_semantic_retries,
+        max_unknown_evidence_retries=config.max_unknown_evidence_retries,
+        retry_backoff_seconds=config.retry_backoff_seconds,
+        request_timeout_seconds=config.request_timeout_seconds,
+        max_input_chars=config.max_input_chars,
+    )
+    if config.policy_gate_enabled:
+        client: Any = PolicyGatedCriticClient(
+            policy_gate=DeterministicBatchPolicyGate(),
+            semantic_auditor=remote_critic,
+            risk_codes=config.semantic_audit_risk_codes,
+            audit_on_revision=config.semantic_audit_on_revision,
+            audit_on_uncalibrated_predictions=(
+                config.semantic_audit_on_uncalibrated_predictions
+            ),
+            quality_statuses=config.semantic_audit_quality_statuses,
+            applicability_statuses=config.semantic_audit_applicability_statuses,
+            mutation_count_threshold=config.semantic_audit_mutation_count_threshold,
+            warning_count_threshold=config.semantic_audit_warning_count_threshold,
+        )
+        # Once risk escalation is required, an unavailable semantic auditor
+        # fails closed inside PolicyGatedCriticClient.  A rule fallback must not
+        # turn that failed audit back into an approval.
+        fallback = None
+    else:
+        client = remote_critic
+        fallback = rule_critic if config.fallback_policy == "rule" else None
+    return CriticAgent(
+        client,
+        # Provider/output retries are already owned by OpenAICriticClient.
+        max_retries=0,
+        fallback=fallback,
+    )

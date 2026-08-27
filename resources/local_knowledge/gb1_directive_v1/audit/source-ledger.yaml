@@ -1,0 +1,176 @@
+schema_version: evidence-product-ledger:v1
+brief_id: RB-GB1-DIRECTIVE-V1
+publications:
+  - publication_id: PUB-001
+    title: Two crystal structures of the B1 immunoglobulin-binding domain of streptococcal protein G and comparison with NMR
+    kind: official_structure_record_and_primary_paper
+    year: 1994
+    doi: 10.1021/bi00181a032
+    pdb_id: 1PGA
+    url: https://www.rcsb.org/structure/1PGA
+    scientific_credibility: high
+    task_applicability: high
+    permission: explanation_only
+  - publication_id: PUB-002
+    title: Crystal structure of the C2 fragment of streptococcal protein G in complex with the Fc domain of human IgG
+    kind: official_structure_record_and_primary_paper
+    year: 1995
+    doi: 10.1016/S0969-2126(01)00157-5
+    pdb_id: 1FCC
+    url: https://pdbj.org/mine/summary/1fcc
+    scientific_credibility: high
+    task_applicability: medium
+    permission: explanation_only
+  - publication_id: PUB-003
+    title: Protein stability engineering insights revealed by domain-wide comprehensive mutagenesis
+    kind: primary_full_text
+    year: 2019
+    doi: 10.1073/pnas.1903888116
+    pmcid: PMC6697890
+    url: https://pmc.ncbi.nlm.nih.gov/articles/PMC6697890/
+    scientific_credibility: high
+    task_applicability: high_for_stability_low_for_binding
+    permission: explanation_only
+  - publication_id: PUB-004
+    title: Thermodynamic prediction of protein neutrality
+    kind: primary_metadata_and_abstract
+    year: 2006
+    doi: 10.1073/pnas.0510098103
+    pmid: '16581913'
+    url: https://pubmed.ncbi.nlm.nih.gov/16581913/
+    scientific_credibility: medium
+    task_applicability: low_transfer_only
+    permission: explanation_only
+  - publication_id: PUB-005
+    title: The high affinity binding site on protein G for Fc gamma is small and polar
+    kind: primary_metadata
+    year: 1999
+    doi: 10.1110/ps.8.8.1643
+    url: https://onlinelibrary.wiley.com/doi/abs/10.1110/ps.8.8.1643
+    scientific_credibility: medium
+    task_applicability: medium
+    permission: explanation_only
+  - publication_id: PUB-006
+    title: Design and characterization of a pH-dependent recombinant antibody binding protein
+    kind: primary_metadata
+    year: 2009
+    doi: 10.1074/jbc.M809236200
+    pmid: '19269963'
+    url: https://pubmed.ncbi.nlm.nih.gov/19269963/
+    scientific_credibility: medium
+    task_applicability: low_condition_boundary_only
+    permission: explanation_only
+
+source_spans:
+  - source_span_id: SS-001
+    publication_id: PUB-001
+    locator: RCSB record lines 15-50
+    support: 1PGA is a 56-residue GB1 structure at 2.07 Å with a tightly packed hydrophobic core between a four-stranded beta sheet and an alpha helix.
+    scientific_credibility: high
+    task_applicability: high
+  - source_span_id: SS-002
+    publication_id: PUB-002
+    locator: PDBj record lines 14-32
+    support: 1FCC is an X-ray structure of a protein G fragment bound to human IgG Fc at 3.2 Å.
+    scientific_credibility: high
+    task_applicability: medium
+  - source_span_id: SS-003
+    publication_id: PUB-003
+    locator: full text lines 97-105
+    support: Nearly every GB1 single mutant was measured for thermodynamic stability; burial largely governs positional sensitivity and stability predictors remain imperfect.
+    scientific_credibility: high
+    task_applicability: high_for_stability
+  - source_span_id: SS-004
+    publication_id: PUB-003
+    locator: full text lines 152-180
+    support: Positions 41 and 54 are particularly stability sensitive; interior burial predicts destabilization; glycine and proline incorporation is often deleterious.
+    scientific_credibility: high
+    task_applicability: high_for_stability
+  - source_span_id: SS-005
+    publication_id: PUB-003
+    locator: full text lines 292-304
+    support: Fitness and thermodynamic stability are not interchangeable; models separating folding and binding improve interpretation.
+    scientific_credibility: high
+    task_applicability: high_as_boundary
+  - source_span_id: SS-006
+    publication_id: PUB-001
+    locator: official 1PGA coordinates, in-memory heavy-atom distance calculation
+    support: Positions 39/54 and 41/54 have minimum heavy-atom distances of approximately 3.81 Å and 3.67 Å in the deposited structure.
+    scientific_credibility: high_for_coordinates_medium_for_inference
+    task_applicability: high
+
+evidence_groups:
+  - evidence_group_id: EG-001
+    theme: fold_and_stability_gate
+    source_spans: [SS-001, SS-003, SS-004]
+    independence: two_publication_families
+    conflict: none_on_direction
+  - evidence_group_id: EG-002
+    theme: local_contact_coupling
+    source_spans: [SS-001, SS-006]
+    independence: one_structure_record_plus_derived_geometry
+    conflict: mutant_repacking_unobserved
+  - evidence_group_id: EG-003
+    theme: binding_interface_scope
+    source_spans: [SS-002, SS-005]
+    independence: structure_plus_thermodynamic_boundary
+    conflict: exact_site_contribution_not_established
+
+atomic_claims:
+  - atomic_claim_id: AC-001
+    evidence_group_id: EG-001
+    claim: Treat changes at positions 41 and 54 as stability-sensitive until a candidate preserves backbone and packing compatibility.
+    claim_type: direct_plus_conservative_inference
+    scientific_credibility: high
+    task_applicability: high
+    permission: explanation_only
+  - atomic_claim_id: AC-002
+    evidence_group_id: EG-002
+    claim: Evaluate positions 39 and 54 jointly because their wild-type side chains are in direct contact range.
+    claim_type: structure_derived
+    scientific_credibility: medium_high
+    task_applicability: high
+    permission: explanation_only
+  - atomic_claim_id: AC-003
+    evidence_group_id: EG-003
+    claim: Interpret position-40 chemistry as an interface hypothesis separately from the folding gate.
+    claim_type: bounded_inference
+    scientific_credibility: medium
+    task_applicability: medium_high
+    permission: explanation_only
+  - atomic_claim_id: AC-004
+    evidence_group_id: EG-001
+    claim: Preserve the geometry of nearby sensitive aromatic core residues when changing the four benchmark positions.
+    claim_type: conservative_structure_inference
+    scientific_credibility: medium_high
+    task_applicability: high
+    permission: explanation_only
+  - atomic_claim_id: AC-005
+    evidence_group_id: EG-001
+    claim: Use stability evidence as a gate or confidence modifier, not as a binding-fitness proxy.
+    claim_type: direct_boundary
+    scientific_credibility: high
+    task_applicability: high
+    permission: explanation_only
+
+logic_units:
+  - logic_unit_id: LU-001
+    atomic_claims: [AC-001]
+    inference: If a proposal changes positions 41 or 54, require a small matched comparison that tests backbone or packing compatibility before prioritizing interface novelty.
+    falsifier: comparable candidates that violate the gate consistently retain folding-compatible behavior
+  - logic_unit_id: LU-002
+    atomic_claims: [AC-002]
+    inference: Compare joint residue-class balance at 39/54 rather than scoring each position independently.
+    falsifier: joint size balance has no repeatable effect across matched backgrounds
+  - logic_unit_id: LU-003
+    atomic_claims: [AC-003]
+    inference: Hold fold-sensitive positions constant when comparing alternative chemistry classes at position 40.
+    falsifier: interface-class differences disappear when fold context is controlled
+  - logic_unit_id: LU-004
+    atomic_claims: [AC-004]
+    inference: Penalize simultaneous bulky changes that crowd fixed neighboring aromatics unless compensated by a matched reduction nearby.
+    falsifier: structural checks show no clash or the crowded class repeatedly outperforms its matched control
+  - logic_unit_id: LU-005
+    atomic_claims: [AC-005]
+    inference: Reject deterministic binding conclusions drawn only from stability evidence and preserve at least one interface-diverse candidate.
+    falsifier: unavailable because this is a validity boundary rather than a directional biological claim

@@ -1,0 +1,133 @@
+physchem: true
+conservation: true
+structure: true
+kg: true
+soft_weight: 0.20
+legacy_mode: false
+legacy_contributes_to_selection: false
+fusion_mode: independent_features
+parameter_set_id: gb1-knowledge:directive-v3
+local_knowledge:
+  enabled: true
+  corpus_index_path: artifacts/local_knowledge/corpus/gb1-directive-v3-route-qwen.sqlite
+  retrieval_overlay_path: artifacts/local_knowledge/overlays/gb1-directive-v3-route-qwen.sqlite
+  allow_remote_context: true
+  roots:
+    - path: resources/local_knowledge/gb1_directive_v3
+      root_id: GB1_DIRECTIVE_V3
+      access_policy_mode: synthetic_test
+      runtime_manifest_mode: legacy_compatible
+      include: ["cards/*.md"]
+      exclude: ["**/~$*", "**/.git/**", "**/artifacts/**"]
+  ingestion:
+    parser: auto
+    required_language: en
+    chunk_tokens: 384
+    chunk_overlap: 32
+    max_file_mb: 5
+    follow_symlinks: false
+    extract_archives: false
+  retrieval:
+    mode: hybrid
+    lexical_backend: sqlite_fts5
+    dense_enabled: true
+    embedding_backend: api
+    embedding_api_config: configs/knowledge/api/embedding.qwen-v4.yaml
+    allow_model_download: false
+    fusion: rrf
+    top_k: 1
+    lexical_candidates: 10
+    dense_candidates: 10
+    token_budget: 800
+    max_chunks_per_document: 1
+    query_language: en
+    strict_query_language: true
+    minimum_dense_similarity: 0.30
+    require_dense_match_for_hybrid: true
+    instruction_content_policy: reject
+    dense_search_backend: numpy_exact
+    max_exact_dense_chunks: 50000
+    reranker_backend: api
+    reranker_api_config: configs/knowledge/api/reranker.qwen3.yaml
+    structured_top_k: 1
+    runtime_query_by_round:
+      1: "early round binding-first diversity fold boundary static stability is not objective"
+      2: "middle round measured association update one pairwise coupling matched comparison"
+      3: "late round evidence-weighted exploitation strongest measured support one uncertainty hedge"
+    runtime_anchors_by_round:
+      1: ["binding-first diversity", "fold boundary not objective"]
+      2: ["measured association update", "one coupling matched comparison"]
+      3: ["evidence-weighted exploitation", "one late uncertainty hedge"]
+    runtime_knowledge_types_by_round:
+      1: [gb1_stage_early_decision_rule]
+      2: [gb1_stage_middle_decision_rule]
+      3: [gb1_stage_late_decision_rule]
+    structured_query_by_round:
+      1: "early binding-first fold boundary"
+      2: "middle measured update coupling"
+      3: "late measured exploitation uncertainty hedge"
+  kg_update:
+    enabled: true
+    materialization: retrieved_only
+    source_group: gb1_directive_research_candidate_v3
+    max_claims_per_round: 3
+    contributes_to_selection: false
+    selection_mode: context_only
+  leakage_guard:
+    enabled: true
+    mode: generalize_and_filter
+    derive_protected_terms_from_task: true
+    protected_aliases: []
+    protected_accessions: []
+    strict_aliases_required: true
+    quarantine_target_documents: true
+    block_target_entities: true
+    allow_target_identity_context: true
+providers:
+  physchem:
+    kind: aaindex_delta
+    resource_path: configs/resources/aaindex_minimal.yaml
+    contributes_to_selection: true
+    calibration: visible_linear
+    minimum_calibration_samples: 8
+    missing_policy: fail
+  conservation:
+    kind: msa_profile
+    contributes_to_selection: false
+    calibration: none
+    missing_policy: unavailable
+    options:
+      identity_threshold: 0.8
+      pseudocount: 0.5
+      minimum_neff: 16.0
+      minimum_sequence_coverage: 0.7
+      maximum_sequence_gap_fraction: 0.5
+  structure:
+    kind: static_structure
+    contributes_to_selection: false
+    calibration: none
+    missing_policy: unavailable
+    options:
+      contact_cutoff_angstrom: 5.0
+      interface_cutoff_angstrom: 5.0
+      hbond_cutoff_angstrom: 3.5
+      salt_bridge_cutoff_angstrom: 4.0
+      sasa_probe_radius_angstrom: 1.4
+      sasa_sphere_points: 96
+      dense_contact_count: 12
+      clash_distance_fraction: 0.75
+      disulfide_sg_cutoff_angstrom: 2.3
+  kg:
+    kind: observation_association
+    contributes_to_selection: true
+    calibration: none
+parameters:
+  kg.shrinkage_pseudocount: {value: 3.0, category: scientific, status: expert_prior, learnable: true, bounds: [0.1, 100.0], transform: log, update_policy: round_boundary_only, min_evidence: 32, source: project_prior_pending_calibration, version: gb1-knowledge:directive-v3}
+  kg.confidence_base: {value: 0.25, category: policy, status: expert_prior, learnable: true, bounds: [0.0, 1.0], transform: logit, update_policy: round_boundary_only, min_evidence: 32, source: project_prior_pending_calibration, version: gb1-knowledge:directive-v3}
+  kg.support_gain: {value: 0.03, category: policy, status: expert_prior, learnable: true, bounds: [0.0001, 0.5], transform: log, update_policy: round_boundary_only, min_evidence: 32, source: project_prior_pending_calibration, version: gb1-knowledge:directive-v3}
+  kg.confidence_cap: {value: 0.85, category: policy, status: expert_prior, learnable: true, bounds: [0.01, 0.999], transform: logit, update_policy: round_boundary_only, min_evidence: 32, source: project_prior_pending_calibration, version: gb1-knowledge:directive-v3}
+site_profiles:
+  "39": {wild_type: V, tolerated: [V, F, W, Y, L, I, M], structure_risk: 0.20}
+  "40": {wild_type: D, tolerated: [D, E, N, Q, H, W], structure_risk: 0.35}
+  "41": {wild_type: G, tolerated: [G, A, S, C, T], structure_risk: 0.75}
+  "54": {wild_type: V, tolerated: [V, I, L, M, A, F], structure_risk: 0.30}

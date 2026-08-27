@@ -1,0 +1,17 @@
+schema_version: research-candidate-brief:v1
+brief_id: RB-GB1-AGENTIC-CANDIDATE-V1
+research_question: Which externally supported, non-label-derived propositions can resolve a named evidence gap when interpreted beside current assay measurements?
+decision_use: mechanism_explanation
+source_scope: non_pathogen_protein_engineering_only
+metadata_discovery: crossref_or_publisher_primary_sources_only
+benchmark_labels_used: false
+mutation_identities_used: false
+question_leaves:
+  - question_leaf_id: QL-FOLD-BINDING-SEPARATION
+    decision_slot: failure_mode
+    evidence_need: When should folding plausibility constrain but not replace binding evidence?
+    counterevidence_need: What limits the transfer from static or stability evidence to binding outcomes?
+  - question_leaf_id: QL-LOCAL-COUPLING
+    decision_slot: interaction
+    evidence_need: What observations are required before local structural proximity supports a pairwise hypothesis?
+    counterevidence_need: When is proximity non-discriminative without a matched comparison?

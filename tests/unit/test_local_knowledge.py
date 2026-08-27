@@ -31,6 +31,8 @@ def _config(
         roots=(
             LocalKnowledgeRootConfig(
                 path=root,
+                access_policy_mode="synthetic_test",
+                runtime_manifest_mode="legacy_compatible",
                 include=("**/*.md", "**/*.txt"),
                 exclude=("**/~$*",),
             ),
@@ -225,6 +227,54 @@ def test_target_leakage_guard_quarantines_and_generalizes(tmp_path: Path) -> Non
     assert blocked_target_rows == 1
 
 
+def test_target_identity_context_mode_keeps_sequence_and_label_protection(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "knowledge"
+    root.mkdir()
+    target_sequence = "MTYKLILNGKTLKGETTTEAVDAATAEKVFKQYANDNGVDGEWTYDDATKTFTVTE"
+    identity_context = root / "identity-context.md"
+    identity_context.write_text(
+        "GB1 structural context links residue burial to stability risk.",
+        encoding="utf-8",
+    )
+    sequence_leak = root / "sequence-leak.md"
+    sequence_leak.write_text(target_sequence, encoding="utf-8")
+    leakage = LeakageGuardConfig(
+        enabled=True,
+        protected_aliases=("GB1", "protein G B1 domain"),
+        strict_aliases_required=True,
+        allow_target_identity_context=True,
+    )
+    index_path = tmp_path / "identity-context.sqlite"
+    knowledge = LocalKnowledgeBase(
+        _config(root, index_path, leakage=leakage),
+        index_path=index_path,
+        protein_id="GB1",
+        protein_name="protein G B1 domain",
+        protein_aliases=("GB1",),
+        reference_sequence=target_sequence,
+    )
+    try:
+        report = knowledge.refresh()
+        result = knowledge.retrieve(
+            query="Which GB1 structural context constrains stability?",
+            intent="support",
+            round_id=1,
+            anchors=("GB1 structural context", "residue burial", "stability risk"),
+        )
+    finally:
+        knowledge.close()
+
+    assert report.quarantined_documents == 1
+    assert result.policy_decision["generalized"] is False
+    assert "GB1" in result.sanitized_query
+    assert result.chunks
+    assert {Path(item.artifact_uri).name for item in result.chunks} == {
+        identity_context.name
+    }
+
+
 def test_dense_mode_requires_explicit_local_model_path() -> None:
     try:
         LocalKnowledgeRetrievalConfig(mode="hybrid", dense_enabled=True)
@@ -232,6 +282,29 @@ def test_dense_mode_requires_explicit_local_model_path() -> None:
         assert "embedding_model_path" in str(error)
     else:
         raise AssertionError("dense retrieval without a local model path must fail closed")
+
+
+def test_round_specific_runtime_queries_are_normalized_and_validated() -> None:
+    retrieval = LocalKnowledgeRetrievalConfig(
+        runtime_query_by_round={"1": "early binding decision"},
+        runtime_anchors_by_round={"1": ["binding first"]},
+        runtime_knowledge_types_by_round={"1": ["Early_Stage_Card"]},
+        structured_query_by_round={"1": "early binding claim"},
+        structured_top_k=1,
+    )
+
+    assert retrieval.runtime_query_by_round == {1: "early binding decision"}
+    assert retrieval.runtime_anchors_by_round == {1: ("binding first",)}
+    assert retrieval.runtime_knowledge_types_by_round == {1: ("early_stage_card",)}
+    assert retrieval.structured_query_by_round == {1: "early binding claim"}
+    assert retrieval.structured_top_k == 1
+
+    try:
+        LocalKnowledgeRetrievalConfig(runtime_query_by_round={0: "invalid"})
+    except ValueError as error:
+        assert "round IDs must be positive" in str(error)
+    else:
+        raise AssertionError("non-positive round IDs must fail closed")
 
 
 def test_local_knowledge_rejects_network_roots() -> None:
@@ -264,6 +337,8 @@ def test_chunk_ids_include_full_root_and_document_identity(tmp_path: Path) -> No
         LocalKnowledgeRootConfig(
             path=root,
             root_id="TEST_CORPUS",
+            access_policy_mode="synthetic_test",
+            runtime_manifest_mode="legacy_compatible",
             include=("**/*.md",),
             exclude=(),
         ),

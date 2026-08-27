@@ -343,7 +343,7 @@ def test_unified_qwen_catalog_resolves_llm_embedding_and_reranker_items() -> Non
     reranker = experiment.knowledge.local_knowledge.retrieval.reranker_api_config
 
     assert experiment.llm.provider == "deepseek"
-    assert experiment.llm.model == "deepseek-v4-flash"
+    assert experiment.llm.model == "deepseek-v4-pro"
     assert experiment.llm.api_key == "env:DEEPSEEK_API_KEY"
     assert experiment.llm.base_url == "https://api.deepseek.com"
     assert embedding is not None and embedding.api_key == "env:DASHSCOPE_API_KEY"
@@ -352,6 +352,8 @@ def test_unified_qwen_catalog_resolves_llm_embedding_and_reranker_items() -> Non
     assert experiment.critic.provider == "deepseek"
     assert experiment.critic.model == "deepseek-v4-flash"
     assert experiment.critic.api_key == "env:DEEPSEEK_API_KEY"
+    assert experiment.critic.policy_gate_enabled is True
+    assert "EVIDENCE_POLARITY_CONFLICT" in experiment.critic.semantic_audit_risk_codes
     assert experiment.kg_interaction.max_tool_calls >= 4
 
 
@@ -365,7 +367,7 @@ def test_qwen_demo_and_al96_configs_cover_test_and_formal_loops() -> None:
     assert demo.model.name == "onehot_heterogeneous_ensemble"
     assert demo.task.public_data_path is not None
     assert demo.llm.provider == "deepseek"
-    assert demo.llm.model == "deepseek-v4-flash"
+    assert demo.llm.model == "deepseek-v4-pro"
     assert demo.llm.api_key == "env:DEEPSEEK_API_KEY"
     assert demo.knowledge.local_knowledge.retrieval.embedding_backend == "api"
     assert demo.knowledge.local_knowledge.retrieval.reranker_backend == "api"

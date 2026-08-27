@@ -488,8 +488,8 @@ def test_scientist_prompt_emits_one_full_rag_claim_card_and_relation_only_packs(
     assert payload["context"]["activation_state"]["executed_kg_tools"] == []
     assert payload["context"]["knowledge_graph"]["top_knowledge_evidence"] == []
     assert payload["evidence"] == []
-    assert len(payload["rag_claims"]) == 1
-    claim = payload["rag_claims"][0]
+    assert len(payload["rag_records"]) == 1
+    claim = payload["rag_records"][0]
     assert claim["claim_id"] == "claim:epistasis"
     assert claim["evidence_ids"] == ["E01"]
     assert payload["context"]["evidence_map"] == {"E01": "doi:10.1000/example"}
@@ -526,7 +526,7 @@ def test_scientist_prompt_emits_one_full_rag_claim_card_and_relation_only_packs(
             "relation_ids": ["rel:1"],
         }
     ]
-    visible_claim_ids = {item["claim_id"] for item in payload["rag_claims"]}
+    visible_claim_ids = {item["claim_id"] for item in payload["rag_records"]}
     assert {
         relation["claim_id"] for pack in packs for relation in pack["claim_relations"]
     } <= visible_claim_ids
@@ -784,7 +784,7 @@ def test_scientist_prompt_bounds_pack_fields_and_deduplicates_top_level_evidence
 
     payload = json.loads(messages[1]["content"])
     pack = payload["context"]["kg_interaction"]["packs"][0]
-    assert payload["rag_claims"] == []
+    assert payload["rag_records"] == []
     assert payload["evidence"][0]["evidence_id"] == "E01"
     assert pack["evidence"] == []
     assert all(item.get("claim_id") != "claim:duplicate" for item in pack["facts"])

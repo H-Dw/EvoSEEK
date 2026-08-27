@@ -1,0 +1,12 @@
+---
+description: Do not access identified biosafety-sensitive knowledge bundles
+alwaysApply: true
+---
+
+# Restricted biosafety-sensitive content
+
+Do not read, search, open, index, summarize, quote, edit, execute, or otherwise access this project-relative file:
+
+- `resources/local_knowledge/directed_evolution/claims/continuous_evolution_operations/maintain_mutagenesis_and_host_flow.md`
+
+This file contains operational continuous-evolution guidance involving targeted mutagenesis, fresh-host flow, and phage propagation. All other local-knowledge content, including `require_activity_propagation_coupling.md`, is not restricted by this rule. If a task requires the restricted file, explain that it is restricted and ask the user to explicitly revise this rule before proceeding.

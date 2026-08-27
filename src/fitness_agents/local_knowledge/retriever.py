@@ -6,7 +6,13 @@ from collections import defaultdict
 
 from fitness_agents.config import LocalKnowledgeConfig
 
-from .contracts import KnowledgeClaim, RetrievalRequest, RetrievalResult, RetrievedChunk
+from .contracts import (
+    KnowledgeClaim,
+    KnowledgeRecord,
+    RetrievalRequest,
+    RetrievalResult,
+    RetrievedChunk,
+)
 from .index import SQLiteLocalKnowledgeIndex
 from .leakage import TargetLeakageGuard
 from .overlay import SQLiteRetrievalOverlay
@@ -78,6 +84,16 @@ class LocalHybridRetriever:
                 str(item).strip().casefold() for item in raw_knowledge_types if str(item).strip()
             )
         )
+        facet_filters: dict[str, tuple[str, ...]] = {}
+        for name, raw_values in request.filters.items():
+            if name == "knowledge_types":
+                continue
+            values = raw_values if isinstance(raw_values, (list, tuple, set)) else (raw_values,)
+            normalized = tuple(
+                dict.fromkeys(str(item).strip() for item in values if str(item).strip())
+            )
+            if normalized:
+                facet_filters[str(name)] = normalized
         generic_terms = (
             request.policy_context.generic_terms
             if request.policy_context is not None
@@ -86,7 +102,10 @@ class LocalHybridRetriever:
         decision = self.guard.sanitize_query(request.query, generic_terms=generic_terms)
         policy_decision = {
             **decision.public_dict(),
-            "filters": {"knowledge_types": list(knowledge_types)},
+            "filters": {
+                "knowledge_types": list(knowledge_types),
+                **{key: list(value) for key, value in facet_filters.items()},
+            },
             "corpus_manifest_hash": self.index.manifest_hash,
         }
         if not decision.allowed:
@@ -114,6 +133,7 @@ class LocalHybridRetriever:
                         decision.sanitized_query,
                         limit=self.config.retrieval.lexical_candidates,
                         knowledge_types=knowledge_types,
+                        facets=facet_filters,
                     ),
                 )
             )
@@ -128,6 +148,7 @@ class LocalHybridRetriever:
                         limit=self.config.retrieval.dense_candidates,
                         embedding_backend=self.embedding_backend,
                         knowledge_types=knowledge_types,
+                        facets=facet_filters,
                         minimum_similarity=self.config.retrieval.minimum_dense_similarity,
                         max_exact_chunks=self.config.retrieval.max_exact_dense_chunks,
                     ),
@@ -228,6 +249,7 @@ class LocalHybridRetriever:
                         "query_id": request.query_id,
                         "instruction_like_markers": instruction_markers,
                     },
+                    facets=record.get("facets", {}),
                 )
             )
             used_tokens += record["token_count"]
@@ -237,10 +259,16 @@ class LocalHybridRetriever:
         if not selected:
             warnings.append("no_answer_above_retrieval_threshold")
 
-        claims = tuple(
+        claim_rows = (
             self._claim_from_chunk(item)
             for item in selected[: self.config.kg_update.max_claims_per_round]
         )
+        claims = tuple(item for item in claim_rows if item is not None)
+        record_rows = (
+            self._record_from_chunk(item)
+            for item in selected[: self.config.kg_update.max_claims_per_round]
+        )
+        records = tuple(item for item in record_rows if item is not None)
         result = RetrievalResult(
             query_id=request.query_id,
             round_id=request.round_id,
@@ -251,12 +279,13 @@ class LocalHybridRetriever:
             claims=claims,
             warnings=tuple(sorted(set(warnings))),
             index_manifest_hash=self.index.manifest_hash,
+            records=records,
         )
         self._record(request, result)
         return result
 
     @staticmethod
-    def _claim_from_chunk(item: RetrievedChunk) -> KnowledgeClaim:
+    def _claim_from_chunk(item: RetrievedChunk) -> KnowledgeClaim | None:
         metadata = item.provenance.get("metadata", {})
         if not isinstance(metadata, dict):
             metadata = {}
@@ -269,7 +298,6 @@ class LocalHybridRetriever:
             if not isinstance(applicability, dict):
                 applicability = {"scope": str(applicability)}
             declared_confidence = float(metadata.get("confidence", 0.70))
-            retrieval_confidence = float(item.scores.get("retrieval_confidence", 0.0))
             return KnowledgeClaim(
                 claim_id=str(metadata["claim_id"]),
                 statement=str(metadata["statement"]),
@@ -278,13 +306,17 @@ class LocalHybridRetriever:
                 object=str(metadata["object"]),
                 polarity=str(metadata.get("polarity", "support")),
                 applicability=applicability,
-                confidence=min(declared_confidence, retrieval_confidence),
+                # Scientific confidence belongs to the verified claim record.
+                # Retrieval relevance remains available only in RetrievedChunk.scores.
+                confidence=declared_confidence,
                 evidence_chunk_ids=(item.chunk_id,),
                 claim_kind=str(metadata.get("claim_kind", "scientific_prior")),
                 citation_support=citation_support,
-                selection_eligible=bool(metadata.get("selection_eligible", False)),
+                selection_eligible=metadata.get("selection_eligible") is True,
                 extraction_version="atomic-claim:v1",
             )
+        if metadata.get("record_type") in {"logic_unit", "knowledge_decision_card"}:
+            return None
         return KnowledgeClaim(
             claim_id=(
                 "claim:"
@@ -305,6 +337,61 @@ class LocalHybridRetriever:
             confidence=float(item.scores.get("retrieval_confidence", 0.0)),
             evidence_chunk_ids=(item.chunk_id,),
             extraction_version="retrieval-only:v2",
+        )
+
+    @staticmethod
+    def _record_from_chunk(item: RetrievedChunk) -> KnowledgeRecord | None:
+        metadata = item.provenance.get("metadata", {})
+        if not isinstance(metadata, dict):
+            return None
+        record_type = str(metadata.get("record_type", ""))
+        if record_type not in {
+            "atomic_claim",
+            "logic_unit",
+            "knowledge_decision_card",
+        }:
+            return None
+        record_id = str(
+            metadata.get("record_id")
+            or metadata.get("claim_id")
+            or metadata.get("logic_unit_id")
+            or metadata.get("decision_card_id")
+            or ""
+        )
+        retrieval_text = str(
+            metadata.get("retrieval_text")
+            or metadata.get("statement")
+            or item.text
+        )
+        scientific_quality = metadata.get("scientific_quality", {})
+        task_applicability = metadata.get("task_applicability", {})
+        boundary_conditions = metadata.get("boundary_conditions", ())
+        counterclaims = metadata.get("counterclaims", ())
+        abstain_if = metadata.get("abstain_if", ())
+        payload = metadata.get("record_payload", {})
+        return KnowledgeRecord(
+            record_id=record_id,
+            record_type=record_type,
+            retrieval_text=retrieval_text,
+            knowledge_type=item.knowledge_type,
+            permission=str(metadata.get("permission", "explanation_only")),
+            scientific_quality=(
+                dict(scientific_quality) if isinstance(scientific_quality, dict) else {}
+            ),
+            task_applicability=(
+                dict(task_applicability) if isinstance(task_applicability, dict) else {}
+            ),
+            boundary_conditions=tuple(str(value) for value in boundary_conditions),
+            counterclaims=tuple(str(value) for value in counterclaims),
+            abstain_if=tuple(str(value) for value in abstain_if),
+            facets=item.facets,
+            evidence_chunk_ids=(item.chunk_id,),
+            canonical_record_hash=(
+                str(metadata.get("source_record_hash"))
+                if metadata.get("source_record_hash")
+                else None
+            ),
+            payload=dict(payload) if isinstance(payload, dict) else {},
         )
 
     def _record(self, request: RetrievalRequest, result: RetrievalResult) -> None:

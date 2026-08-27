@@ -35,6 +35,7 @@ class AgentQuotaSelection:
     plugin: str
     selected_ids: tuple[str, ...]
     quotas: dict[str, int]
+    quota_adjustments: dict[str, str]
     selected_by_arm: dict[str, tuple[str, ...]]
     matched_control_pairs: dict[str, str]
     shortfalls: dict[str, int]
@@ -191,6 +192,12 @@ class AgentQuotaBatchAcquisition:
             for variant_id, score in score_by_id.items()
             if score.hypothesis_score >= self.config.strong_hypothesis_threshold
         }
+        quota_adjustments: dict[str, str] = {}
+        if not strong and quotas["matched_control"]:
+            quotas["matched_control"] = 0
+            quota_adjustments["matched_control"] = (
+                "disabled_without_strong_hypothesis_target"
+            )
         controls = {
             variant_id
             for variant_id, score in score_by_id.items()
@@ -358,6 +365,7 @@ class AgentQuotaBatchAcquisition:
             plugin=self.name,
             selected_ids=tuple(selected),
             quotas=quotas,
+            quota_adjustments=quota_adjustments,
             selected_by_arm={arm: tuple(selected_by_arm[arm]) for arm in ARMS},
             matched_control_pairs=matched_control_pairs,
             shortfalls=shortfalls,

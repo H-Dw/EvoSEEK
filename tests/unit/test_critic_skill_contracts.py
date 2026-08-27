@@ -261,6 +261,55 @@ def test_batch_runtime_injects_deterministic_envelope_fields() -> None:
     assert decision.decision_id == "D02-01"
 
 
+def test_batch_runtime_accepts_omitted_optional_suggested_action() -> None:
+    draft = DraftBatch(
+        draft_batch_id="draft:optional-action",
+        parent_draft_batch_id=None,
+        round_id=3,
+        review_attempt=0,
+        candidate_ids=("v1",),
+        hypothesis_ids=("hyp:1",),
+        prediction_snapshot_id="prediction:1",
+        evidence_snapshot_id="evidence:1",
+        acquisition_snapshot_id="acquisition:1",
+        design_rationales=(),
+        falsification_spec=None,
+    )
+    payload = {
+        "verdict": "APPROVE",
+        "rating": {
+            "score": 4,
+            "rationale": "The warning is non-blocking.",
+            "suggestions": [],
+            "text_errors": [],
+        },
+        "falsification_readiness": "ready",
+        "candidate_issues": [
+            {
+                "candidate_id": "v1",
+                "scope": "evidence",
+                "severity": "warning",
+                "code": "EVIDENCE_POLARITY_CONFLICT",
+                "claim": "Visible evidence has mixed polarity.",
+                "evidence_ids": [],
+                "conflict_ids": [],
+            }
+        ],
+        "batch_level_risks": [],
+        "evidence_conflicts": [],
+        "unsupported_claims": [],
+        "required_changes": [],
+        "cited_evidence_ids": [],
+        "confidence": 0.8,
+        "explanation": "Approved with a bounded warning.",
+        "sample_reviews": [],
+    }
+
+    decision = _decision_from_payload(payload, draft=draft)
+
+    assert decision.candidate_issues[0].suggested_action is None
+
+
 def test_batch_nested_models_forbid_extra_fields_and_unknown_codes() -> None:
     payload = {
         "verdict": "REVISE",

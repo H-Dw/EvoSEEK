@@ -3,6 +3,7 @@ import pytest
 from fitness_agents.agents.critic import load_critic_profile
 from fitness_agents.agents.profile_loader import load_role_profile
 from fitness_agents.config import (
+    CriticConfig,
     HierarchicalHypothesisConfig,
     LLMConfig,
     ValidationConfig,
@@ -87,8 +88,12 @@ def test_all_hierarchical_role_profiles_are_versioned_and_loadable() -> None:
 
 
 def test_formal_retry_caps_reject_unbounded_configuration() -> None:
-    with pytest.raises(ValueError, match="between 0 and 2"):
-        LLMConfig(max_transport_retries=3)
+    assert LLMConfig(max_transport_retries=15).max_transport_retries == 15
+    with pytest.raises(ValueError, match="between 0 and 15"):
+        LLMConfig(max_transport_retries=16)
+    assert CriticConfig(max_model_retries=15).max_model_retries == 15
+    with pytest.raises(ValueError, match="between 0 and 15"):
+        CriticConfig(max_model_retries=16)
     with pytest.raises(ValueError, match="between 0 and 2"):
         HierarchicalHypothesisConfig(max_child_revision_attempts=3)
     with pytest.raises(ValueError, match="input budgets"):

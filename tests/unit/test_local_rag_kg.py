@@ -42,7 +42,14 @@ Hydrophobic substitutions can improve packing, while steric clashes may reduce s
     )
     config = LocalKnowledgeConfig(
         enabled=True,
-        roots=(LocalKnowledgeRootConfig(path=root, include=("**/*.md",)),),
+        roots=(
+            LocalKnowledgeRootConfig(
+                path=root,
+                access_policy_mode="synthetic_test",
+                runtime_manifest_mode="legacy_compatible",
+                include=("**/*.md",),
+            ),
+        ),
         ingestion=LocalKnowledgeIngestionConfig(chunk_tokens=64, chunk_overlap=8),
         retrieval=LocalKnowledgeRetrievalConfig(mode="lexical", top_k=3),
         leakage_guard=LeakageGuardConfig(enabled=False),

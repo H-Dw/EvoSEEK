@@ -10,7 +10,11 @@ from fitness_agents.local_knowledge import LocalKnowledgeBase
 def test_binding_corpus_is_an_independent_typed_retrieval_root(tmp_path) -> None:
     experiment = load_experiment_config("configs/experiments/knowledge_agent_rag.yaml")
     binding_roots = tuple(
-        root
+        replace(
+            root,
+            access_policy_mode="synthetic_test",
+            runtime_manifest_mode="legacy_compatible",
+        )
         for root in experiment.knowledge.local_knowledge.roots
         if Path(root.path).as_posix().endswith("resources/local_knowledge/binding")
     )

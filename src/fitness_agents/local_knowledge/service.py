@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
@@ -33,6 +34,13 @@ class LocalKnowledgeBase:
     def _chunk_source_id(document_id: str, chunk_id: str) -> str:
         del document_id
         return f"source:local_rag:{chunk_id}"
+
+    @staticmethod
+    def _retrieval_evidence_id(result: RetrievalResult, chunk_id: str) -> str:
+        digest = hashlib.sha256(
+            f"{result.query_id}|{chunk_id}".encode()
+        ).hexdigest()[:16]
+        return f"E{result.round_id}:local:{digest}"
 
     def __init__(
         self,
@@ -81,6 +89,8 @@ class LocalKnowledgeBase:
             corpus_path,
             read_only=config.corpus_mode == "read_only_prebuilt",
         )
+        if config.corpus_mode == "read_only_prebuilt":
+            self.index.assert_runtime_binding(config)
         self.overlay = SQLiteRetrievalOverlay(selected_overlay_path)
         self.retriever = LocalHybridRetriever(
             self.index,
@@ -92,7 +102,15 @@ class LocalKnowledgeBase:
         )
         self.last_build_report = None
         self._query_id_map: dict[
-            tuple[int, str, str, tuple[str, ...], tuple[str, ...]], str
+            tuple[
+                int,
+                str,
+                str,
+                tuple[str, ...],
+                tuple[str, ...],
+                tuple[tuple[str, tuple[str, ...]], ...],
+            ],
+            str,
         ] = {}
 
     def refresh(self):
@@ -122,6 +140,7 @@ class LocalKnowledgeBase:
         top_k: int | None = None,
         token_budget: int | None = None,
         knowledge_types: Sequence[str] = (),
+        facets: dict[str, Sequence[str]] | None = None,
     ) -> RetrievalResult:
         anchor_tuple = tuple(str(item) for item in anchors)
         knowledge_type_tuple = tuple(
@@ -129,7 +148,23 @@ class LocalKnowledgeBase:
                 str(item).strip().casefold() for item in knowledge_types if str(item).strip()
             )
         )
-        query_key = (round_id, intent, query, anchor_tuple, knowledge_type_tuple)
+        facet_tuple = tuple(
+            sorted(
+                (
+                    str(name),
+                    tuple(dict.fromkeys(str(item) for item in values)),
+                )
+                for name, values in (facets or {}).items()
+            )
+        )
+        query_key = (
+            round_id,
+            intent,
+            query,
+            anchor_tuple,
+            knowledge_type_tuple,
+            facet_tuple,
+        )
         if query_key not in self._query_id_map:
             self._query_id_map[query_key] = f"LQ{len(self._query_id_map) + 1:04d}"
         query_id = self._query_id_map[query_key]
@@ -148,7 +183,10 @@ class LocalKnowledgeBase:
                 anchors=anchor_tuple,
                 top_k=top_k or self.config.retrieval.top_k,
                 token_budget=token_budget or self.config.retrieval.token_budget,
-                filters={"knowledge_types": knowledge_type_tuple},
+                filters={
+                    "knowledge_types": knowledge_type_tuple,
+                    **{name: values for name, values in facet_tuple},
+                },
                 policy_context=policy_context,
             )
         )
@@ -193,24 +231,49 @@ class LocalKnowledgeBase:
         claims_by_chunk = {
             chunk_id: claim for claim in result.claims for chunk_id in claim.evidence_chunk_ids
         }
+        records_by_chunk = {
+            chunk_id: record
+            for record in result.records
+            for chunk_id in record.evidence_chunk_ids
+        }
         output = []
-        for index, chunk in enumerate(result.chunks, start=1):
+        for chunk in result.chunks:
             claim = claims_by_chunk.get(chunk.chunk_id)
+            record = records_by_chunk.get(chunk.chunk_id)
             confidence = float(chunk.scores.get("retrieval_confidence", 0.0))
             output.append(
                 Evidence(
-                    evidence_id=f"E{result.round_id}:local:{index:02d}",
+                    evidence_id=self._retrieval_evidence_id(result, chunk.chunk_id),
                     variant_id=f"context:{self.protein_id}",
                     channel="local_rag",
-                    statement=chunk.text,
+                    statement=(record.retrieval_text if record is not None else chunk.text),
                     score=0.0,
                     source_id=self._chunk_source_id(chunk.document_id, chunk.chunk_id),
                     confidence=confidence,
                     round_id=result.round_id,
-                    evidence_type="retrieved_document",
+                    evidence_type=(
+                        f"retrieved_{record.record_type}"
+                        if record is not None
+                        else "retrieved_document"
+                    ),
                     raw_features={
                         "retrieval_scores": chunk.scores,
                         "knowledge_type": chunk.knowledge_type,
+                        "record_type": record.record_type if record is not None else None,
+                        "record_id": record.record_id if record is not None else None,
+                        "permission": record.permission if record is not None else None,
+                        "scientific_quality": (
+                            record.scientific_quality if record is not None else {}
+                        ),
+                        "task_applicability": (
+                            record.task_applicability if record is not None else {}
+                        ),
+                        "boundary_conditions": (
+                            record.boundary_conditions if record is not None else ()
+                        ),
+                        "counterclaims": record.counterclaims if record is not None else (),
+                        "abstain_if": record.abstain_if if record is not None else (),
+                        "facets": record.facets if record is not None else chunk.facets,
                     },
                     quality_status="unverified",
                     applicability="generic_or_other_protein_context",
@@ -218,6 +281,12 @@ class LocalKnowledgeBase:
                     warnings=(
                         "retrieved_context_not_causal",
                         "cross_context_applicability_requires_review",
+                        *(
+                            ("external_permission_explanation_only",)
+                            if record is not None
+                            and record.permission == "explanation_only"
+                            else ()
+                        ),
                         *result.warnings,
                     ),
                     provenance={
@@ -238,7 +307,11 @@ class LocalKnowledgeBase:
                             self.config.kg_update.contributes_to_selection
                         ),
                     },
-                    claim_id=claim.claim_id if claim else None,
+                    claim_id=(
+                        record.record_id
+                        if record is not None
+                        else claim.claim_id if claim else None
+                    ),
                     polarity=claim.polarity if claim else "neutral",
                     source_group=chunk.source_group,
                     artifact_uri=chunk.artifact_uri,

@@ -1,0 +1,71 @@
+physchem: true
+conservation: true
+structure: true
+kg: true
+soft_weight: 0.20
+legacy_mode: false
+legacy_contributes_to_selection: false
+fusion_mode: independent_features
+parameter_set_id: gb1-knowledge:agentic-candidate-v1
+
+local_knowledge:
+  enabled: true
+  corpus_index_path: artifacts/local_knowledge/corpus/gb1-agentic-candidate-v1-qwen.sqlite
+  retrieval_overlay_path: artifacts/local_knowledge/overlays/gb1-agentic-candidate-v1-qwen.sqlite
+  allow_remote_context: true
+  roots:
+    - path: resources/local_knowledge/gb1_agentic_candidate_v1
+      root_id: GB1_AGENTIC_CANDIDATE_V1
+      access_policy_mode: synthetic_test
+      runtime_manifest_mode: legacy_compatible
+      include: ["records/**/*.md"]
+      exclude: ["**/~$*", "**/.git/**", "**/artifacts/**"]
+  ingestion:
+    parser: auto
+    required_language: en
+    chunk_tokens: 384
+    chunk_overlap: 32
+    max_file_mb: 5
+    follow_symlinks: false
+    extract_archives: false
+  retrieval:
+    query_mode: agentic
+    mode: hybrid
+    lexical_backend: sqlite_fts5
+    dense_enabled: true
+    embedding_backend: api
+    embedding_api_config: configs/knowledge/api/embedding.qwen-v4.yaml
+    allow_model_download: false
+    fusion: rrf
+    top_k: 2
+    lexical_candidates: 16
+    dense_candidates: 16
+    token_budget: 1600
+    max_chunks_per_document: 1
+    query_language: en
+    strict_query_language: true
+    minimum_dense_similarity: 0.20
+    require_dense_match_for_hybrid: true
+    instruction_content_policy: reject
+    dense_search_backend: numpy_exact
+    max_exact_dense_chunks: 50000
+    reranker_backend: api
+    reranker_api_config: configs/knowledge/api/reranker.qwen3.yaml
+    structured_top_k: 2
+  kg_update:
+    enabled: true
+    materialization: retrieved_only
+    source_group: agentic_research_candidate_v1
+    max_claims_per_round: 4
+    contributes_to_selection: false
+    selection_mode: context_only
+  leakage_guard:
+    enabled: true
+    mode: generalize_and_filter
+    derive_protected_terms_from_task: true
+    protected_aliases: []
+    protected_accessions: []
+    strict_aliases_required: true
+    quarantine_target_documents: true
+    block_target_entities: true
+    allow_target_identity_context: true

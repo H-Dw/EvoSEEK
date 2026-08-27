@@ -3,5 +3,11 @@ conservation: true
 structure: true
 kg: true
 mode: fitness_direct
+diversity_lambda: 0.0
 llm_provider: mock
+knowledge_enabled: false
+critic:
+  mode: rule
+  provider: mock
+  policy_gate_enabled: false
 

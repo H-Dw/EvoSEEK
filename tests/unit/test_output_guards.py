@@ -20,6 +20,7 @@ from fitness_agents.agents.remote_llm import (
     complete_json,
     create_openai_client,
 )
+from fitness_agents.agents.short_ids import UnresolvedLocalIdError
 from fitness_agents.utils.progress import bind_progress, reset_progress
 
 
@@ -75,6 +76,16 @@ def test_json_salvage_strips_trailing_commas() -> None:
 def test_json_salvage_never_closes_truncated_object() -> None:
     repaired = json_salvage('{"ok": true, "nested": {"a": 1')
     assert repaired is None
+
+
+def test_request_local_id_failure_is_a_semantic_repair() -> None:
+    failure = classify_output_failure(
+        UnresolvedLocalIdError("unknown request-local identifier"),
+        finish_reason="stop",
+        content='{"candidate_id":"S99"}',
+    )
+
+    assert failure.kind == "semantic"
 
 
 def test_complete_json_salvages_trailing_comma_without_retry() -> None:

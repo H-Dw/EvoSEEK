@@ -28,7 +28,10 @@ def test_agent_loop_plans_independent_and_joint_feature_tools_before_explanation
     )
     controller = _CapturingController()
     runner = object.__new__(CampaignRunner)
-    runner.config = SimpleNamespace(kg_interaction=runtime)
+    runner.config = SimpleNamespace(
+        kg_interaction=runtime,
+        task=SimpleNamespace(mutable_positions=(1,)),
+    )
     runner.kg_interaction = controller
     runner.run_id = "run-feature-loop"
     runner.knowledge = SimpleNamespace(local_knowledge=None)

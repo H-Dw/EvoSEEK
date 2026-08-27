@@ -1,0 +1,25 @@
+{
+  "schema_version": "gb1-directive-validation:v1",
+  "validated_at": "2026-08-23T23:03:20.378468+00:00",
+  "bundle_root": "/mnt/d/fitness-agents/resources/local_knowledge/gb1_directive_v2",
+  "status": "passed",
+  "research_status": "research_candidate",
+  "human_reviewed": false,
+  "selection_eligible": false,
+  "permission": "explanation_only",
+  "cards": [
+    {
+      "path": "cards/early_binding_first.md",
+      "sha256": "dc618cfdec7ebf0512b2fd24cc0f11a4acf656aac9ac17af10b568feed8b25c1"
+    },
+    {
+      "path": "cards/late_evidence_weighted_exploit.md",
+      "sha256": "765306adb6cb58b2887f04894a681de2bfe58f28bfb84c5ee77486b976bb4aa3"
+    },
+    {
+      "path": "cards/midround_measured_update.md",
+      "sha256": "e222c2738c2ab470d0c7ba0d2d674006ce75ab472aaf94a59d70278fe826ff0b"
+    }
+  ],
+  "errors": []
+}

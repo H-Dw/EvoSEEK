@@ -1,23 +1,25 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 
 import numpy as np
 
 from fitness_agents.contracts.schemas import CampaignState, Evidence, Hypothesis, Variant
+
+from .hypothesis_scoring import hypothesis_edit_match_count
 
 
 def _hypothesis_matches(
     variant: Variant,
     hypothesis: Hypothesis | None,
     position_to_index: dict[int, int],
+    wild_type_by_position: Mapping[int, str] | None = None,
 ) -> int:
-    if hypothesis is None:
-        return 0
-    return sum(
-        variant.variant[position_to_index[position]] in residues
-        for position, residues in hypothesis.preferred_residues.items()
-        if position in position_to_index
+    return hypothesis_edit_match_count(
+        variant,
+        hypothesis,
+        position_to_index,
+        wild_type_by_position,
     )
 
 
@@ -51,9 +53,11 @@ class EnumeratingCandidateGenerator:
         position_to_index: dict[int, int] | None = None,
         *,
         sampling_namespace: str = "closed_pool",
+        wild_type_by_position: Mapping[int, str] | None = None,
     ) -> None:
         self.position_to_index = dict(position_to_index or {})
         self.sampling_namespace = sampling_namespace
+        self.wild_type_by_position = dict(wild_type_by_position or {})
 
     def generate(
         self,
@@ -86,9 +90,11 @@ class HypothesisCandidateGenerator:
         position_to_index: dict[int, int] | None = None,
         *,
         sampling_namespace: str = "closed_pool",
+        wild_type_by_position: Mapping[int, str] | None = None,
     ) -> None:
         self.position_to_index = dict(position_to_index or {})
         self.sampling_namespace = sampling_namespace
+        self.wild_type_by_position = dict(wild_type_by_position or {})
 
     def generate(
         self,
@@ -104,7 +110,12 @@ class HypothesisCandidateGenerator:
         ranked = sorted(
             candidates,
             key=lambda item: (
-                _hypothesis_matches(item, hypothesis, self.position_to_index),
+                _hypothesis_matches(
+                    item,
+                    hypothesis,
+                    self.position_to_index,
+                    self.wild_type_by_position,
+                ),
                 proposal_order[item.variant_id],
             ),
             reverse=True,
@@ -122,9 +133,11 @@ class KnowledgeCandidateGenerator:
         position_to_index: dict[int, int] | None = None,
         *,
         sampling_namespace: str = "closed_pool",
+        wild_type_by_position: Mapping[int, str] | None = None,
     ) -> None:
         self.position_to_index = dict(position_to_index or {})
         self.sampling_namespace = sampling_namespace
+        self.wild_type_by_position = dict(wild_type_by_position or {})
 
     def generate(
         self,
@@ -135,7 +148,14 @@ class KnowledgeCandidateGenerator:
         limit: int,
     ) -> list[Variant]:
         if evidence:
-            evidenced = [item for item in candidates if item.variant_id in evidence]
+            evidenced = [
+                item
+                for item in candidates
+                if any(
+                    entry.contributes_to_selection
+                    for entry in evidence.get(item.variant_id, ())
+                )
+            ]
             if limit > 0 and len(evidenced) >= limit:
                 candidates = evidenced
 
@@ -156,7 +176,12 @@ class KnowledgeCandidateGenerator:
         ranked = sorted(
             candidates,
             key=lambda item: (
-                _hypothesis_matches(item, hypothesis, self.position_to_index),
+                _hypothesis_matches(
+                    item,
+                    hypothesis,
+                    self.position_to_index,
+                    self.wild_type_by_position,
+                ),
                 evidence_score(item),
                 proposal_order[item.variant_id],
             ),
@@ -186,11 +211,13 @@ def create_candidate_generator(
     *,
     position_to_index: dict[int, int] | None = None,
     sampling_namespace: str = "closed_pool",
+    wild_type_by_position: Mapping[int, str] | None = None,
 ):
     try:
         return CANDIDATE_GENERATORS[mode](
             position_to_index,
             sampling_namespace=sampling_namespace,
+            wild_type_by_position=wild_type_by_position,
         )
     except KeyError as error:
         raise ValueError(

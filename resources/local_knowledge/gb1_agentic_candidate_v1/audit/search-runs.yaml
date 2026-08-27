@@ -1,0 +1,6 @@
+schema_version: inherited-search-runs:v1
+candidate_id: GB1-AGENTIC-CANDIDATE-V1
+new_external_search_performed: false
+metadata_discovery: crossref_or_publisher_primary_sources_only
+inheritance_source: ../gb1_directive_v1/audit/source-ledger.yaml
+reason: Runtime-structure candidate reprojects previously audited nonviral evidence; it makes no new source claim.

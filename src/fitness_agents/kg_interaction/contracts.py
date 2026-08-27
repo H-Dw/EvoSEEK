@@ -51,6 +51,7 @@ class KGQueryContext:
     run_id: str
     round_id: int
     allowed_variant_ids: frozenset[str] | None = None
+    allowed_positions: frozenset[int] | None = None
     max_rows: int = 12
     metadata: dict[str, Any] = field(default_factory=dict)
 

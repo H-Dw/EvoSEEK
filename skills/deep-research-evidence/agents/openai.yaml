@@ -1,0 +1,6 @@
+interface:
+  display_name: "Deep Research Evidence"
+  short_description: "Build audited nonviral evidence products for RAG and KG"
+  default_prompt: "Use $deep-research-evidence to research a nonviral protein question and produce a validated evidence product."
+policy:
+  allow_implicit_invocation: true

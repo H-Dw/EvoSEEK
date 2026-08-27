@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from fitness_agents.contracts.researcher import FEATURE_FOCUS_BY_CHANNEL
 from fitness_agents.plugin_registry import PluginRegistry
 
 from .ablation import InteractionAblationConfig
@@ -106,6 +107,35 @@ class KGInteractionController:
             raise ValueError(
                 f"Step {step.step_id!r} requests more than {context.max_rows} variants"
             )
+        if "positions" in step.arguments:
+            positions = tuple(int(item) for item in step.arguments["positions"])
+            if not positions or len(positions) != len(set(positions)):
+                raise ValueError(
+                    f"Step {step.step_id!r} requires unique, non-empty positions"
+                )
+            if context.allowed_positions is not None:
+                outside = set(positions).difference(context.allowed_positions)
+                if outside:
+                    raise ValueError(
+                        f"Step {step.step_id!r} requests out-of-scope positions: "
+                        f"{sorted(outside)}"
+                    )
+        if "projection" in step.arguments:
+            raw_projection = step.arguments["projection"]
+            if isinstance(raw_projection, str):
+                raise ValueError("Feature projection must be a list, not a string")
+            projection = tuple(str(item) for item in raw_projection)
+            channel = {
+                "query_physchem_delta": "physchem",
+                "query_evolutionary_profile": "conservation",
+                "query_structure_environment": "structure",
+            }.get(step.operator)
+            if channel is None or not projection or not set(projection).issubset(
+                FEATURE_FOCUS_BY_CHANNEL[channel]
+            ):
+                raise ValueError(
+                    f"Step {step.step_id!r} contains an invalid feature projection"
+                )
 
     @staticmethod
     def _validate_pack(pack: EvidencePack, context: KGQueryContext) -> None:

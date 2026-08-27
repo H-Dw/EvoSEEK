@@ -26,6 +26,7 @@ from .operators import (
     QueryOperator,
     StructuredClaimQueryOperator,
 )
+from .researcher import ResearcherPlanningController, stable_payload_hash
 from .tool_runtime import RoundScopedToolExecutor
 from .truncation_audit import (
     KeywordTruncationEntry,
@@ -68,9 +69,11 @@ __all__ = [
     "ProposalGateway",
     "QueryIntent",
     "QueryOperator",
+    "ResearcherPlanningController",
     "RoundScopedToolExecutor",
     "StructuredClaimQueryOperator",
     "TrustBoundaryValidator",
     "interaction_item_presence",
     "runtime_truncation_audit_payload",
+    "stable_payload_hash",
 ]

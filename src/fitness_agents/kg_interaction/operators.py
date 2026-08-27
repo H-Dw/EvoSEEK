@@ -209,11 +209,15 @@ class FeatureEvidenceOperator:
 
     def execute(self, step: KGQueryStep, context: KGQueryContext) -> EvidencePack:
         variant_id = str(step.arguments["variant_id"])
-        result = self.tool.feature_evidence(
-            variant_id,
-            channel=self.channel,
-            round_id=context.round_id,
-        )
+        projection = tuple(str(item) for item in step.arguments.get("projection", ()))
+        positions = tuple(int(item) for item in step.arguments.get("positions", ()))
+        arguments: dict[str, Any] = {
+            "channel": self.channel,
+            "round_id": context.round_id,
+        }
+        if projection or positions:
+            arguments.update(projection=projection, positions=positions)
+        result = self.tool.feature_evidence(variant_id, **arguments)
         evidence = _dict_tuple(result.get("evidence"))[: context.max_rows]
         return EvidencePack(
             query_id=str(result["query_id"]),
@@ -231,7 +235,12 @@ class FeatureEvidenceOperator:
             provenance=tuple(
                 dict(item.get("provenance", {})) for item in evidence
             )[: context.max_rows],
-            metadata={"variant_id": variant_id, "channel": self.channel},
+            metadata={
+                "variant_id": variant_id,
+                "channel": self.channel,
+                "projection": list(projection),
+                "positions": list(positions),
+            },
         )
 
 
@@ -398,6 +407,15 @@ class LocalKnowledgeQueryOperator:
         if isinstance(raw_knowledge_types, str):
             raw_knowledge_types = (raw_knowledge_types,)
         knowledge_types = tuple(str(item) for item in raw_knowledge_types)
+        raw_facets = step.arguments.get("facets", {})
+        if not isinstance(raw_facets, Mapping):
+            raise TypeError("query_local_knowledge facets must be a mapping")
+        facets = {
+            str(name): tuple(
+                str(item) for item in (values if isinstance(values, (list, tuple)) else (values,))
+            )
+            for name, values in raw_facets.items()
+        }
         requested = int(step.arguments.get("limit", context.max_rows))
         result, evidence = self.knowledge_engine.retrieve_local_knowledge(
             query=query,
@@ -406,21 +424,41 @@ class LocalKnowledgeQueryOperator:
             anchors=anchors,
             top_k=min(requested, context.max_rows),
             knowledge_types=knowledge_types,
+            facets=facets,
             stage=True,
         )
         evidence_payload = tuple(asdict(item) for item in evidence[: context.max_rows])
         facts = tuple(
             {
-                "fact_type": "local_knowledge_claim",
-                "claim_id": item.claim_id,
-                "statement": item.statement,
-                "polarity": item.polarity,
-                "applicability": item.applicability,
-                "confidence": item.confidence,
+                "fact_type": "local_knowledge_record",
+                "record_id": item.record_id,
+                "record_type": item.record_type,
+                "retrieval_text": item.retrieval_text,
+                "knowledge_type": item.knowledge_type,
+                "permission": item.permission,
+                "scientific_quality": item.scientific_quality,
+                "task_applicability": item.task_applicability,
+                "boundary_conditions": item.boundary_conditions,
+                "counterclaims": item.counterclaims,
+                "abstain_if": item.abstain_if,
+                "facets": item.facets,
                 "evidence_chunk_ids": item.evidence_chunk_ids,
             }
-            for item in result.claims[: context.max_rows]
+            for item in result.records[: context.max_rows]
         )
+        if not facts:
+            facts = tuple(
+                {
+                    "fact_type": "local_knowledge_claim",
+                    "claim_id": item.claim_id,
+                    "statement": item.statement,
+                    "polarity": item.polarity,
+                    "applicability": item.applicability,
+                    "confidence": item.confidence,
+                    "evidence_chunk_ids": item.evidence_chunk_ids,
+                }
+                for item in result.claims[: context.max_rows]
+            )
         return EvidencePack(
             query_id=result.query_id,
             operator=self.name,
@@ -441,6 +479,8 @@ class LocalKnowledgeQueryOperator:
                 "policy_decision": result.policy_decision,
                 "index_manifest_hash": result.index_manifest_hash,
                 "knowledge_types": list(knowledge_types),
+                "facets": {key: list(value) for key, value in facets.items()},
+                "record_ids": [item.record_id for item in result.records],
                 "staged_for_round_commit": True,
             },
         )

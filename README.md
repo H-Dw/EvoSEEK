@@ -292,14 +292,91 @@ python -m pytest -q \
 
 The diagnostics output `diagnostic.json`, `summary.md`, a real-vector SQLite, and a structured-KG SQLite, and compare gold-query hit rates for lexical, dense, and hybrid retrieval. `--strict` also checks chunk token budget, model truncation, embedding coverage, no-answer threshold, and whether vector backfill completed when enabling dense on top of an existing lexical index. The query and target databases are uniformly English; the model's actual tokenizer controls the chunk cap, and silent truncation is forbidden.
 
-When adding external knowledge, use the project skill and run bundle validation:
+External knowledge now enters through an evidence-product release, not through a
+prose-summary ingest. Start with the structured Deep Research skill, pin the scope
+policy, and plan bounded routes:
+
+The v2 canonical graph retains two audit records between search and publication:
+`ScopeAssertion` and `AllowedSearchHit`. Policy, scientific review, and release
+approval receipts are HMAC-attested against explicit versioned trust keys; there is
+no default signing key. Configure the task-specific environment before `plan`,
+`search`, `validate`, `approve`, `manifest`, or `export-legacy`:
+
+```powershell
+$env:FITNESS_DEEP_RESEARCH_POLICY_KEY_ID = "external-policy:v1"
+$env:FITNESS_DEEP_RESEARCH_POLICY_KEY_HEX = "<at-least-64-hex-characters>"
+$env:FITNESS_DEEP_RESEARCH_REVIEW_KEYRING_JSON = '{"reviewer-id":{"key_id":"evidence-reviewer:v1","key_hex":"<at-least-64-hex-characters>"}}'
+$env:FITNESS_DEEP_RESEARCH_RELEASE_KEYRING_JSON = '{"release-reviewer-id":{"key_id":"release-reviewer:v1","key_hex":"<at-least-64-hex-characters>"}}'
+```
+
+Keep real key material outside the repository and rotate it by changing the
+versioned key ID. HMAC provides shared-key authentication, not public-key
+non-repudiation.
 
 ```bash
-python \
-  skills/ingest-scientific-knowledge/scripts/validate_knowledge_bundle.py \
-  resources/local_knowledge/directed_evolution \
+python skills/deep-research-evidence/scripts/run_deep_research.py policy
+python skills/deep-research-evidence/scripts/run_deep_research.py init \
+  --output artifacts/deep-research/example/brief.json \
+  --brief-id brief:example \
+  --question "How does sequence context affect nonviral enzyme stability?" \
+  --decision-use mechanism_explanation \
+  --leaf-question "When does sequence context change measured enzyme stability?" \
+  --counterevidence-question "When does sequence context fail to change measured enzyme stability?"
+python skills/deep-research-evidence/scripts/run_deep_research.py plan \
+  artifacts/deep-research/example/brief.json \
+  --output artifacts/deep-research/example/search-plan.json
+```
+
+After assembling and validating the evidence product, bind a human review artifact
+before creating a released manifest:
+
+```bash
+python skills/deep-research-evidence/scripts/run_deep_research.py approve \
+  artifacts/deep-research/example/evidence-product.json \
+  --output artifacts/deep-research/example/approved-evidence-product.json \
+  --approval-id approval:example \
+  --reviewer-id reviewer:example \
+  --method-version human-release-review:v1 \
+  --approval-artifact artifacts/deep-research/example/human-review.md \
+  --approval-artifact-id human-review:example \
+  --release-version 1.0.0
+python skills/deep-research-evidence/scripts/run_deep_research.py manifest \
+  artifacts/deep-research/example/approved-evidence-product.json \
+  --output artifacts/deep-research/example/released-evidence-product.json \
+  --release-version 1.0.0 --released
+```
+
+Metadata discovery is fail closed: unknown or mixed source scope is quarantined, and
+full text requires an independently reviewed nonviral scope assertion plus an
+operation-bound permit. Policy receipts bind the exact query or artifact. Every
+Publication must use an accepted canonical SearchRun hit; additional acquisitions
+may retain accepted or duplicate observations. After SourceSpan, EvidenceGroup,
+AtomicClaim, LogicUnit, DecisionCard, closure-bound review receipts, a bundle-bound
+human release approval, and a released manifest validate, export a fresh
+legacy runtime view and validate only that manifest-driven export:
+
+```bash
+python skills/deep-research-evidence/scripts/run_deep_research.py export-legacy \
+  artifacts/deep-research/example/released-evidence-product.json \
+  --output-root artifacts/deep-research/example/runtime
+python skills/ingest-scientific-knowledge/scripts/validate_knowledge_bundle.py \
+  artifacts/deep-research/example/runtime \
   --embedding-model models/embeddings/bge-small-en-v1.5
 ```
+
+The new validator never recursively scans an arbitrary knowledge root. The RAG
+indexer recognizes `runtime-files.json`, verifies its hashes and active workspace
+policy, revalidates the complete signed Bundle v2 in `evidence-release.json` with the
+four trust variables above, and reads only released atomic-claim records. A detached
+manifest or missing trust material fails closed. It also rerenders the legacy claim
+and catalog projection from the signed bundle and requires an exact byte match, so
+recomputing ordinary file hashes cannot authenticate edited runtime content. Retrieval similarity remains
+separate from scientific confidence and cannot grant selection permission. Production
+knowledge configs require an exact runtime manifest and never fall back to recursive
+corpus discovery. The v1 compatibility export always keeps selection disabled.
+New local-knowledge indexes use schema v7. Schema v6 remains readable for the
+legacy projection path; older indexes are rejected and production indexes must be
+rebuilt from an exact released runtime manifest rather than migrated in place.
 
 Retrieval chunks only generate an unsorted `context:<protein>` context. If you later enable `contributes_to_selection=true`, you must also use `calibrated_candidate_projection` and a `status: validated` candidate-level calibration file; a draft example is at `configs/knowledge/local_rag_selection.example.yaml` and is rejected by default.
 

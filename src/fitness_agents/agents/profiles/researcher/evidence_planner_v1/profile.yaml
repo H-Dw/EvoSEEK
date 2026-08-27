@@ -1,0 +1,6 @@
+role: researcher
+name: evidence_planner_v1
+version: 1.3.0
+mode: two_stage
+tool_authority: none
+decision_authority: planning_only

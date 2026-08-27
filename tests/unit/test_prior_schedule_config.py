@@ -13,11 +13,17 @@ def test_prior_schedule_defaults_to_upfront():
     schedule = PriorScheduleConfig()
     assert schedule.mode == "upfront"
     assert schedule.keep_wild_type is True
+    assert schedule.no_supported_hypothesis_policy == "abort"
 
 
 def test_prior_schedule_rejects_unknown_mode():
     with pytest.raises(ValueError, match="prior_schedule.mode"):
         PriorScheduleConfig(mode="delayed")
+
+
+def test_prior_schedule_rejects_unknown_no_hypothesis_policy():
+    with pytest.raises(ValueError, match="no_supported_hypothesis_policy"):
+        PriorScheduleConfig(no_supported_hypothesis_policy="invent_direction")
 
 
 def test_mutation_order_schedule_defaults_to_unrestricted():
@@ -42,6 +48,7 @@ def test_default_experiment_config_keeps_upfront_prior_and_no_order_schedule():
     config = load_experiment_config("configs/experiments/hierarchical_scientist.deepseek.yaml")
     assert config.prior_schedule.mode == "upfront"
     assert config.prior_schedule.keep_wild_type is True
+    assert config.prior_schedule.no_supported_hypothesis_policy == "abort"
     assert config.generation.mutation_order_schedule == {}
 
 
@@ -51,5 +58,6 @@ def test_coldstart_experiment_config_parses_prior_and_order_schedule():
     )
     assert config.prior_schedule.mode == "cold_start"
     assert config.prior_schedule.keep_wild_type is True
+    assert config.prior_schedule.no_supported_hypothesis_policy == "abort"
     assert config.generation.mutation_order_schedule == {1: (1,)}
     assert config.task.expected_protocol_version == "GB1-AL96-5CV-v2"

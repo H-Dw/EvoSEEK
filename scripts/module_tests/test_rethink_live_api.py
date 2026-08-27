@@ -19,8 +19,14 @@ from pathlib import Path
 from typing import Any
 
 from fitness_agents.agents.remote_llm import load_project_env, resolve_secret
-from fitness_agents.config import ExperimentConfig, load_experiment_config
+from fitness_agents.config import (
+    ExperimentConfig,
+    LocalKnowledgeRootConfig,
+    load_experiment_config,
+)
 from fitness_agents.contracts.schemas import FitnessObservation, Prediction, Variant
+from fitness_agents.local_knowledge.api_backends import build_embedding_backend
+from fitness_agents.local_knowledge.index import SQLiteLocalKnowledgeIndex
 from fitness_agents.loop import CampaignRunner
 from fitness_agents.utils.progress import configure_progress_logging
 
@@ -49,11 +55,19 @@ def _arguments() -> argparse.Namespace:
         type=Path,
         default=PROJECT_ROOT / "artifacts/gb1-rethink-hypothesis-live-api",
     )
+    parser.add_argument(
+        "--safe-fixture-root",
+        type=Path,
+        help=(
+            "Explicit synthetic RAG fixture under scripts/module_tests/fixtures; builds a fresh "
+            "Qwen corpus for live transport/contract acceptance."
+        ),
+    )
     return parser.parse_args()
 
 
 def _require_live_credentials() -> None:
-    load_project_env(PROJECT_ROOT)
+    load_project_env(PROJECT_ROOT / ".env")
     missing = [
         name
         for name in ("DEEPSEEK_API_KEY", "DASHSCOPE_API_KEY")
@@ -106,8 +120,96 @@ class BenchmarkTruthEvaluator:
         ]
 
 
-def _live_config(path: Path, output_root: Path) -> ExperimentConfig:
+def _build_safe_fixture_corpus(
+    config: ExperimentConfig,
+    *,
+    fixture_root: Path,
+    output_root: Path,
+) -> ExperimentConfig:
+    allowed_parent = (PROJECT_ROOT / "scripts" / "module_tests" / "fixtures").resolve()
+    resolved_fixture = fixture_root.resolve()
+    if not resolved_fixture.is_relative_to(allowed_parent):
+        raise ValueError(
+            "The safe live fixture must remain under scripts/module_tests/fixtures"
+        )
+    if not resolved_fixture.is_dir():
+        raise FileNotFoundError(f"Safe live fixture root is missing: {resolved_fixture}")
+    original = config.knowledge.local_knowledge
+    restricted_exclusion = (
+        RESTRICTED_RELATIVE_PATH,
+        "**/~$*",
+        "**/.git/**",
+        "**/artifacts/**",
+    )
+    fixture_binding = LocalKnowledgeRootConfig(
+        path=resolved_fixture,
+        root_id="SAFE_LIVE_RAG_FIXTURE",
+        access_policy_mode="synthetic_test",
+        runtime_manifest_mode="legacy_compatible",
+        include=("**/*.md",),
+        exclude=restricted_exclusion,
+    )
+    corpus_path = output_root / "safe-live-rag-corpus.sqlite"
+    if corpus_path.exists():
+        raise FileExistsError(f"Refusing to overwrite live fixture corpus: {corpus_path}")
+    build_local = replace(
+        original,
+        corpus_mode="build_or_refresh",
+        corpus_index_path=corpus_path,
+        index_path=corpus_path,
+        roots=(fixture_binding,),
+        retrieval=replace(
+            original.retrieval,
+            minimum_dense_similarity=0.0,
+        ),
+    )
+    backend = build_embedding_backend(build_local.retrieval)
+    report = None
+    last_error: Exception | None = None
+    for attempt in range(1, 4):
+        sidecar = corpus_path.with_name(f"{corpus_path.name}.building-{attempt}")
+        if sidecar.exists():
+            raise FileExistsError(f"Refusing to overwrite live fixture sidecar: {sidecar}")
+        index = SQLiteLocalKnowledgeIndex(sidecar)
+        try:
+            report = index.build(build_local, embedding_backend=backend)
+        except Exception as error:  # noqa: BLE001 - retry the corpus provider boundary
+            last_error = error
+            index.close()
+            if sidecar.is_file():
+                sidecar.unlink()
+            if attempt < 3:
+                time.sleep(float(2 ** (attempt - 1)))
+            continue
+        else:
+            index.close()
+            sidecar.replace(corpus_path)
+            break
+    if report is None:
+        raise RuntimeError("Safe live RAG corpus build failed after retries") from last_error
+    if report.indexed_documents < 1 or report.indexed_chunks < 1:
+        raise AssertionError("The safe live RAG fixture produced an empty corpus")
+    return replace(
+        config,
+        knowledge=replace(config.knowledge, local_knowledge=build_local),
+    )
+
+
+def _live_config(
+    path: Path,
+    output_root: Path,
+    *,
+    safe_fixture_root: Path | None = None,
+) -> ExperimentConfig:
     config = load_experiment_config(path)
+    if safe_fixture_root is not None:
+        if not safe_fixture_root.is_absolute():
+            safe_fixture_root = PROJECT_ROOT / safe_fixture_root
+        config = _build_safe_fixture_corpus(
+            config,
+            fixture_root=safe_fixture_root,
+            output_root=output_root,
+        )
     local = config.knowledge.local_knowledge
     corpus_path = local.corpus_index_path or local.index_path
     if corpus_path is None or not corpus_path.is_file():
@@ -280,6 +382,14 @@ def _assert_campaign(
             config.knowledge.local_knowledge.retrieval.reranker_api_config
         ),
         "rag_receipts": rag_receipts,
+        "rag_corpus_role": (
+            "synthetic_transport_fixture"
+            if any(
+                root.root_id == "SAFE_LIVE_RAG_FIXTURE"
+                for root in config.knowledge.local_knowledge.roots
+            )
+            else "released_external_evidence"
+        ),
         "rethink_group_calls": config.rounds * 4,
         "rethink_dimension_assessments": len(dimension_quality),
         "hypothesis_reflections_in_kg": aggregate_count,
@@ -301,7 +411,11 @@ def main() -> None:
     output_root = args.output_root
     if not output_root.is_absolute():
         output_root = PROJECT_ROOT / output_root
-    config = _live_config(args.config, output_root)
+    config = _live_config(
+        args.config,
+        output_root,
+        safe_fixture_root=args.safe_fixture_root,
+    )
     _assert_preflight(config)
     if config.task.oracle_data_path is None:
         raise AssertionError("GB1 live acceptance requires the benchmark oracle CSV")
@@ -323,6 +437,11 @@ def main() -> None:
     ).run()
     receipt = _assert_campaign(config, summary, truth, factory_calls, evaluators)
     receipt["elapsed_seconds"] = round(time.perf_counter() - started, 3)
+    receipt_path = Path(receipt["run_dir"]) / "live_api_test_receipt.json"
+    receipt_path.write_text(
+        json.dumps(receipt, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
     print(json.dumps(receipt, ensure_ascii=False, indent=2))
 
 

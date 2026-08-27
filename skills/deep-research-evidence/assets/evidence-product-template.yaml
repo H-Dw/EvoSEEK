@@ -1,0 +1,16 @@
+# STRUCTURAL SKELETON ONLY. This file is incomplete, unsigned, and not releasable.
+# Populate records from audited pipeline output; never treat empty arrays as evidence.
+schema_version: scientific-evidence-product:v2
+research_brief: {}
+search_runs: []
+scope_assertions: []
+allowed_search_hits: []
+publications: []
+source_spans: []
+evidence_groups: []
+atomic_claims: []
+logic_units: []
+decision_cards: []
+review_receipts: []
+release_approvals: []
+release_manifest: null

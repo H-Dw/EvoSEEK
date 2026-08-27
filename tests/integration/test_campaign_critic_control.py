@@ -5,9 +5,10 @@ import pytest
 
 from fitness_agents.agents.critic import CriticAgent
 from fitness_agents.contracts.schemas import (
-    BatchRisk,
+    CandidateIssue,
     CritiqueDecision,
     FalsificationReadiness,
+    IssueScope,
     IssueSeverity,
     RequiredChange,
     RequiredChangeAction,
@@ -53,6 +54,8 @@ class _InfeasibleResidueRevisionClient:
         if self.calls != 1:
             raise AssertionError("infeasible revision must stop before another Critic call")
         draft = context["draft"]
+        candidate_evidence = context["evidence"][draft.candidate_ids[0]]
+        assert candidate_evidence
         return CritiqueDecision(
             decision_id=f"revise:{draft.draft_batch_id}",
             draft_batch_id=draft.draft_batch_id,
@@ -60,13 +63,15 @@ class _InfeasibleResidueRevisionClient:
             review_attempt=draft.review_attempt,
             verdict=ReviewVerdict.REVISE,
             falsification_readiness=FalsificationReadiness.NEEDS_REVISION,
-            batch_level_risks=(
-                BatchRisk(
-                    risk_id="R01",
-                    code="BATCH_MODE_COLLAPSE",
+            candidate_issues=(
+                CandidateIssue(
+                    issue_id="I01",
+                    candidate_id=draft.candidate_ids[0],
+                    scope=IssueScope.SEQUENCE,
+                    code="HIGH_OOD",
                     severity=IssueSeverity.ERROR,
-                    statement="Synthetic independent batch-level revision basis.",
-                    candidate_ids=(draft.candidate_ids[0],),
+                    claim="Synthetic candidate-scoped revision basis.",
+                    evidence_ids=(candidate_evidence[0].evidence_id,),
                 ),
             ),
             required_changes=(

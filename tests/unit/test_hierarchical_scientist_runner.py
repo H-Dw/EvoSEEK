@@ -213,7 +213,7 @@ def test_hierarchical_scientist_config_matches_formal_al96_protocol() -> None:
     assert config.budget_per_round == 16
     assert config.candidate_limit == 32
     assert config.task.split_root is not None
-    assert config.llm.model == "deepseek-v4-flash"
+    assert config.llm.model == "deepseek-v4-pro"
     assert config.llm.api_key == "env:DEEPSEEK_API_KEY"
     assert config.critic.review_controls is True
     assert config.critic.review_diversity is True

@@ -16,8 +16,10 @@ from unittest.mock import patch
 import yaml
 
 from fitness_agents.config import LocalKnowledgeRootConfig
+from fitness_agents.safety import discover_workspace_access_policy
 
 from .contracts import ParsedDocument
+from .runtime_manifest import load_runtime_file_manifest
 
 TEXT_EXTENSIONS = frozenset({".txt", ".md", ".markdown", ".rst"})
 STRUCTURED_EXTENSIONS = frozenset({".json", ".yaml", ".yml", ".csv"})
@@ -31,6 +33,12 @@ class DiscoveredLocalFile:
     path: Path
     root_id: str
     relative_path: str
+    expected_sha256: str | None = None
+    expected_bytes: int | None = None
+    runtime_manifest_sha256: str | None = None
+    expected_record_id: str | None = None
+    expected_record_type: str | None = None
+    expected_record_content_sha256: str | None = None
 
 
 def _markdown_front_matter(text: str) -> tuple[str, dict[str, object]]:
@@ -66,7 +74,11 @@ def _knowledge_metadata(front_matter: dict[str, object]) -> tuple[str, dict[str,
     for key in (
         "schema_version",
         "record_type",
+        "record_id",
         "claim_id",
+        "logic_unit_id",
+        "decision_card_id",
+        "retrieval_text",
         "statement",
         "subject",
         "predicate",
@@ -77,6 +89,23 @@ def _knowledge_metadata(front_matter: dict[str, object]) -> tuple[str, dict[str,
         "applicability",
         "citation_support",
         "selection_eligible",
+        "permission",
+        "scientific_quality",
+        "task_applicability",
+        "boundary_conditions",
+        "counterclaims",
+        "abstain_if",
+        "record_payload",
+        "question_leaf_id",
+        "decision_slot",
+        "task_route",
+        "feature_channel",
+        "required_input",
+        "expected_direction",
+        "stage",
+        "evidence_role",
+        "source_release_id",
+        "source_record_hash",
         "language",
         "version",
         "evidence_level",
@@ -99,6 +128,13 @@ def _knowledge_metadata(front_matter: dict[str, object]) -> tuple[str, dict[str,
         citation_support = metadata.get("citation_support", [])
         if not isinstance(citation_support, list):
             raise TypeError("Atomic claim citation_support must be a list")
+    elif metadata.get("record_type") in {"logic_unit", "knowledge_decision_card"}:
+        required = ("schema_version", "record_id", "retrieval_text", "permission")
+        missing = [key for key in required if not str(metadata.get(key, "")).strip()]
+        if missing:
+            raise ValueError(
+                f"Native knowledge record front matter is missing: {', '.join(missing)}"
+            )
     return knowledge_type, metadata
 
 
@@ -111,15 +147,42 @@ def _matches(path: str, patterns: Iterable[str]) -> bool:
     )
 
 
+def _active_external_policy_hash() -> str:
+    from fitness_agents.deep_research.policy import ExternalEvidenceScopePolicy
+
+    return ExternalEvidenceScopePolicy().policy_hash
+
+
+def _is_reparse_path(path: Path) -> bool:
+    is_junction = getattr(path, "is_junction", None)
+    return path.is_symlink() or bool(is_junction and is_junction())
+
+
 def discover_local_files(
     roots: tuple[LocalKnowledgeRootConfig, ...],
     *,
     follow_symlinks: bool,
+    policy_events: list[dict[str, str]] | None = None,
 ) -> tuple[DiscoveredLocalFile, ...]:
     discovered: dict[str, DiscoveredLocalFile] = {}
     resolved_root_ids: set[str] = set()
     for root_config in roots:
-        root = root_config.path.resolve()
+        configured_root = root_config.path.absolute()
+        access_policy = discover_workspace_access_policy(configured_root)
+        root_policy_decision = access_policy.decide(configured_root)
+        if root_config.access_policy_mode == "required" and (
+            not access_policy.policy_sources
+            or root_policy_decision.project_relative_path is None
+        ):
+            raise PermissionError(
+                "Local knowledge root is not bound to a workspace access policy"
+            )
+        access_policy.require_allowed(configured_root)
+        if _is_reparse_path(configured_root):
+            raise ValueError(
+                "Local knowledge roots must not be symlinks or junctions"
+            )
+        root = configured_root.resolve()
         if not root.exists() or not root.is_dir():
             raise FileNotFoundError(f"Local knowledge root does not exist: {root}")
         root_id = root_config.root_id or re.sub(
@@ -132,24 +195,120 @@ def discover_local_files(
                 "configure explicit unique root_id values"
             )
         resolved_root_ids.add(root_id)
-        for path in root.rglob("*"):
-            if not path.is_file():
-                continue
-            if path.is_symlink() and not follow_symlinks:
-                continue
-            resolved = path.resolve()
-            if not resolved.is_relative_to(root):
-                raise ValueError(f"Local knowledge file escapes configured root: {path}")
-            relative = path.relative_to(root).as_posix()
-            if not _matches(relative, root_config.include):
-                continue
-            if _matches(relative, root_config.exclude):
-                continue
-            discovered[str(resolved)] = DiscoveredLocalFile(
-                path=resolved,
-                root_id=root_id,
-                relative_path=relative,
+        runtime_manifest = load_runtime_file_manifest(
+            root,
+            access_policy=access_policy,
+            expected_external_policy_hash=_active_external_policy_hash(),
+        )
+        if (
+            runtime_manifest is None
+            and root_config.runtime_manifest_mode == "required"
+        ):
+            raise FileNotFoundError(
+                "Local knowledge root requires runtime-files.json; recursive discovery is disabled"
             )
+        if runtime_manifest is not None:
+            for entry in runtime_manifest.entries:
+                path = root / entry.relative_path
+                access_decision = access_policy.decide(path)
+                if not access_decision.allowed:
+                    if policy_events is not None:
+                        policy_events.append(
+                            {
+                                "event": "manifest_path_denied_before_stat",
+                                "root_id": root_id,
+                                "relative_path": entry.relative_path,
+                                "policy_hash": access_decision.policy_hash,
+                            }
+                        )
+                    raise PermissionError(
+                        "Runtime manifest lists a workspace-policy-denied path"
+                    )
+                if entry.record_type not in {
+                    "atomic_claim",
+                    "logic_unit",
+                    "knowledge_decision_card",
+                }:
+                    continue
+                relative = entry.relative_path
+                if not _matches(relative, root_config.include):
+                    continue
+                if _matches(relative, root_config.exclude):
+                    continue
+                if _is_reparse_path(path):
+                    raise ValueError(
+                        "Runtime-manifest files must not be symlinks or junctions"
+                    )
+                resolved = path.resolve()
+                if not resolved.is_relative_to(root):
+                    raise ValueError(
+                        f"Runtime-manifest file escapes configured root: {relative}"
+                    )
+                access_policy.require_allowed(resolved)
+                if not resolved.is_file():
+                    raise FileNotFoundError(
+                        f"Runtime-manifest file is missing: {relative}"
+                    )
+                discovered[str(resolved)] = DiscoveredLocalFile(
+                    path=resolved,
+                    root_id=root_id,
+                    relative_path=relative,
+                    expected_sha256=entry.sha256,
+                    expected_bytes=entry.bytes,
+                    runtime_manifest_sha256=runtime_manifest.manifest_sha256,
+                    expected_record_id=entry.record_id,
+                    expected_record_type=entry.record_type,
+                    expected_record_content_sha256=(
+                        runtime_manifest.release_record_hash(entry.record_id)
+                    ),
+                )
+            continue
+        for directory, directory_names, file_names in os.walk(
+            root,
+            topdown=True,
+            followlinks=follow_symlinks,
+        ):
+            directory_path = Path(directory)
+            directory_names[:] = sorted(
+                name
+                for name in directory_names
+                if not _matches(
+                    (directory_path / name).relative_to(root).as_posix() + "/",
+                    root_config.exclude,
+                )
+            )
+            for name in sorted(file_names):
+                path = directory_path / name
+                relative = path.relative_to(root).as_posix()
+                if not _matches(relative, root_config.include):
+                    continue
+                if _matches(relative, root_config.exclude):
+                    continue
+                access_decision = access_policy.decide(path)
+                if not access_decision.allowed:
+                    if policy_events is not None:
+                        policy_events.append(
+                            {
+                                "event": "path_denied_before_stat",
+                                "root_id": root_id,
+                                "relative_path": relative,
+                                "policy_hash": access_decision.policy_hash,
+                            }
+                        )
+                    continue
+                if path.is_symlink() and not follow_symlinks:
+                    continue
+                resolved = path.resolve()
+                if not resolved.is_relative_to(root):
+                    raise ValueError(f"Local knowledge file escapes configured root: {path}")
+                access_policy.require_allowed(resolved)
+                if not resolved.is_file():
+                    continue
+                discovered[str(resolved)] = DiscoveredLocalFile(
+                    path=resolved,
+                    root_id=root_id,
+                    relative_path=relative,
+                )
     return tuple(discovered[key] for key in sorted(discovered))
 
 
@@ -189,10 +348,36 @@ class AutoLocalParser:
         path: Path | DiscoveredLocalFile,
     ) -> ParsedDocument:
         discovered = path if isinstance(path, DiscoveredLocalFile) else None
+        if discovered is None:
+            raise TypeError(
+                "AutoLocalParser requires a policy-screened DiscoveredLocalFile"
+            )
         path = discovered.path if discovered is not None else path
+        access_policy = discover_workspace_access_policy(path.parent)
+        access_policy.require_allowed(path)
+        if _is_reparse_path(path):
+            raise ValueError(
+                "Policy-screened local knowledge files must not be symlinks or junctions"
+            )
         suffix = path.suffix.casefold()
         raw = path.read_bytes()
         file_hash = hashlib.sha256(raw).hexdigest()
+        if (
+            discovered is not None
+            and discovered.expected_bytes is not None
+            and len(raw) != discovered.expected_bytes
+        ):
+            raise ValueError(
+                f"Runtime-manifest byte count mismatch: {discovered.relative_path}"
+            )
+        if (
+            discovered is not None
+            and discovered.expected_sha256 is not None
+            and file_hash != discovered.expected_sha256
+        ):
+            raise ValueError(
+                f"Runtime-manifest sha256 mismatch: {discovered.relative_path}"
+            )
         front_matter: dict[str, object] = {}
         if suffix in TEXT_EXTENSIONS:
             text = raw.decode("utf-8-sig")
@@ -214,11 +399,41 @@ class AutoLocalParser:
             raise ValueError(f"Unsupported local knowledge file type: {path.suffix}")
         mime_type = mimetypes.guess_type(path.name)[0] or "text/plain"
         knowledge_type, knowledge_metadata = _knowledge_metadata(front_matter)
+        if discovered.expected_record_id is not None:
+            actual_record_id = str(
+                knowledge_metadata.get("record_id")
+                or knowledge_metadata.get("claim_id")
+                or ""
+            )
+            if actual_record_id != discovered.expected_record_id:
+                raise ValueError(
+                    "Runtime-manifest record ID does not match knowledge-record front matter"
+                )
+            if (
+                discovered.expected_record_type is not None
+                and knowledge_metadata.get("record_type")
+                != discovered.expected_record_type
+            ):
+                raise ValueError(
+                    "Runtime-manifest record type does not match knowledge-record front matter"
+                )
+            if (
+                str(knowledge_metadata.get("source_record_hash", ""))
+                != discovered.expected_record_content_sha256
+            ):
+                raise ValueError(
+                    "Knowledge-record hash does not match evidence release"
+                )
         configured_title = front_matter.get("title")
         title = str(configured_title).strip() if configured_title else path.stem
-        claim_id = (
-            str(knowledge_metadata.get("claim_id", "")).strip()
-            if knowledge_metadata.get("record_type") == "atomic_claim"
+        record_id = (
+            str(
+                knowledge_metadata.get("record_id")
+                or knowledge_metadata.get("claim_id")
+                or ""
+            ).strip()
+            if knowledge_metadata.get("record_type")
+            in {"atomic_claim", "logic_unit", "knowledge_decision_card"}
             else None
         )
         return ParsedDocument(
@@ -229,7 +444,7 @@ class AutoLocalParser:
                 relative_path=(
                     discovered.relative_path if discovered is not None else None
                 ),
-                claim_id=claim_id or None,
+                claim_id=record_id or None,
             ),
             path=path.resolve(),
             file_hash=file_hash,
@@ -243,6 +458,11 @@ class AutoLocalParser:
                 "root_id": discovered.root_id if discovered is not None else None,
                 "relative_path": (
                     discovered.relative_path if discovered is not None else path.name
+                ),
+                "runtime_manifest_sha256": (
+                    discovered.runtime_manifest_sha256
+                    if discovered is not None
+                    else None
                 ),
                 **knowledge_metadata,
             },

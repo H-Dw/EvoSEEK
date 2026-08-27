@@ -456,16 +456,27 @@ class KnowledgeEngine:
         objective: str,
         assay_conditions: dict[str, Any] | None = None,
         anchors: Sequence[str] = (),
+        query: str | None = None,
+        knowledge_types: Sequence[str] = (),
         candidates: Sequence[Variant] = (),
     ) -> tuple[RetrievalResult | None, tuple[Evidence, ...]]:
         if self.local_knowledge is None:
             return None, ()
-        result = self.local_knowledge.prefetch_round(
-            round_id=round_id,
-            objective=objective,
-            assay_conditions=assay_conditions,
-            anchors=anchors,
-        )
+        if query is None:
+            result = self.local_knowledge.prefetch_round(
+                round_id=round_id,
+                objective=objective,
+                assay_conditions=assay_conditions,
+                anchors=anchors,
+            )
+        else:
+            result = self.local_knowledge.retrieve(
+                query=query,
+                intent="round_prefetch",
+                round_id=round_id,
+                anchors=anchors,
+                knowledge_types=knowledge_types,
+            )
         evidence = self.local_knowledge.evidence_from_result(
             result, candidates=candidates
         )
@@ -482,6 +493,26 @@ class KnowledgeEngine:
     def local_evidence(self, *, round_id: int) -> tuple[Evidence, ...]:
         return tuple(self._local_evidence.get(round_id, ()))
 
+    def stage_local_knowledge(
+        self,
+        *,
+        round_id: int,
+        results: Sequence[RetrievalResult],
+        evidence: Sequence[Evidence],
+    ) -> None:
+        """Commit controller-approved, deduplicated retrieval products for this round."""
+
+        known_queries = {
+            item.query_id for item in self._local_retrieval_results[round_id]
+        }
+        self._local_retrieval_results[round_id].extend(
+            item for item in results if item.query_id not in known_queries
+        )
+        known_evidence = {item.evidence_id for item in self._local_evidence[round_id]}
+        self._local_evidence[round_id].extend(
+            item for item in evidence if item.evidence_id not in known_evidence
+        )
+
     def retrieve_local_knowledge(
         self,
         *,
@@ -491,6 +522,7 @@ class KnowledgeEngine:
         anchors: Sequence[str] = (),
         top_k: int | None = None,
         knowledge_types: Sequence[str] = (),
+        facets: dict[str, Sequence[str]] | None = None,
         stage: bool = True,
     ) -> tuple[RetrievalResult, tuple[Evidence, ...]]:
         if self.local_knowledge is None:
@@ -502,6 +534,7 @@ class KnowledgeEngine:
             anchors=anchors,
             top_k=top_k,
             knowledge_types=knowledge_types,
+            facets=facets,
         )
         evidence = self.local_knowledge.evidence_from_result(result)
         if stage and bool(result.policy_decision.get("allowed", False)):

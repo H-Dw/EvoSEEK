@@ -28,7 +28,9 @@ items:
     # Smaller batches avoided TLS EOFs during live remote-index acceptance tests.
     batch_size: 2
     timeout_seconds: 60
-    max_retries: 5
+    # Runtime query inference must tolerate the same transient TLS/connection
+    # windows observed while building the precomputed corpus.
+    max_retries: 10
     query_task: query
     document_task: document
     query_instruction: "Given an English scientific question about protein engineering, retrieve atomic evidence passages that directly support or constrain the question."
@@ -50,7 +52,7 @@ items:
     max_input_tokens: 4000
     max_documents: 64
     timeout_seconds: 30
-    max_retries: 3
+    max_retries: 10
     instruction: "Given an English scientific question about protein engineering, rank passages by whether they directly provide evidence that answers or constrains the question."
     tokenizer_model_path: null
     tokenizer_model_id: Qwen/qwen3-rerank

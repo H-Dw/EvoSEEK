@@ -58,7 +58,7 @@ def _knowledge_command(argv: list[str]) -> None:
             index.close()
         return
     if args.action == "rebuild":
-        temporary = index_path.with_name(f"{index_path.name}.v5-building-{os.getpid()}")
+        temporary = index_path.with_name(f"{index_path.name}.v6-building-{os.getpid()}")
         if temporary.exists():
             raise FileExistsError(f"Refusing to overwrite rebuild sidecar: {temporary}")
         backend = build_embedding_backend(local_config.retrieval)
@@ -144,6 +144,10 @@ def _apply_local_knowledge_paths(config, *, index_path: Path | None, overlay_pat
 
 
 def main() -> None:
+    if len(sys.argv) > 1 and sys.argv[1] == "deep-research":
+        from fitness_agents.deep_research.cli import main as deep_research_main
+
+        raise SystemExit(deep_research_main(sys.argv[2:]))
     if len(sys.argv) > 1 and sys.argv[1] == "knowledge":
         _knowledge_command(sys.argv[2:])
         return

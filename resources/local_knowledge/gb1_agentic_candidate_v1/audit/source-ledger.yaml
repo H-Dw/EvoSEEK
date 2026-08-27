@@ -1,0 +1,7 @@
+schema_version: inherited-source-ledger:v1
+candidate_id: GB1-AGENTIC-CANDIDATE-V1
+source_bundle: GB1-DIRECTIVE-V1
+publication_ids: [PUB-001, PUB-002, PUB-003]
+source_span_ids: [SS-001, SS-002, SS-003, SS-004, SS-005, SS-006]
+human_reviewed: false
+permission: explanation_only

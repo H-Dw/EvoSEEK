@@ -58,6 +58,8 @@ where = ["src"]
   "profiles/rethink/sample_v1/*.yaml",
   "profiles/rethink/scientific_v1/*.md",
   "profiles/rethink/scientific_v1/*.yaml",
+  "profiles/researcher/evidence_planner_v1/*.md",
+  "profiles/researcher/evidence_planner_v1/*.yaml",
 ]
 
 [tool.pytest.ini_options]

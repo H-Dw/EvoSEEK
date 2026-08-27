@@ -1,0 +1,24 @@
+schema_version: research-brief:v3
+brief_id: RB-GB1-DIRECTIVE-V3
+status: frozen
+research_mode: retrieval_route_correction
+question: >-
+  Does deterministic stage routing make the already validated three-card evidence product
+  reach the intended early, middle, and late decision contexts?
+feedback_scope: aggregate_blinded_only
+observed_feedback:
+  complete_pairs: 5
+  intended_card_runs: 5
+  median_final_best_delta: 0.0
+  mean_auc_delta: 0.234764856016
+  local_card_route_observed: early_binding_first_in_all_rounds
+inference: semantic_top1_alone_did_not_enforce_stage_routing
+source_policy: inherit_only_validated_v1_source_spans_and_v2_logic
+new_literature_search: false
+prohibited_inputs:
+  - mutation identities
+  - per-variant fitness labels
+  - quarantined benchmark publications or mirrors
+  - OpenAlex
+  - virus-protein material
+stopping_rule: final preregistered version; run the same five-seed paired benchmark

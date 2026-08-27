@@ -1,0 +1,23 @@
+schema_version: research-brief:v2
+brief_id: RB-GB1-DIRECTIVE-V2
+status: frozen
+research_mode: evidence_recompilation
+question: >-
+  Can stage-specific, single-card retrieval turn the existing non-label-leaking GB1 evidence
+  into more direct decision support than an omnibus five-card context?
+feedback_scope: aggregate_blinded_only
+observed_feedback:
+  complete_pairs: 5
+  intended_card_runs: 5
+  median_final_best_delta: 0.0
+  mean_auc_delta: -0.11738242800799994
+inference: retrieval_breadth_and_static_repetition_are_primary_v2_targets
+source_policy: inherit_only_validated_v1_source_spans
+new_literature_search: false
+prohibited_inputs:
+  - mutation identities
+  - per-variant fitness labels
+  - quarantined benchmark publications or mirrors
+  - OpenAlex
+  - virus-protein material
+stopping_rule: run the same five-seed paired benchmark and apply the frozen strict criterion

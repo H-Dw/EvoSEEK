@@ -1,5 +1,6 @@
 interface:
   display_name: Ingest Scientific Knowledge
-  short_description: Save verified English atomic claims for RAG and KG
-  default_prompt: Research target-independent scientific knowledge in English, verify primary sources, and save validated atomic claims with normalized Publication and CitationSupport records.
+  short_description: Export released evidence into the legacy RAG/KG view
+  default_prompt: Use $ingest-scientific-knowledge to export and validate a released $deep-research-evidence product for the current RAG and KG runtime.
+policy:
   allow_implicit_invocation: true

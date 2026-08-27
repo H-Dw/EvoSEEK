@@ -1,0 +1,33 @@
+{
+  "schema_version": "gb1-directive-validation:v1",
+  "validated_at": "2026-08-23T18:15:53.475539+00:00",
+  "bundle_root": "D:\\fitness-agents\\resources\\local_knowledge\\gb1_directive_v1",
+  "status": "passed",
+  "research_status": "research_candidate",
+  "human_reviewed": false,
+  "selection_eligible": false,
+  "permission": "explanation_only",
+  "cards": [
+    {
+      "path": "cards\\fold_gate_41_54.md",
+      "sha256": "688062c86f5fd84e5b7ea452403b692c2d5e2cfc5825eea130487008e411e139"
+    },
+    {
+      "path": "cards\\pair_39_54_packing.md",
+      "sha256": "23daa2c0ed320fa64c28a5a47c983b2700225f7f85f47b90918fd4574abc6bd7"
+    },
+    {
+      "path": "cards\\protect_neighbor_geometry.md",
+      "sha256": "c1693f4e588ff6d9f251d7d6a5fcb1e386e6292d86189f0f81bde2d768844b4a"
+    },
+    {
+      "path": "cards\\separate_interface_40.md",
+      "sha256": "5f6f45ec65076624192edcbaf1415a62f7ed2b2c89bdbf60c8786ff977657b2e"
+    },
+    {
+      "path": "cards\\stability_is_gate_not_objective.md",
+      "sha256": "ec4f00bf2dbb90cd3dfd0b6626b8992370ab51a8a9ca8c6129688b5e36f56127"
+    }
+  ],
+  "errors": []
+}

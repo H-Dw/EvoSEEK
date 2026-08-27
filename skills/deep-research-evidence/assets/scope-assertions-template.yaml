@@ -1,0 +1,17 @@
+# STRUCTURAL SKELETON ONLY. It is not a verified assertion or release approval.
+schema_version: external-scope-assertions:v1
+assertions:
+  - schema_version: external-scope-assertion:v1
+    scope_assertion_id: scope-assertion:replace
+    artifact_id: artifact:replace
+    subject_scope: nonviral_protein
+    excluded_subject_present: false
+    roles: [primary_subject]
+    assertion_status: verified
+    issuer: replace-with-independent-reviewer
+    issuer_kind: human_review
+    source_record_id: scope-review:replace
+    verification_receipt_sha256: "<sha256-of-durable-review-artifact>"
+    reviewed_at: "<iso-8601-with-timezone>"
+    expires_at: "<iso-8601-with-timezone-or-null>"
+    review_receipt_ids: [review:scope:replace]

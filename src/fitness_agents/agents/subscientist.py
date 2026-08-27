@@ -9,14 +9,13 @@ from typing import Any
 
 from fitness_agents.contracts.evidence_universe import RoleVisibleEvidenceUniverse
 from fitness_agents.contracts.hypothesis_pipeline import (
-    BatchedChannelAnalysisResult,
     CANDIDATE_PROSE_MAX,
+    CHANNEL_ANALYSIS_PROSE_MAX,
+    CHANNEL_FINDING_STATEMENT_MAX,
+    BatchedChannelAnalysisResult,
     ChannelAnalysisBatchArtifact,
     ChannelAnalysisOutput,
     ChannelEvidenceInput,
-    CHANNEL_ANALYSIS_PROSE_MAX,
-    CHANNEL_FINDING_STATEMENT_MAX,
-    PHYSCHEM_SUMMARY_MAX,
     PhyschemInterpretationOutput,
 )
 from fitness_agents.mutation.notation import InvalidMutationNotation, parse_mutation_notation
@@ -121,6 +120,42 @@ def _prose_with_canonical_sample_labels(
     if sample_id_map is not None:
         expanded = sample_id_map.expand_aliases_in_text(expanded)
     return expanded[:limit]
+
+
+def _descriptor_grounded_physchem_prose(
+    text: str,
+    *,
+    facts_by_mutation: dict[tuple[str, int, str, str], list[Any]],
+    visible_sample_ids: set[str],
+    sample_id_map: ShortIdMap | None,
+    limit: int,
+) -> str | None:
+    """Keep sample-specific prose only when typed descriptor facts support it."""
+
+    expanded = _prose_with_canonical_sample_labels(
+        text, sample_id_map, limit=limit
+    )
+    tokens_by_sample: dict[str, set[str]] = {}
+    for sample_id, position, from_residue, to_residue in facts_by_mutation:
+        tokens_by_sample.setdefault(sample_id, set()).add(
+            f"{from_residue}{position}{to_residue}".upper()
+        )
+    supported_tokens = set().union(*tokens_by_sample.values()) if tokens_by_sample else set()
+    mentioned_tokens = _mutation_tokens_in_text(expanded)
+    if mentioned_tokens.difference(supported_tokens):
+        return None
+    mentioned_visible_samples = {
+        sample_id for sample_id in visible_sample_ids if sample_id in expanded
+    }
+    if mentioned_visible_samples.difference(tokens_by_sample):
+        return None
+    if mentioned_tokens and mentioned_visible_samples:
+        sample_tokens = set().union(
+            *(tokens_by_sample[sample_id] for sample_id in mentioned_visible_samples)
+        )
+        if mentioned_tokens.difference(sample_tokens):
+            return None
+    return expanded
 
 
 def _rewrite_prose_with_id_maps(
@@ -771,13 +806,20 @@ def _materialize_physchem_analysis(
             }
         )
     for text in explanation.interpretations[: max(0, 8 - len(findings))]:
+        grounded_statement = _descriptor_grounded_physchem_prose(
+            text,
+            facts_by_mutation=facts_by_mutation,
+            visible_sample_ids={item.sample_id for item in context.visible_observations},
+            sample_id_map=sample_id_map,
+            limit=CHANNEL_FINDING_STATEMENT_MAX,
+        )
+        if grounded_statement is None:
+            continue
         findings.append(
             {
                 "finding_id": f"F{len(findings) + 1:02d}",
                 "kind": "INTERPRETATION",
-                "statement": _prose_with_canonical_sample_labels(
-                    text, sample_id_map, limit=CHANNEL_FINDING_STATEMENT_MAX
-                ),
+                "statement": grounded_statement,
                 "evidence_ids": [],
                 "fact_ids": [],
                 "confidence": "low",

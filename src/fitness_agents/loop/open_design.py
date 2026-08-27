@@ -12,8 +12,7 @@ from fitness_agents.active_learning import create_active_learning_module
 from fitness_agents.agents.client_registry import create_role_client_bundle
 from fitness_agents.agents.critic import (
     CriticAgent,
-    OpenAICriticClient,
-    RuleBasedCriticClient,
+    create_batch_critic_agent,
 )
 from fitness_agents.agents.output_guards import RevisionConstraints
 from fitness_agents.agents.scientist import ScientistAgent
@@ -266,34 +265,7 @@ class OpenDesignRunner:
             allowed_mutation_positions=self.resolved_positions,
         )
         if critic_agent is None:
-            rule_critic = RuleBasedCriticClient()
-            if config.critic.mode == "remote" and config.critic.enabled:
-                critic_client = OpenAICriticClient(
-                    model=config.critic.model,
-                    profile=config.critic.profile,
-                    temperature=config.critic.temperature,
-                    base_url=config.critic.base_url,
-                    provider=config.critic.provider,
-                    max_tokens=config.critic.max_tokens,
-                    reasoning_effort=None,
-                    thinking="disabled",
-                    api_key=config.critic.api_key,
-                    max_transport_retries=config.critic.max_model_retries,
-                    max_truncation_retries=config.critic.max_truncation_retries,
-                    max_syntax_retries=config.critic.max_syntax_retries,
-                    max_schema_retries=config.critic.max_schema_retries,
-                    max_semantic_retries=config.critic.max_semantic_retries,
-                    max_unknown_evidence_retries=(
-                        config.critic.max_unknown_evidence_retries
-                    ),
-                )
-                critic_agent = CriticAgent(
-                    critic_client,
-                    max_retries=config.critic.max_model_retries,
-                    fallback=(rule_critic if config.critic.fallback_policy == "rule" else None),
-                )
-            else:
-                critic_agent = CriticAgent(rule_critic, max_retries=0)
+            critic_agent = create_batch_critic_agent(config.critic)
         self.critic_agent = critic_agent
         self.approval_gateway = ApprovalGateway()
         self.hard_validator = OpenDesignHardValidator(

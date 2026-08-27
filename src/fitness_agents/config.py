@@ -37,6 +37,47 @@ def read_yaml(path: str | Path, root: Path | None = None) -> dict[str, Any]:
         return yaml.safe_load(handle) or {}
 
 
+def _merge_config_layers(
+    base: dict[str, Any], override: dict[str, Any]
+) -> dict[str, Any]:
+    """Recursively merge YAML configuration layers without mutating either input.
+
+    Mapping values are merged recursively. Scalars and sequences in later layers
+    replace earlier values. This keeps a reusable feature-provider base separate
+    from experiment-specific RAG policy and retrieval configuration.
+    """
+
+    merged = dict(base)
+    for key, value in override.items():
+        current = merged.get(key)
+        if isinstance(current, dict) and isinstance(value, dict):
+            merged[key] = _merge_config_layers(current, value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def read_yaml_layers(
+    paths: str | Path | list[str | Path] | tuple[str | Path, ...],
+    root: Path | None = None,
+) -> dict[str, Any]:
+    """Read one YAML file or compose an ordered list of YAML files.
+
+    Later files override earlier files. The list form is intentionally supported
+    for ``knowledge_config`` so feature resources and RAG policy can be varied
+    independently in validation experiments.
+    """
+
+    if isinstance(paths, (str, Path)):
+        return read_yaml(paths, root)
+    if not paths:
+        raise ValueError("configuration layer list must not be empty")
+    merged: dict[str, Any] = {}
+    for path in paths:
+        merged = _merge_config_layers(merged, read_yaml(path, root))
+    return merged
+
+
 @dataclass
 class TaskConfig:
     task_id: str
@@ -188,6 +229,8 @@ class KnowledgeProviderConfig:
 class LocalKnowledgeRootConfig:
     path: Path
     root_id: str | None = None
+    access_policy_mode: str = "required"
+    runtime_manifest_mode: str = "required"
     include: tuple[str, ...] = (
         "**/*.md",
         "**/*.txt",
@@ -207,6 +250,14 @@ class LocalKnowledgeRootConfig:
         if "://" in raw_path or raw_path.casefold().startswith(("http:", "https:")):
             raise ValueError("Local knowledge roots must be filesystem paths, not URLs")
         object.__setattr__(self, "path", Path(self.path))
+        if self.access_policy_mode not in {"required", "synthetic_test"}:
+            raise ValueError(
+                "Local knowledge access_policy_mode must be required or synthetic_test"
+            )
+        if self.runtime_manifest_mode not in {"required", "legacy_compatible"}:
+            raise ValueError(
+                "Local knowledge runtime_manifest_mode must be required or legacy_compatible"
+            )
         if self.root_id is not None:
             normalized_root_id = str(self.root_id).strip().upper()
             if not re.fullmatch(r"[A-Z][A-Z0-9_-]{0,63}", normalized_root_id):
@@ -400,6 +451,7 @@ class RerankerAPIConfig:
 
 @dataclass(frozen=True)
 class LocalKnowledgeRetrievalConfig:
+    query_mode: str = "fixed"
     mode: str = "lexical"
     lexical_backend: str = "sqlite_fts5"
     dense_enabled: bool = False
@@ -430,8 +482,67 @@ class LocalKnowledgeRetrievalConfig:
     instruction_content_policy: str = "reject"
     dense_search_backend: str = "numpy_exact"
     max_exact_dense_chunks: int = 50000
+    runtime_query: str = (
+        "general protein structure stability binding mutation "
+        "physicochemical epistasis knowledge"
+    )
+    runtime_query_by_round: dict[int, str] = field(default_factory=dict)
+    runtime_anchors: tuple[str, ...] = (
+        "protein structure and stability",
+        "binding interface mutation effects",
+        "physicochemical substitution mechanisms",
+        "epistasis and residue interactions",
+    )
+    runtime_anchors_by_round: dict[int, tuple[str, ...]] = field(default_factory=dict)
+    runtime_knowledge_types_by_round: dict[int, tuple[str, ...]] = field(default_factory=dict)
+    structured_query: str = (
+        "binding affinity maturation library selection mutation operational guideline"
+    )
+    structured_query_by_round: dict[int, str] = field(default_factory=dict)
+    structured_top_k: int = 4
 
     def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "runtime_query_by_round",
+            {
+                int(round_id): str(query).strip()
+                for round_id, query in dict(self.runtime_query_by_round).items()
+            },
+        )
+        object.__setattr__(self, "runtime_anchors", tuple(self.runtime_anchors))
+        object.__setattr__(
+            self,
+            "runtime_anchors_by_round",
+            {
+                int(round_id): tuple(str(item).strip() for item in anchors)
+                for round_id, anchors in dict(self.runtime_anchors_by_round).items()
+            },
+        )
+        object.__setattr__(
+            self,
+            "runtime_knowledge_types_by_round",
+            {
+                int(round_id): tuple(
+                    dict.fromkeys(
+                        str(item).strip().casefold()
+                        for item in knowledge_types
+                        if str(item).strip()
+                    )
+                )
+                for round_id, knowledge_types in dict(
+                    self.runtime_knowledge_types_by_round
+                ).items()
+            },
+        )
+        object.__setattr__(
+            self,
+            "structured_query_by_round",
+            {
+                int(round_id): str(query).strip()
+                for round_id, query in dict(self.structured_query_by_round).items()
+            },
+        )
         if isinstance(self.embedding_api_config, dict):
             object.__setattr__(
                 self,
@@ -466,6 +577,8 @@ class LocalKnowledgeRetrievalConfig:
             object.__setattr__(self, "reranker_backend", resolved_reranker_backend)
         if resolved_reranker_backend not in {"none", "local", "api"}:
             raise ValueError("reranker_backend must be none, local, api, or auto")
+        if self.query_mode not in {"fixed", "agentic"}:
+            raise ValueError("local knowledge query_mode must be fixed or agentic")
         if self.mode not in {"lexical", "dense", "hybrid"}:
             raise ValueError("local knowledge retrieval mode must be lexical, dense, or hybrid")
         if self.lexical_backend != "sqlite_fts5":
@@ -482,6 +595,33 @@ class LocalKnowledgeRetrievalConfig:
             raise ValueError("Only numpy_exact dense search is currently supported")
         if self.allow_model_download:
             raise ValueError("Local knowledge models must not be downloaded at campaign runtime")
+        if not self.runtime_query.strip() or not self.structured_query.strip():
+            raise ValueError("runtime local-knowledge queries must not be empty")
+        for mapping_name, mapping in (
+            ("runtime_query_by_round", self.runtime_query_by_round),
+            ("runtime_anchors_by_round", self.runtime_anchors_by_round),
+            (
+                "runtime_knowledge_types_by_round",
+                self.runtime_knowledge_types_by_round,
+            ),
+            ("structured_query_by_round", self.structured_query_by_round),
+        ):
+            if any(round_id < 1 for round_id in mapping):
+                raise ValueError(f"{mapping_name} round IDs must be positive")
+        if any(not query for query in self.runtime_query_by_round.values()) or any(
+            not query for query in self.structured_query_by_round.values()
+        ):
+            raise ValueError("round-specific local-knowledge queries must not be empty")
+        if any(
+            not anchors or any(not item for item in anchors)
+            for anchors in self.runtime_anchors_by_round.values()
+        ):
+            raise ValueError("round-specific local-knowledge anchors must not be empty")
+        if any(
+            not knowledge_types or any(not item for item in knowledge_types)
+            for knowledge_types in self.runtime_knowledge_types_by_round.values()
+        ):
+            raise ValueError("round-specific local-knowledge types must not be empty")
         if self.mode in {"dense", "hybrid"} and not self.dense_enabled:
             raise ValueError(f"retrieval mode {self.mode!r} requires dense_enabled=true")
         if self.dense_enabled and self.embedding_backend == "local":
@@ -517,6 +657,7 @@ class LocalKnowledgeRetrievalConfig:
             ("token_budget", self.token_budget),
             ("max_chunks_per_document", self.max_chunks_per_document),
             ("max_exact_dense_chunks", self.max_exact_dense_chunks),
+            ("structured_top_k", self.structured_top_k),
         ):
             if value < 1:
                 raise ValueError(f"local knowledge {name} must be positive")
@@ -565,6 +706,7 @@ class LeakageGuardConfig:
     strict_aliases_required: bool = True
     quarantine_target_documents: bool = True
     block_target_entities: bool = True
+    allow_target_identity_context: bool = False
     minimum_sequence_fragment_length: int = 12
 
     def __post_init__(self) -> None:
@@ -753,11 +895,20 @@ class PriorScheduleConfig:
 
     mode: str = "upfront"
     keep_wild_type: bool = True
+    no_supported_hypothesis_policy: str = "abort"
 
     def __post_init__(self) -> None:
         if self.mode not in {"upfront", "cold_start"}:
             raise ValueError(
                 "prior_schedule.mode must be 'upfront' or 'cold_start'"
+            )
+        if self.no_supported_hypothesis_policy not in {
+            "abort",
+            "coverage_exploration",
+        }:
+            raise ValueError(
+                "prior_schedule.no_supported_hypothesis_policy must be "
+                "'abort' or 'coverage_exploration'"
             )
 
 
@@ -1143,6 +1294,7 @@ class KGInteractionRuntimeConfig:
             "independent",
             "joint",
             "independent_and_joint",
+            "agentic",
         }
         if self.feature_tool_strategy not in allowed_strategies:
             raise ValueError(
@@ -1183,7 +1335,11 @@ class KGInteractionRuntimeConfig:
             "conservation": "query_evolutionary_profile",
             "structure": "query_structure_environment",
         }
-        if self.feature_tool_strategy in {"independent", "independent_and_joint"}:
+        if self.feature_tool_strategy in {
+            "independent",
+            "independent_and_joint",
+            "agentic",
+        }:
             required_operators.update(channel_operators[item] for item in self.feature_channels)
         if self.feature_tool_strategy in {"joint", "independent_and_joint"}:
             required_operators.add("query_feature_bundle")
@@ -1248,14 +1404,73 @@ class CriticConfig:
     max_tokens: int | None = None
     reasoning_effort: str | None = None
     thinking: str | None = None
+    # Remote Batch Critic optimization: when enabled, a deterministic policy
+    # gate owns the ordinary approval receipt and the remote model is called
+    # only for explicitly configured semantic-risk signals.
+    policy_gate_enabled: bool = False
+    semantic_audit_risk_codes: tuple[str, ...] = (
+        "HIGH_OOD",
+        "MODEL_DISAGREEMENT",
+        "EVIDENCE_POLARITY_CONFLICT",
+        "MISSING_CONSTITUENT",
+    )
+    semantic_audit_on_revision: bool = True
+    semantic_audit_on_uncalibrated_predictions: bool = True
+    semantic_audit_quality_statuses: tuple[str, ...] = ()
+    semantic_audit_applicability_statuses: tuple[str, ...] = ()
+    semantic_audit_mutation_count_threshold: int | None = None
+    semantic_audit_warning_count_threshold: int | None = None
 
     def __post_init__(self) -> None:
+        self.semantic_audit_risk_codes = tuple(
+            dict.fromkeys(str(item).strip() for item in self.semantic_audit_risk_codes)
+        )
+        self.semantic_audit_quality_statuses = tuple(
+            dict.fromkeys(
+                str(item).strip().lower()
+                for item in self.semantic_audit_quality_statuses
+            )
+        )
+        self.semantic_audit_applicability_statuses = tuple(
+            dict.fromkeys(
+                str(item).strip().lower()
+                for item in self.semantic_audit_applicability_statuses
+            )
+        )
         if self.mode not in {"rule", "remote"}:
             raise ValueError("critic.mode must be 'rule' or 'remote'")
+        if self.policy_gate_enabled and self.mode != "remote":
+            raise ValueError(
+                "critic.policy_gate_enabled requires critic.mode='remote'"
+            )
+        if any(not item for item in self.semantic_audit_risk_codes):
+            raise ValueError("critic.semantic_audit_risk_codes cannot contain blanks")
+        if any(not item for item in self.semantic_audit_quality_statuses):
+            raise ValueError(
+                "critic.semantic_audit_quality_statuses cannot contain blanks"
+            )
+        if any(not item for item in self.semantic_audit_applicability_statuses):
+            raise ValueError(
+                "critic.semantic_audit_applicability_statuses cannot contain blanks"
+            )
+        if (
+            self.semantic_audit_mutation_count_threshold is not None
+            and self.semantic_audit_mutation_count_threshold < 1
+        ):
+            raise ValueError(
+                "critic.semantic_audit_mutation_count_threshold must be positive"
+            )
+        if (
+            self.semantic_audit_warning_count_threshold is not None
+            and self.semantic_audit_warning_count_threshold < 1
+        ):
+            raise ValueError(
+                "critic.semantic_audit_warning_count_threshold must be positive"
+            )
         if self.max_revision_attempts not in {0, 1, 2}:
             raise ValueError("critic.max_revision_attempts must be between 0 and 2")
-        if self.max_model_retries not in {0, 1, 2}:
-            raise ValueError("critic.max_model_retries must be between 0 and 2")
+        if not 0 <= self.max_model_retries <= 15:
+            raise ValueError("critic.max_model_retries must be between 0 and 15")
         retry_fields = {
             "max_truncation_retries": self.max_truncation_retries,
             "max_syntax_retries": self.max_syntax_retries,
@@ -1279,6 +1494,8 @@ class CriticConfig:
             raise ValueError("critic.on_reject must be abort_round or safe_fallback")
         if self.on_exhausted not in {"abort_round", "safe_fallback"}:
             raise ValueError("critic.on_exhausted must be abort_round or safe_fallback")
+        if self.fallback_policy not in {"rule", "none"}:
+            raise ValueError("critic.fallback_policy must be rule or none")
 
 
 @dataclass
@@ -1314,8 +1531,8 @@ class LLMConfig:
     rethink_dimension_parallel: bool | None = None
 
     def __post_init__(self) -> None:
-        if self.max_transport_retries not in {0, 1, 2}:
-            raise ValueError("llm.max_transport_retries must be between 0 and 2")
+        if not 0 <= self.max_transport_retries <= 15:
+            raise ValueError("llm.max_transport_retries must be between 0 and 15")
         retry_fields = {
             "max_truncation_retries": self.max_truncation_retries,
             "max_syntax_retries": self.max_syntax_retries,
@@ -1354,6 +1571,64 @@ class LLMConfig:
             raise ValueError(
                 "llm ReThink usable call budget must cover four dimension groups"
             )
+
+
+@dataclass
+class ResearcherConfig:
+    """Bounded two-stage planning role; disabled configs preserve legacy behavior."""
+
+    enabled: bool = False
+    mode: str = "two_stage"
+    profile: str = "evidence_planner_v1"
+    provider: str | None = None
+    model: str | None = None
+    base_url: str | None = None
+    api_key: str | None = None
+    temperature: float = 0.0
+    max_tokens: int = 8192
+    reasoning_effort: str | None = None
+    thinking: str | None = "disabled"
+    max_input_chars: int = 30000
+    request_timeout_seconds: float | None = None
+    max_rag_queries: int = 3
+    rag_top_k_per_query: int = 2
+    max_retrieved_records: int = 4
+    max_feature_variants: int = 2
+    max_feature_requests: int = 6
+    failure_policy: str = "abort_round"
+
+    def __post_init__(self) -> None:
+        if self.mode != "two_stage":
+            raise ValueError("researcher.mode must be two_stage")
+        if self.provider is not None and self.provider not in {
+            "mock",
+            "openai",
+            "openai_compatible",
+            "deepseek",
+        }:
+            raise ValueError(f"Unsupported researcher provider: {self.provider!r}")
+        if not self.profile.strip():
+            raise ValueError("researcher.profile must not be empty")
+        if self.temperature != 0.0:
+            raise ValueError("researcher.temperature must remain 0 for auditable planning")
+        if not 256 <= self.max_tokens <= 32768:
+            raise ValueError("researcher.max_tokens must be between 256 and 32768")
+        if self.max_input_chars < 4096:
+            raise ValueError("researcher.max_input_chars must be at least 4096")
+        if not 1 <= self.max_rag_queries <= 3:
+            raise ValueError("researcher.max_rag_queries must be between 1 and 3")
+        if not 1 <= self.rag_top_k_per_query <= 2:
+            raise ValueError("researcher.rag_top_k_per_query must be 1 or 2")
+        if not 1 <= self.max_retrieved_records <= 4:
+            raise ValueError("researcher.max_retrieved_records must be between 1 and 4")
+        if not 1 <= self.max_feature_variants <= 2:
+            raise ValueError("researcher.max_feature_variants must be 1 or 2")
+        if not 1 <= self.max_feature_requests <= 6:
+            raise ValueError("researcher.max_feature_requests must be between 1 and 6")
+        if self.failure_policy != "abort_round":
+            raise ValueError("researcher.failure_policy must be abort_round")
+        if self.request_timeout_seconds is not None and self.request_timeout_seconds <= 0:
+            raise ValueError("researcher.request_timeout_seconds must be positive")
 
 
 @dataclass
@@ -1459,6 +1734,7 @@ class ExperimentConfig:
     evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
     kg_interaction: KGInteractionRuntimeConfig = field(default_factory=KGInteractionRuntimeConfig)
+    researcher: ResearcherConfig = field(default_factory=ResearcherConfig)
     hierarchical_hypothesis: HierarchicalHypothesisConfig = field(
         default_factory=HierarchicalHypothesisConfig
     )
@@ -1477,6 +1753,24 @@ class ExperimentConfig:
     structured_kg_snapshot_mode: str = "live_only"
 
     def __post_init__(self) -> None:
+        if self.researcher.enabled:
+            if self.knowledge.local_knowledge.retrieval.query_mode == "agentic" and not (
+                self.knowledge.local_knowledge.enabled and self.knowledge_enabled
+            ):
+                raise ValueError(
+                    "agentic local-knowledge query mode requires enabled local knowledge"
+                )
+            if self.kg_interaction.feature_tool_strategy == "agentic" and not (
+                self.knowledge_enabled and self.knowledge.kg and self.kg_interaction.enabled
+            ):
+                raise ValueError(
+                    "agentic feature planning requires the enabled KG interaction runtime"
+                )
+        elif (
+            self.knowledge.local_knowledge.retrieval.query_mode == "agentic"
+            or self.kg_interaction.feature_tool_strategy == "agentic"
+        ):
+            raise ValueError("Agentic query/feature modes require researcher.enabled=true")
         if self.designer.space != "open_design":
             if self.candidate_limit < 1:
                 raise ValueError(
@@ -1722,15 +2016,26 @@ def load_experiment_config(
         raw.update(overrides)
     task_raw = read_yaml(raw["task_config"], root)
     model_raw = read_yaml(raw["model_config"], root)
-    knowledge_raw = read_yaml(raw["knowledge_config"], root)
+    knowledge_raw = read_yaml_layers(raw["knowledge_config"], root)
     if ablation_path:
         ablation = read_yaml(ablation_path, root)
         for key in ("physchem", "conservation", "structure", "kg"):
             if key in ablation:
                 knowledge_raw[key] = bool(ablation[key])
-        for key in ("mode", "acquisition", "llm_provider"):
+        for key in (
+            "mode",
+            "acquisition",
+            "diversity_lambda",
+            "llm_provider",
+            "knowledge_enabled",
+        ):
             if key in ablation:
                 raw[key] = ablation[key]
+        for section in ("critic", "llm"):
+            if isinstance(ablation.get(section), dict):
+                merged_section = dict(raw.get(section, {}) or {})
+                merged_section.update(ablation[section])
+                raw[section] = merged_section
         knowledge_overrides = dict(ablation.get("knowledge", {}) or {})
         provider_overrides = dict(knowledge_overrides.pop("providers", {}) or {})
         if provider_overrides:
@@ -1918,6 +2223,9 @@ def load_experiment_config(
         if runtime != "chat_completions":
             raise ValueError(f"Removed Agents SDK runtime is not supported: {runtime!r}")
     llm = _dataclass_from_mapping(LLMConfig, llm_raw)
+    researcher = _dataclass_from_mapping(
+        ResearcherConfig, dict(raw.get("researcher", {}) or {})
+    )
     prior_schedule = _dataclass_from_mapping(
         PriorScheduleConfig, dict(raw.get("prior_schedule", {}) or {})
     )
@@ -1942,6 +2250,7 @@ def load_experiment_config(
         evaluation=evaluation,
         output=output,
         kg_interaction=kg_interaction,
+        researcher=researcher,
         hierarchical_hypothesis=hierarchical_hypothesis,
         prior_schedule=prior_schedule,
         output_root=root / raw.get("output_root", "artifacts/runs"),

@@ -282,6 +282,8 @@ class BatchReviewContext(BaseModel):
     soft_prior_mismatch_ids: tuple[str, ...] = ()
     review_controls: bool = True
     review_diversity: bool = True
+    exploration_quota_supported: bool = False
+    evidence_acquisition_supported: bool = False
     control_feasibility: ControlFeasibilityReceipt | None = None
     diversity: BatchDiversityReceipt | None = None
     revision_feedback: BatchRevisionFeedbackReceipt | None = None

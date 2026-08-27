@@ -1,5 +1,8 @@
 enabled: true
 mode: remote
+# Ordinary clean batches are approved by deterministic policy.  The remote
+# model is retained only as a semantic auditor for configured risk signals.
+policy_gate_enabled: true
 provider: deepseek
 model: deepseek-v4-flash
 base_url: https://api.deepseek.com
@@ -17,6 +20,8 @@ request_timeout_seconds: 120.0
 max_input_chars: 160000
 on_reject: abort_round
 on_exhausted: abort_round
+# Direct-remote compatibility only. Policy-gated semantic escalation always
+# fails closed with ABORT_ROUND when its required remote audit cannot complete.
 fallback_policy: rule
 require_counterevidence_search: false
 rationale_visibility: structured_claims_only
@@ -26,5 +31,16 @@ model_disagreement_threshold: null
 min_batch_distance: 1
 review_controls: true
 review_diversity: true
+semantic_audit_risk_codes:
+  - HIGH_OOD
+  - MODEL_DISAGREEMENT
+  - EVIDENCE_POLARITY_CONFLICT
+  - MISSING_CONSTITUENT
+semantic_audit_on_revision: true
+semantic_audit_on_uncalibrated_predictions: true
+semantic_audit_quality_statuses: [unverified]
+semantic_audit_applicability_statuses: []
+semantic_audit_mutation_count_threshold: null
+semantic_audit_warning_count_threshold: null
 max_tokens: 32768
 thinking: disabled

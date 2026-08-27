@@ -1,0 +1,17 @@
+schema_version: source-ledger:v2
+mode: immutable_inheritance
+parent_bundle: resources/local_knowledge/gb1_directive_v1
+parent_validation_receipt: resources/local_knowledge/gb1_directive_v1/validation-receipt.json
+allowed_source_spans:
+  - SS-001
+  - SS-002
+  - SS-003
+  - SS-004
+  - SS-005
+  - SS-006
+inheritance_rule: >-
+  Source identity, span text, credibility, and applicability are unchanged. V2 changes only
+  LogicUnit-to-DecisionCard compilation and runtime retrieval scope.
+new_publications: []
+human_reviewed: false
+selection_eligible: false

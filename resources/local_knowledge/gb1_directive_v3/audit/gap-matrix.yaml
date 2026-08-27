@@ -1,0 +1,13 @@
+schema_version: gap-matrix:v3
+gaps:
+  - gap_id: GAP-V3-001
+    finding: all v2 local retrieval rounds returned the early-stage card
+    impact: middle and late decision policies were never exposed to the Scientist
+    mitigation: filter retrieval by a distinct round-specific knowledge_type before top-1 selection
+  - gap_id: GAP-V3-002
+    finding: all v2 conditions reached the same observed final-best ceiling
+    impact: the preregistered final-best delta cannot distinguish faster discovery at that ceiling
+    mitigation: retain the frozen gate and report ceiling limitation without moving the threshold
+remaining_uncertainty:
+  - stochastic LLM response variance
+  - final-best ceiling saturation

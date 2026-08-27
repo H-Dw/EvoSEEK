@@ -112,6 +112,9 @@ retrieved claims from measurements.
 Check reference identity, allowed positions and edits, mutation depth, candidate source, exclusions,
 controls, duplicates, and route consistency. Review every multi-edit candidate in its complete
 sequence context; do not derive combination behavior by unvalidated addition of component values.
+Mutation depth is runtime-owned. Emit `MUTATION_DEPTH_MISMATCH` only when the deterministic conflict
+report contains that exact code. Do not infer a preferred depth from hypothesis prose, a soft prior,
+or a `fallback` candidate-intent arm.
 
 ### 4.4 Evidence and provenance auditor
 
@@ -143,6 +146,12 @@ If the control receipt is feasible and its selected count meets its requested co
 `INSUFFICIENT_DIVERSITY`, `BATCH_MODE_COLLAPSE`, or `INCREASE_DIVERSITY`. Never invent a new
 `minimum_batch_distance` or `control_count`: when a change is genuinely required, copy the exact
 runtime-owned requested value from the corresponding receipt.
+If `exploration_quota_supported=false`, do not emit `ADD_EXPLORATION_QUOTA`; that action cannot
+change the selected batch in the active runtime.
+If `evidence_acquisition_supported=false`, do not emit `REQUEST_EVIDENCE` or
+`ADD_COUNTEREVIDENCE_SEARCH`: the active review loop cannot acquire new sources. Preserve an
+unresolved non-hard evidence conflict as an explicit credibility warning and approve when all
+deterministic gates pass; do not disguise prose regeneration as evidence acquisition.
 
 ### 4.7 Falsification auditor
 
@@ -230,6 +239,20 @@ bounded Critic explanation paired with the exact Scientist hypothesis and review
 - A self-authored `HYPOTHESIS_UNTESTABLE`, `UNSUPPORTED_CLAIM`, or other unanchored issue does not
   make a soft-prior exclusion independent. Candidate exclusion requires a cited deterministic
   conflict, visible evidence, or a decision-eligible runtime prediction signal.
+- `MISSING_RATIONALE_EVIDENCE` is an evidence or hypothesis defect, not a candidate defect. Do not
+  pair it by itself with `EXCLUDE_CANDIDATE` or `REPLACE_CANDIDATE`; request evidence, revise the
+  hypothesis, or approve when the visible rationale is already adequate.
+- When every supplied `design_rationale` already carries visible `evidence_ids`, do not emit
+  `MISSING_RATIONALE_EVIDENCE`. The runtime treats those IDs as authoritative for presence; you may
+  still describe a soft polarity conflict without converting it into a submission blocker.
+- `COUNTEREVIDENCE_IGNORED` likewise identifies a reasoning defect. Route it to
+  `ADD_COUNTEREVIDENCE_SEARCH`, `RELAX_SOFT_PRIOR`, or hypothesis regeneration; do not convert it
+  into candidate replacement, exclusion, or residue constraints.
+- Every `EXCLUDE_CANDIDATE` or `REPLACE_CANDIDATE` target must have a candidate-scoped defect that
+  is not merely `MISSING_RATIONALE_EVIDENCE`, `COUNTEREVIDENCE_IGNORED`, `UNSUPPORTED_CLAIM`, or
+  `HYPOTHESIS_UNTESTABLE`. Batch-level and hypothesis-level findings cannot justify target removal.
+  The runtime deterministically reroutes those four non-candidate codes to counterevidence search,
+  evidence request, or falsification repair and removes unrelated target/residue parameters.
 - If `hard_residue_constraints` is empty, never emit `HARD_RESIDUE_CONSTRAINT_VIOLATION` and never
   emit `required_residues_by_position`. That issue is legal only for a candidate-scoped issue that
   cites the exact deterministic hard-conflict `C` label. Never derive a required residue from

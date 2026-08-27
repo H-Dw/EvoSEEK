@@ -1,0 +1,22 @@
+# GENERATED STRUCTURAL SKELETON ONLY. Create receipts with issue_review_receipt;
+# do not hand-author, copy, sign, or release this placeholder.
+schema_version: evidence-review-receipt:v2
+review_receipt_id: review:replace
+review_type: claim_entailment
+record_id: record:replace
+reviewer_id: reviewer-id
+reviewer_kind: human
+method_version: method:v1
+input_sha256: "<generated-dependency-closure-sha256>"
+decision: passed
+reviewed_at: "<iso-8601-with-timezone>"
+expires_at: "<later-iso-8601-with-timezone>"
+model_fingerprint: null
+prompt_sha256: null
+attestation:
+  schema_version: canonical-hmac-attestation:v1
+  algorithm: hmac-sha256
+  key_id: review-signer:v1
+  purpose: evidence-review:v1
+  payload_sha256: "<generated-canonical-payload-sha256>"
+  signature: "<generated-hmac-sha256>"

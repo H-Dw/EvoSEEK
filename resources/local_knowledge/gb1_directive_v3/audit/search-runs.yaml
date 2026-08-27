@@ -1,0 +1,8 @@
+schema_version: search-runs:v3
+brief_id: RB-GB1-DIRECTIVE-V3
+runs: []
+reason_no_new_runs: >-
+  V2 improved mean paired AUC while failing to route beyond the early card. The remaining
+  actionable defect is deterministic stage selection, not publication coverage.
+inherited_evidence_bundle: resources/local_knowledge/gb1_directive_v1/audit/source-ledger.yaml
+quarantine_policy_unchanged: true

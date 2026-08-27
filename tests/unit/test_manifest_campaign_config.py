@@ -78,7 +78,7 @@ def test_agent_experiments_wire_deepseek_and_kermut_without_literal_secrets():
 
     for config in (knowledge, llm_agent):
         assert config.llm.provider == "deepseek"
-        assert config.llm.model == "deepseek-v4-flash"
+        assert config.llm.model == "deepseek-v4-pro"
         assert config.llm.api_key == "env:DEEPSEEK_API_KEY"
         assert config.llm.base_url == "https://api.deepseek.com"
         assert config.critic.mode == "remote"

@@ -75,6 +75,7 @@ class RetrievedChunk:
     knowledge_type: str
     scores: dict[str, float]
     provenance: dict[str, Any]
+    facets: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -101,6 +102,36 @@ class KnowledgeClaim:
 
 
 @dataclass(frozen=True)
+class KnowledgeRecord:
+    """Native runtime evidence record with separated authority dimensions."""
+
+    record_id: str
+    record_type: str
+    retrieval_text: str
+    knowledge_type: str
+    permission: str
+    scientific_quality: dict[str, Any]
+    task_applicability: dict[str, Any]
+    boundary_conditions: tuple[str, ...]
+    counterclaims: tuple[str, ...]
+    abstain_if: tuple[str, ...]
+    facets: dict[str, tuple[str, ...]]
+    evidence_chunk_ids: tuple[str, ...]
+    canonical_record_hash: str | None = None
+    payload: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.record_type not in {
+            "atomic_claim",
+            "logic_unit",
+            "knowledge_decision_card",
+        }:
+            raise ValueError("KnowledgeRecord record_type is invalid")
+        if not self.record_id or not self.retrieval_text:
+            raise ValueError("KnowledgeRecord requires identity and retrieval text")
+
+
+@dataclass(frozen=True)
 class RetrievalResult:
     query_id: str
     round_id: int
@@ -111,6 +142,7 @@ class RetrievalResult:
     claims: tuple[KnowledgeClaim, ...]
     warnings: tuple[str, ...]
     index_manifest_hash: str
+    records: tuple[KnowledgeRecord, ...] = ()
 
 
 @dataclass(frozen=True)

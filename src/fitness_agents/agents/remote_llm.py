@@ -41,6 +41,7 @@ from .transports import ChatTransport
 
 DEEPSEEK_DEFAULT_BASE_URL = "https://api.deepseek.com"
 DEEPSEEK_DEFAULT_MODEL = "deepseek-v4-flash"
+MAX_TRANSPORT_BACKOFF_SECONDS = 60.0
 
 _completion_receipt: ContextVar[dict[str, Any] | None] = ContextVar(
     "fitness_agents_llm_completion_receipt", default=None
@@ -881,7 +882,11 @@ def complete_json(
                 transport_retries_used += 1
                 if retry_backoff_seconds:
                     time.sleep(
-                        retry_backoff_seconds * (2 ** (transport_retries_used - 1))
+                        min(
+                            retry_backoff_seconds
+                            * (2 ** (transport_retries_used - 1)),
+                            MAX_TRANSPORT_BACKOFF_SECONDS,
+                        )
                     )
             else:
                 if not will_retry:

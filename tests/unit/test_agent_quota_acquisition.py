@@ -113,6 +113,43 @@ def test_agent_quota_acquisition_audits_shortfall_and_fills_batch() -> None:
     assert result.fallback_ids
 
 
+def test_matched_control_is_disabled_when_no_strong_target_exists() -> None:
+    config = AgentQuotaAllocationConfig(
+        enabled=True,
+        hypothesis_target=2,
+        evidence_prior=1,
+        coverage_exploration=1,
+        matched_control=2,
+    )
+    variants = [
+        _variant(f"v{index}", code)
+        for index, code in enumerate(("AAAA", "AAAC", "AAAG", "AACA", "ACAA", "CAAA"))
+    ]
+    scores = [
+        _score(
+            f"v{index}",
+            utility=1.0 - 0.1 * index,
+            hypothesis=0.5,
+            evidence=0.8 if index == 0 else 0.0,
+            uncertainty=0.9 - 0.1 * index,
+        )
+        for index in range(6)
+    ]
+
+    result = AgentQuotaBatchAcquisition(config).select(
+        variants, scores, 6, diversity_lambda=0.0
+    )
+
+    assert len(result.selected_ids) == 6
+    assert result.strong_hypothesis_candidate_count == 0
+    assert result.quotas["matched_control"] == 0
+    assert result.shortfalls["matched_control"] == 0
+    assert result.control_feasibility.feasible is True
+    assert result.quota_adjustments == {
+        "matched_control": "disabled_without_strong_hypothesis_target"
+    }
+
+
 def test_revision_constraints_filter_complete_variants_and_expose_control_intent() -> None:
     config = AgentQuotaAllocationConfig(
         enabled=True,

@@ -21,12 +21,14 @@ from fitness_agents.local_knowledge.contracts import (
     LeakagePolicyContext,
     RetrievalRequest,
     RetrievalResult,
+    RetrievedChunk,
 )
 from fitness_agents.local_knowledge.index import SQLiteLocalKnowledgeIndex
 from fitness_agents.local_knowledge.leakage import TargetLeakageGuard
 from fitness_agents.local_knowledge.overlay import SQLiteRetrievalOverlay
 from fitness_agents.local_knowledge.retriever import LocalHybridRetriever
 from fitness_agents.local_knowledge.selection import CandidateEvidenceProjector
+from fitness_agents.local_knowledge.service import LocalKnowledgeBase
 
 
 class _KeywordEmbedding:
@@ -71,7 +73,14 @@ def _config(root: Path, index_path: Path, *, dense: bool) -> LocalKnowledgeConfi
         enabled=True,
         corpus_index_path=index_path,
         retrieval_overlay_path=index_path.with_name(f"{index_path.stem}-overlay.sqlite"),
-        roots=(LocalKnowledgeRootConfig(path=root, include=("**/*.md",)),),
+        roots=(
+            LocalKnowledgeRootConfig(
+                path=root,
+                access_policy_mode="synthetic_test",
+                runtime_manifest_mode="legacy_compatible",
+                include=("**/*.md",),
+            ),
+        ),
         ingestion=LocalKnowledgeIngestionConfig(chunk_tokens=64, chunk_overlap=8),
         retrieval=LocalKnowledgeRetrievalConfig(
             mode="hybrid" if dense else "lexical",
@@ -168,6 +177,34 @@ def test_instruction_like_corpus_content_is_rejected_at_ingestion(tmp_path: Path
             index.build(_config(root, index.path, dense=False))
     finally:
         index.close()
+
+
+def test_read_only_index_rejects_a_different_runtime_security_binding(
+    tmp_path: Path,
+) -> None:
+    original_root = tmp_path / "original"
+    original_root.mkdir()
+    (original_root / "evidence.md").write_text(
+        "Synthetic ordinary scientific evidence.",
+        encoding="utf-8",
+    )
+    index_path = tmp_path / "bound.sqlite"
+    original_config = _config(original_root, index_path, dense=False)
+    writable = SQLiteLocalKnowledgeIndex(index_path)
+    try:
+        writable.build(original_config)
+    finally:
+        writable.close()
+
+    other_root = tmp_path / "other"
+    other_root.mkdir()
+    changed_config = _config(other_root, index_path, dense=False)
+    read_only = SQLiteLocalKnowledgeIndex(index_path, read_only=True)
+    try:
+        with pytest.raises(RuntimeError, match="security binding"):
+            read_only.assert_runtime_binding(changed_config)
+    finally:
+        read_only.close()
 
 
 def test_irrelevant_dense_query_returns_explicit_no_answer(tmp_path: Path) -> None:
@@ -300,6 +337,63 @@ def test_validated_candidate_projection_is_candidate_specific(tmp_path: Path) ->
     assert evidence[0].score == -0.2
     assert evidence[0].contributes_to_selection is True
     assert evidence[0].calibrated is True
+    assert evidence[0].confidence == pytest.approx(0.8)
+    assert evidence[0].raw_features["claim_scientific_confidence"] == pytest.approx(0.7)
+
+
+def test_atomic_claim_keeps_scientific_confidence_separate_from_retrieval() -> None:
+    chunk = RetrievedChunk(
+        chunk_id="chunk:synthetic",
+        document_id="document:synthetic",
+        text="A synthetic scientific statement.",
+        artifact_uri="synthetic://claim",
+        section_path=(),
+        start_offset=0,
+        end_offset=33,
+        source_group="synthetic",
+        knowledge_type="synthetic_prior",
+        scores={"retrieval_confidence": 0.1},
+        provenance={
+            "metadata": {
+                "record_type": "atomic_claim",
+                "claim_id": "claim:synthetic",
+                "statement": "A synthetic scientific statement.",
+                "subject": "synthetic subject",
+                "predicate": "has",
+                "object": "synthetic outcome",
+                "confidence": 0.91,
+                "selection_eligible": "false",
+            }
+        },
+    )
+
+    claim = LocalHybridRetriever._claim_from_chunk(chunk)
+
+    assert claim.confidence == pytest.approx(0.91)
+    assert claim.selection_eligible is False
+
+
+def test_local_evidence_id_is_query_and_chunk_bound() -> None:
+    base = RetrievalResult(
+        query_id="query:one",
+        round_id=3,
+        original_query_hash="hash",
+        sanitized_query="synthetic",
+        policy_decision={"allowed": True},
+        chunks=(),
+        claims=(),
+        warnings=(),
+        index_manifest_hash="manifest",
+    )
+    other_query = RetrievalResult(
+        **{**base.__dict__, "query_id": "query:two"}
+    )
+
+    first = LocalKnowledgeBase._retrieval_evidence_id(base, "chunk:one")
+    second = LocalKnowledgeBase._retrieval_evidence_id(other_query, "chunk:one")
+    third = LocalKnowledgeBase._retrieval_evidence_id(base, "chunk:two")
+
+    assert len({first, second, third}) == 3
 
 
 def test_draft_selection_calibration_is_rejected(tmp_path: Path) -> None:

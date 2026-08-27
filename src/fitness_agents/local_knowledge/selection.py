@@ -102,7 +102,7 @@ class CandidateEvidenceProjector:
             if claim.selection_eligible
             and claim.citation_support
             and all(
-                bool(item.get("verified_against_source", False))
+                item.get("verified_against_source") is True
                 for item in claim.citation_support
             )
         }
@@ -115,9 +115,14 @@ class CandidateEvidenceProjector:
             for variant in variants:
                 if not self._matches(variant, rule):
                     continue
+                evidence_digest = hashlib.sha256(
+                    (
+                        f"{result.query_id}|{claim_id}|{rule['rule_id']}|"
+                        f"{variant.variant_id}"
+                    ).encode()
+                ).hexdigest()[:16]
                 evidence_id = (
-                    f"E{result.round_id}:local-projection:"
-                    f"{rule['rule_id']}:{variant.variant_id}"
+                    f"E{result.round_id}:local-projection:{evidence_digest}"
                 )
                 score = float(rule["score"])
                 output.append(
@@ -128,7 +133,7 @@ class CandidateEvidenceProjector:
                         statement=claim.statement,
                         score=score,
                         source_id=f"calibration:{self.calibration_id}",
-                        confidence=min(float(rule["confidence"]), claim.confidence),
+                        confidence=float(rule["confidence"]),
                         round_id=result.round_id,
                         evidence_type="calibrated_candidate_projection",
                         raw_features={
@@ -136,6 +141,7 @@ class CandidateEvidenceProjector:
                             "rule_id": rule["rule_id"],
                             "rule_operator": rule["operator"],
                             "rule_value": rule["value"],
+                            "claim_scientific_confidence": claim.confidence,
                         },
                         quality_status="ok",
                         applicability="candidate_specific_calibrated_projection",

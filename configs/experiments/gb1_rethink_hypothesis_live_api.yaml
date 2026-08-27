@@ -22,9 +22,10 @@ llm:
   request_timeout_seconds: 240.0
 critic_config: configs/critic/deepseek_remote.yaml
 critic:
-  max_revision_attempts: 0
-  on_reject: safe_fallback
-  on_exhausted: safe_fallback
+  max_revision_attempts: 1
+  on_reject: abort_round
+  on_exhausted: abort_round
+  fallback_policy: none
 knowledge_enabled: true
 score_shuffle: false
 evidence_deletion: false

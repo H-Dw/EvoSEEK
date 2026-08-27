@@ -21,6 +21,14 @@ def test_directed_evolution_corpus_flows_from_typed_rag_into_kg(tmp_path) -> Non
         index_path=tmp_path / "directed-evolution.sqlite",
         corpus_index_path=tmp_path / "directed-evolution.sqlite",
         retrieval_overlay_path=tmp_path / "gb1-overlay.sqlite",
+        roots=tuple(
+            replace(
+                root,
+                access_policy_mode="synthetic_test",
+                runtime_manifest_mode="legacy_compatible",
+            )
+            for root in experiment.knowledge.local_knowledge.roots
+        ),
         retrieval=replace(
             experiment.knowledge.local_knowledge.retrieval,
             mode="lexical",
@@ -139,7 +147,11 @@ def test_directed_evolution_corpus_flows_from_typed_rag_into_kg(tmp_path) -> Non
         knowledge_type
         for item in built.snapshot.entities
         if item.entity_type == "Claim"
-        for knowledge_type in item.properties["knowledge_types"]
+        for knowledge_type in item.properties.get(
+            "knowledge_types",
+            (item.properties.get("knowledge_type"),),
+        )
+        if knowledge_type
     }
     assert document_types == {"sequence_safeguards"}
     assert claim_types == {"sequence_safeguards"}

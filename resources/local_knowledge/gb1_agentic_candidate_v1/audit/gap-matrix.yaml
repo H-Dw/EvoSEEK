@@ -1,0 +1,11 @@
+schema_version: evidence-gap-matrix:v1
+candidate_id: GB1-AGENTIC-CANDIDATE-V1
+gaps:
+  - question_leaf_id: QL-FOLD-BINDING-SEPARATION
+    support_record_ids: [AC-AG-V1-FOLD-BINDING]
+    boundary_record_ids: [AC-AG-V1-STATIC-LIMIT, LU-AG-V1-MEASUREMENT-BOUNDARY]
+    status: bounded
+  - question_leaf_id: QL-LOCAL-COUPLING
+    support_record_ids: [LU-AG-V1-MATCHED-COUPLING]
+    boundary_record_ids: [DC-AG-V1-PAIRWISE-CHECK]
+    status: bounded

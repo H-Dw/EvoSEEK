@@ -14,11 +14,19 @@ local_knowledge:
   roots:
     - path: resources/local_knowledge/directed_evolution
       root_id: DIRECTED_EVOLUTION
+      access_policy_mode: required
+      runtime_manifest_mode: required
       include: ["claims/**/*.md"]
-      exclude: ["**/~$*", "**/.git/**", "**/artifacts/**"]
+      exclude:
+        - "**/~$*"
+        - "**/.git/**"
+        - "**/artifacts/**"
+        - "claims/continuous_evolution_operations/maintain_mutagenesis_and_host_flow.md"
     # Independent ablation unit for binding-affinity operations.
     - path: resources/local_knowledge/binding
       root_id: BINDING
+      access_policy_mode: required
+      runtime_manifest_mode: required
       include: ["claims/**/*.md"]
       exclude: ["**/~$*", "**/.git/**", "**/artifacts/**"]
   ingestion:

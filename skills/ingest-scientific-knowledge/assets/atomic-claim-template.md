@@ -1,4 +1,5 @@
 ---
+# GENERATED-ONLY COMPATIBILITY SKELETON. Do not hand-author or ingest this file.
 schema_version: scientific-atomic-claim:v1
 record_type: atomic_claim
 claim_id: domain:claim:stable-slug
@@ -17,8 +18,10 @@ citation_support:
   - support_id: domain:citation:stable-slug
     publication_id: doi:10.xxxx/example
     support_type: direct_support
-    locator: abstract
-    verified_against_source: false
+    locator: replace-with-resolved-source-locator
+    verified_against_source: true
 selection_eligible: false
+source_release_id: release:replace
+source_record_hash: "<canonical-atomic-claim-sha256>"
 ---
 One falsifiable English scientific statement.

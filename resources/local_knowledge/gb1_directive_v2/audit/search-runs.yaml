@@ -1,0 +1,8 @@
+schema_version: search-runs:v2
+brief_id: RB-GB1-DIRECTIVE-V2
+runs: []
+reason_no_new_runs: >-
+  The blinded v1 receipt showed complete intended-card retrieval but worse mean AUC. This
+  iteration therefore recompiles already validated evidence instead of adding publications.
+inherited_evidence_bundle: resources/local_knowledge/gb1_directive_v1/audit/source-ledger.yaml
+quarantine_policy_unchanged: true

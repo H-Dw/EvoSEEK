@@ -31,7 +31,14 @@ def test_local_knowledge_is_retrieved_and_materialized_in_current_round(
     local = LocalKnowledgeConfig(
         enabled=True,
         index_path=tmp_path / "shared-local-index.sqlite",
-        roots=(LocalKnowledgeRootConfig(path=root, include=("**/*.md",)),),
+        roots=(
+            LocalKnowledgeRootConfig(
+                path=root,
+                access_policy_mode="synthetic_test",
+                runtime_manifest_mode="legacy_compatible",
+                include=("**/*.md",),
+            ),
+        ),
         ingestion=LocalKnowledgeIngestionConfig(chunk_tokens=64, chunk_overlap=8),
         retrieval=LocalKnowledgeRetrievalConfig(mode="lexical", top_k=4),
         leakage_guard=LeakageGuardConfig(enabled=False),
@@ -44,6 +51,7 @@ def test_local_knowledge_is_retrieved_and_materialized_in_current_round(
         output_root=tmp_path / "runs",
         run_label="local-rag",
         knowledge=replace(experiment_config.knowledge, local_knowledge=local),
+        kg_interaction=replace(experiment_config.kg_interaction, max_tool_calls=6),
     )
 
     summary = run_campaign(config)
@@ -95,7 +103,14 @@ def test_campaign_leakage_guard_excludes_target_knowledge_from_rag_and_local_kg(
     local = LocalKnowledgeConfig(
         enabled=True,
         index_path=tmp_path / "guarded-index.sqlite",
-        roots=(LocalKnowledgeRootConfig(path=root, include=("**/*.md",)),),
+        roots=(
+            LocalKnowledgeRootConfig(
+                path=root,
+                access_policy_mode="synthetic_test",
+                runtime_manifest_mode="legacy_compatible",
+                include=("**/*.md",),
+            ),
+        ),
         ingestion=LocalKnowledgeIngestionConfig(chunk_tokens=64, chunk_overlap=8),
         retrieval=LocalKnowledgeRetrievalConfig(mode="lexical", top_k=4),
         leakage_guard=LeakageGuardConfig(
@@ -117,6 +132,7 @@ def test_campaign_leakage_guard_excludes_target_knowledge_from_rag_and_local_kg(
             protein_aliases=("GB1", "protein G B1 domain"),
         ),
         knowledge=replace(experiment_config.knowledge, local_knowledge=local),
+        kg_interaction=replace(experiment_config.kg_interaction, max_tool_calls=6),
     )
 
     summary = run_campaign(config)

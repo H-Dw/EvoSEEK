@@ -1,0 +1,22 @@
+schema_version: evidence-gap-matrix:v1
+brief_id: RB-GB1-DIRECTIVE-V1
+gaps:
+  - gap_id: GAP-001
+    question: Which substitutions improve benchmark binding fitness?
+    status: intentionally_unanswered
+    reason: target-label leakage boundary
+  - gap_id: GAP-002
+    question: Does a stability-preserving class improve Fc binding in every sequence background?
+    status: unresolved
+    reason: stability and binding are distinct latent variables; epistasis is background dependent
+    mitigation: matched comparison and abstention rule in each relevant card
+  - gap_id: GAP-003
+    question: Are modeled packing changes reliable without mutant structures?
+    status: partially_resolved
+    reason: wild-type coordinates constrain proximity but not mutant repacking
+    mitigation: use class-level comparisons and downgrade large volume changes
+  - gap_id: GAP-004
+    question: Does assay-condition dependence transfer to the benchmark protocol?
+    status: unresolved
+    reason: condition metadata are incomplete at runtime
+    mitigation: do not turn interface chemistry into a deterministic recommendation

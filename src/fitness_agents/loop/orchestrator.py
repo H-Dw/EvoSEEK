@@ -3,7 +3,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 from collections.abc import Callable, Sequence
-from dataclasses import replace
+from dataclasses import asdict, is_dataclass, replace
 from datetime import datetime, timezone
 from typing import Any
 
@@ -16,8 +16,8 @@ from fitness_agents.agents.client_registry import create_role_client_bundle
 from fitness_agents.agents.context_projection import approved_analysis_payload
 from fitness_agents.agents.critic import (
     CriticAgent,
-    OpenAICriticClient,
     RuleBasedCriticClient,
+    create_batch_critic_agent,
     load_critic_profile_version,
 )
 from fitness_agents.agents.hypothesis_graph import HypothesisReviewGraph
@@ -37,6 +37,7 @@ from fitness_agents.agents.output_guards import (
 )
 from fitness_agents.agents.profile_loader import load_role_profile
 from fitness_agents.agents.remote_llm import RemoteLLMCompletionError
+from fitness_agents.agents.researcher import create_researcher_client
 from fitness_agents.agents.rethink import (
     build_round_evidence_digest,
     create_hypothesis_rethink_client,
@@ -66,6 +67,17 @@ from fitness_agents.contracts.batch_review import (
     soft_prior_mismatch_ids,
 )
 from fitness_agents.contracts.hypothesis_pipeline import CompletionManifest
+from fitness_agents.contracts.researcher import (
+    ExternalRetrievalPlan,
+    FeatureEvidencePlan,
+    ResearcherAssayContext,
+    ResearcherContextInput,
+    ResearcherFacetCatalog,
+    ResearcherKnowledgeRecordCard,
+    ResearcherRoundReceipt,
+    ResearcherSampleCard,
+    ResearcherToolCard,
+)
 from fitness_agents.contracts.schemas import (
     CampaignPhase,
     CampaignState,
@@ -104,8 +116,10 @@ from fitness_agents.kg_interaction import (
     KGTruncationAuditOperator,
     LocalKnowledgeQueryOperator,
     QueryIntent,
+    ResearcherPlanningController,
     StructuredClaimQueryOperator,
     runtime_truncation_audit_payload,
+    stable_payload_hash,
 )
 from fitness_agents.knowledge import KnowledgeEngine
 from fitness_agents.models import create_predictor
@@ -155,6 +169,17 @@ def is_hypothesis_generation_error(error: BaseException) -> bool:
             EmptyLLMOutputError,
         ),
     )
+
+
+def _next_hypothesis_attempt(rejected_hypothesis_id: str, *, round_id: int) -> int:
+    """Allocate a fresh runtime-owned hypothesis ordinal after a Critic revision."""
+
+    prefix = f"H{round_id:02d}-"
+    if rejected_hypothesis_id.startswith(prefix):
+        suffix = rejected_hypothesis_id[len(prefix) :]
+        if suffix.isdigit():
+            return max(1, int(suffix) + 1)
+    return 1
 
 
 def _filter_hard_residue_constraints(
@@ -345,6 +370,7 @@ class CampaignRunner:
         predictor_factory: Callable[..., Any] = create_predictor,
         agent: ScientistAgent | None = None,
         critic_agent: CriticAgent | None = None,
+        researcher_client: Any | None = None,
     ) -> None:
         self.config = config
         self.rng = seed_everything(config.seed)
@@ -538,6 +564,67 @@ class CampaignRunner:
             },
             **llm_runtime_settings,
         )
+        self.researcher_client = researcher_client
+        self.researcher_controller = None
+        self._researcher_round_state: dict[int, dict[str, Any]] = {}
+        if config.researcher.enabled:
+            researcher_provider = config.researcher.provider or config.llm.provider
+            if self.researcher_client is None:
+                self.researcher_client = create_researcher_client(
+                    researcher_provider,
+                    model=config.researcher.model or config.llm.model,
+                    base_url=config.researcher.base_url or config.llm.base_url,
+                    api_key=config.researcher.api_key or config.llm.api_key,
+                    profile=config.researcher.profile,
+                    temperature=config.researcher.temperature,
+                    max_tokens=config.researcher.max_tokens,
+                    reasoning_effort=(
+                        config.researcher.reasoning_effort
+                        if config.researcher.reasoning_effort is not None
+                        else config.llm.reasoning_effort
+                    ),
+                    thinking=config.researcher.thinking,
+                    max_input_chars=config.researcher.max_input_chars,
+                    request_timeout_seconds=(
+                        config.researcher.request_timeout_seconds
+                        or config.llm.request_timeout_seconds
+                    ),
+                    max_transport_retries=config.llm.max_transport_retries,
+                    max_truncation_retries=config.llm.max_truncation_retries,
+                    max_syntax_retries=config.llm.max_syntax_retries,
+                    max_schema_retries=config.llm.max_schema_retries,
+                    max_semantic_retries=config.llm.max_semantic_retries,
+                    retry_backoff_seconds=config.llm.retry_backoff_seconds,
+                )
+            facet_catalog = (
+                self.knowledge.local_knowledge.index.facet_catalog()
+                if self.knowledge.local_knowledge is not None
+                else {}
+            )
+            forbidden_terms = tuple(
+                item
+                for item in (
+                    config.task.protein_id,
+                    config.task.protein_name,
+                    *config.task.protein_aliases,
+                    *config.task.protein_accessions,
+                )
+                if item
+            )
+            self.researcher_controller = ResearcherPlanningController(
+                config.researcher,
+                mutable_positions=config.task.mutable_positions,
+                facet_catalog=facet_catalog,
+                enabled_feature_channels=config.kg_interaction.feature_channels,
+                forbidden_query_terms=forbidden_terms,
+            )
+            bind_validator = getattr(
+                self.researcher_client,
+                "bind_external_plan_validator",
+                None,
+            )
+            if callable(bind_validator):
+                bind_validator(self.researcher_controller.validate_external_plan)
         main_scientist_client = role_clients.scientist
         if (
             config.hierarchical_hypothesis.enabled
@@ -754,40 +841,7 @@ class CampaignRunner:
                 ),
             )
         if critic_agent is None:
-            rule_critic = RuleBasedCriticClient()
-            if config.critic.mode == "remote" and config.critic.enabled:
-                critic_client = OpenAICriticClient(
-                    model=config.critic.model,
-                    profile=config.critic.profile,
-                    temperature=config.critic.temperature,
-                    base_url=config.critic.base_url,
-                    provider=config.critic.provider,
-                    max_tokens=config.critic.max_tokens,
-                    reasoning_effort=None,
-                    thinking="disabled",
-                    api_key=config.critic.api_key,
-                    max_transport_retries=config.critic.max_model_retries,
-                    max_truncation_retries=config.critic.max_truncation_retries,
-                    max_syntax_retries=config.critic.max_syntax_retries,
-                    max_schema_retries=config.critic.max_schema_retries,
-                    max_semantic_retries=config.critic.max_semantic_retries,
-                    max_unknown_evidence_retries=(
-                        config.critic.max_unknown_evidence_retries
-                    ),
-                    retry_backoff_seconds=config.critic.retry_backoff_seconds,
-                    request_timeout_seconds=config.critic.request_timeout_seconds,
-                    max_input_chars=config.critic.max_input_chars,
-                )
-                critic_agent = CriticAgent(
-                    critic_client,
-                    # Provider/output retries are already owned by the client
-                    # runtime.  Keeping this wrapper at zero prevents N x N
-                    # request multiplication.
-                    max_retries=0,
-                    fallback=rule_critic if config.critic.fallback_policy == "rule" else None,
-                )
-            else:
-                critic_agent = CriticAgent(rule_critic, max_retries=0)
+            critic_agent = create_batch_critic_agent(config.critic)
         self.critic_agent = critic_agent
         self.hard_validator = BatchHardValidator(config.task, config.critic)
         self.review_loop = BoundedReviewLoop(
@@ -801,6 +855,13 @@ class CampaignRunner:
         self.generator = create_candidate_generator(
             config.mode,
             position_to_index=self.task_context.position_to_variant_index,
+            wild_type_by_position=dict(
+                zip(
+                    self.task_context.mutable_positions,
+                    self.task_context.wild_type_residues,
+                    strict=True,
+                )
+            ),
             sampling_namespace=(
                 f"task={config.task.task_id}|assay={config.task.assay_id}|"
                 f"fold={config.task.fold_index}"
@@ -809,6 +870,13 @@ class CampaignRunner:
         self.agent_selector = AgentUncertaintySelector(
             config.generation,
             position_to_index=self.task_context.position_to_variant_index,
+            wild_type_by_position=dict(
+                zip(
+                    self.task_context.mutable_positions,
+                    self.task_context.wild_type_residues,
+                    strict=True,
+                )
+            ),
         )
         self.agent_quota_acquisition = (
             AgentQuotaBatchAcquisition(config.generation.quota_allocation)
@@ -857,6 +925,13 @@ class CampaignRunner:
             remaining,
             hypothesis=hypothesis,
             position_to_index=self.task_context.position_to_variant_index,
+            wild_type_by_position=dict(
+                zip(
+                    self.task_context.mutable_positions,
+                    self.task_context.wild_type_residues,
+                    strict=True,
+                )
+            ),
             strong_threshold=quota.strong_hypothesis_threshold,
             required_controls=(
                 quota.matched_control
@@ -866,6 +941,29 @@ class CampaignRunner:
             candidate_limit=self.config.candidate_limit,
             reserve_multiplier=quota.matched_control_reserve_multiplier,
         )
+    def _agent_quota_overrides(
+        self,
+        hypothesis: Hypothesis | None,
+        allowed_mutation_orders: tuple[int, ...] | None,
+    ) -> dict[str, int] | None:
+        """Return auditable round-local quota overrides for constrained designs."""
+
+        if allowed_mutation_orders:
+            return {"matched_control": 0}
+        if (
+            hypothesis is not None
+            and hypothesis.hypothesis_id.endswith("-COVERAGE")
+            and not hypothesis.preferred_residues
+            and self.config.prior_schedule.no_supported_hypothesis_policy
+            == "coverage_exploration"
+        ):
+            return {
+                "hypothesis_target": 0,
+                "evidence_prior": 0,
+                "coverage_exploration": self.config.budget_per_round,
+                "matched_control": 0,
+            }
+        return None
 
     def _role_activation_state(
         self,
@@ -959,7 +1057,462 @@ class CampaignRunner:
         self._fit_predictor(predictor, observed_variants)
         return predictor
 
-    def _run_kg_interaction(self, *, round_id: int, observed_variants: list[Any]):
+    @staticmethod
+    def _researcher_plain(value: Any) -> Any:
+        if value is None:
+            return None
+        if hasattr(value, "model_dump"):
+            return value.model_dump(mode="json")
+        if is_dataclass(value):
+            return asdict(value)
+        return value
+
+    def _researcher_measurement_cards(
+        self,
+        *,
+        round_id: int,
+        observed_variants: Sequence[Any],
+    ) -> tuple[tuple[ResearcherSampleCard, ...], dict[str, str]]:
+        variants_by_id = {item.variant_id: item for item in observed_variants}
+        visible = [
+            item for item in self.state.observed if item.round_revealed < round_id
+        ]
+        visible.sort(key=lambda item: (item.round_revealed, item.variant_id))
+        visible = visible[-self.config.kg_interaction.max_rows :]
+        cards: list[ResearcherSampleCard] = []
+        sample_to_variant: dict[str, str] = {}
+        for ordinal, observation in enumerate(visible, start=1):
+            sample_id = f"S{ordinal}"
+            variant = variants_by_id.get(observation.variant_id)
+            mutated_positions: tuple[int, ...] = ()
+            if variant is not None:
+                mutated_positions = tuple(
+                    position
+                    for position, wild_type, residue in zip(
+                        self.config.task.mutable_positions,
+                        self.config.task.wild_type_sites,
+                        variant.variant,
+                        strict=True,
+                    )
+                    if wild_type != residue
+                )
+            cards.append(
+                ResearcherSampleCard(
+                    sample_id=sample_id,
+                    observation_id=f"O{ordinal}",
+                    measured_fitness=float(observation.fitness),
+                    round_revealed=int(observation.round_revealed),
+                    source=str(observation.source),
+                    mutated_positions=mutated_positions,
+                )
+            )
+            sample_to_variant[sample_id] = observation.variant_id
+        return tuple(cards), sample_to_variant
+
+    def _researcher_assay_context(self) -> ResearcherAssayContext:
+        return ResearcherAssayContext(
+            # The true assay binding remains local to the runtime and receipts.  The
+            # Researcher receives an opaque request-local label so it cannot echo a
+            # protected benchmark/task identity into an external retrieval query.
+            assay_id="A1",
+            objective=self.config.task.objective,
+            fitness_scale=self.config.task.fitness_scale,
+            optimization_direction="higher_is_better",
+            conditions=dict(self.config.task.assay_conditions),
+        )
+
+    def _researcher_facet_catalog(self) -> ResearcherFacetCatalog:
+        catalog = (
+            self.knowledge.local_knowledge.index.facet_catalog()
+            if self.knowledge.local_knowledge is not None
+            else {}
+        )
+        return ResearcherFacetCatalog(allowed_values=catalog)
+
+    def _researcher_tool_catalog(self) -> tuple[ResearcherToolCard, ...]:
+        allowed_positions = tuple(self.config.task.mutable_positions)
+        return (
+            ResearcherToolCard(
+                tool_id="query_physchem_delta",
+                channel="physchem",
+                allowed_positions=allowed_positions,
+                allowed_focus=(
+                    "site_deltas",
+                    "global_sequence_deltas",
+                    "special_flags",
+                ),
+            ),
+            ResearcherToolCard(
+                tool_id="query_evolutionary_profile",
+                channel="conservation",
+                allowed_positions=allowed_positions,
+                allowed_focus=(
+                    "site_log_odds",
+                    "pairwise_signal",
+                    "profile_quality",
+                ),
+            ),
+            ResearcherToolCard(
+                tool_id="query_structure_environment",
+                channel="structure",
+                allowed_positions=allowed_positions,
+                allowed_focus=(
+                    "solvent_exposure",
+                    "contact_geometry",
+                    "interface_contacts",
+                    "backbone_geometry",
+                    "interaction_flags",
+                ),
+            ),
+        )
+
+    @staticmethod
+    def _researcher_record_card(record: Any) -> ResearcherKnowledgeRecordCard:
+        return ResearcherKnowledgeRecordCard(
+            record_id=record.record_id,
+            record_type=record.record_type,
+            retrieval_text=record.retrieval_text,
+            knowledge_type=record.knowledge_type,
+            permission=record.permission,
+            scientific_quality=record.scientific_quality,
+            task_applicability=record.task_applicability,
+            boundary_conditions=record.boundary_conditions,
+            counterclaims=record.counterclaims,
+            abstain_if=record.abstain_if,
+            facets=record.facets,
+        )
+
+    def _run_researcher_phase_a(
+        self,
+        *,
+        round_id: int,
+        observed_variants: Sequence[Any],
+    ) -> tuple[
+        ExternalRetrievalPlan,
+        tuple[Any, ...],
+        tuple[Any, ...],
+        tuple[ResearcherKnowledgeRecordCard, ...],
+    ]:
+        if self.researcher_client is None or self.researcher_controller is None:
+            raise RuntimeError("Agentic retrieval requires an initialized Researcher")
+        measurement_cards, _ = self._researcher_measurement_cards(
+            round_id=round_id, observed_variants=observed_variants
+        )
+        context = ResearcherContextInput(
+            phase="external_retrieval",
+            run_id=self.run_id,
+            round_id=round_id,
+            task=self.config.task.objective,
+            assay=self._researcher_assay_context(),
+            measurement_kg=measurement_cards,
+            prior_hypothesis_assessment=(
+                self._researcher_plain(self.state.hypothesis_assessments[-1])
+                if self.state.hypothesis_assessments
+                else None
+            ),
+            prior_hypothesis_reflection=(
+                self._researcher_plain(self.state.hypothesis_reflections[-1])
+                if self.state.hypothesis_reflections
+                else None
+            ),
+            facet_catalog=self._researcher_facet_catalog(),
+        )
+        plan = self.researcher_client.plan_external(context)
+        self._researcher_round_state[round_id] = {
+            "phase_a_context_hash": stable_payload_hash(context),
+            "external_plan": plan,
+            "query_ids": (),
+            "record_ids": (),
+        }
+        needs = self.researcher_controller.validate_external_plan(plan)
+        raw_results: list[Any] = []
+        for need in needs:
+            result, _ = self.knowledge.retrieve_local_knowledge(
+                query=need.query,
+                intent=need.intent,
+                round_id=round_id,
+                anchors=(),
+                top_k=need.top_k,
+                facets=need.facets,
+                stage=False,
+            )
+            raw_results.append(result)
+            self._researcher_round_state[round_id]["query_ids"] = tuple(
+                item.query_id for item in raw_results
+            )
+
+        accepted_ids: set[str] = set()
+        staged_results: list[Any] = []
+        staged_evidence: list[Any] = []
+        record_cards: list[ResearcherKnowledgeRecordCard] = []
+        for result in raw_results:
+            accepted_records = []
+            accepted_chunk_ids: set[str] = set()
+            for record in result.records:
+                if record.record_id in accepted_ids:
+                    continue
+                if len(accepted_ids) >= self.config.researcher.max_retrieved_records:
+                    break
+                accepted_ids.add(record.record_id)
+                accepted_records.append(record)
+                accepted_chunk_ids.update(record.evidence_chunk_ids)
+                record_cards.append(self._researcher_record_card(record))
+            accepted_chunks = tuple(
+                item for item in result.chunks if item.chunk_id in accepted_chunk_ids
+            )
+            accepted_claims = tuple(
+                item
+                for item in result.claims
+                if set(item.evidence_chunk_ids).intersection(accepted_chunk_ids)
+            )
+            staged = replace(
+                result,
+                chunks=accepted_chunks,
+                claims=accepted_claims,
+                records=tuple(accepted_records),
+            )
+            staged_results.append(staged)
+            if self.knowledge.local_knowledge is not None:
+                staged_evidence.extend(
+                    self.knowledge.local_knowledge.evidence_from_result(staged)
+                )
+        self.knowledge.stage_local_knowledge(
+            round_id=round_id,
+            results=staged_results,
+            evidence=staged_evidence,
+        )
+        self._researcher_round_state[round_id]["record_ids"] = tuple(
+            item.record_id for item in record_cards
+        )
+        self.writer.write_json(
+            f"round_{round_id:02d}/researcher_phase_a.json",
+            {
+                "context_hash": stable_payload_hash(context),
+                "plan": plan,
+                "executed_queries": [
+                    {
+                        "query_id": result.query_id,
+                        "sanitized_query": result.sanitized_query,
+                        "record_ids": [item.record_id for item in result.records],
+                        "warnings": result.warnings,
+                    }
+                    for result in staged_results
+                ],
+            },
+        )
+        return (
+            plan,
+            tuple(staged_results),
+            tuple(staged_evidence),
+            tuple(record_cards),
+        )
+
+    def _run_researcher_phase_b(
+        self,
+        *,
+        round_id: int,
+        observed_variants: Sequence[Any],
+        rag_records: Sequence[ResearcherKnowledgeRecordCard],
+    ) -> tuple[FeatureEvidencePlan, tuple[KGQueryStep, ...]]:
+        if self.researcher_client is None or self.researcher_controller is None:
+            raise RuntimeError("Agentic feature planning requires an initialized Researcher")
+        measurement_cards, sample_to_variant = self._researcher_measurement_cards(
+            round_id=round_id, observed_variants=observed_variants
+        )
+        observation_by_variant = {
+            item.variant_id: item for item in self.state.observed if item.round_revealed < round_id
+        }
+        bounded_samples = sorted(
+            sample_to_variant,
+            key=lambda sample_id: (
+                observation_by_variant[sample_to_variant[sample_id]].fitness,
+                sample_id,
+            ),
+            reverse=True,
+        )[: self.config.researcher.max_feature_variants]
+        bounded_map = {sample_id: sample_to_variant[sample_id] for sample_id in bounded_samples}
+        sample_cards_by_id = {item.sample_id: item for item in measurement_cards}
+        context = ResearcherContextInput(
+            phase="feature_evidence",
+            run_id=self.run_id,
+            round_id=round_id,
+            task=self.config.task.objective,
+            assay=self._researcher_assay_context(),
+            measurement_kg=measurement_cards,
+            prior_hypothesis_assessment=(
+                self._researcher_plain(self.state.hypothesis_assessments[-1])
+                if self.state.hypothesis_assessments
+                else None
+            ),
+            prior_hypothesis_reflection=(
+                self._researcher_plain(self.state.hypothesis_reflections[-1])
+                if self.state.hypothesis_reflections
+                else None
+            ),
+            sample_map=tuple(sample_cards_by_id[item] for item in bounded_samples),
+            rag_records=tuple(rag_records),
+            facet_catalog=self._researcher_facet_catalog(),
+            tool_catalog=tuple(
+                item
+                for item in self._researcher_tool_catalog()
+                if item.channel in self.config.kg_interaction.feature_channels
+            ),
+        )
+        plan = self.researcher_client.plan_features(context)
+        state = self._researcher_round_state.setdefault(round_id, {})
+        state["phase_b_context_hash"] = stable_payload_hash(context)
+        state["feature_plan"] = plan
+        steps = self.researcher_controller.validate_feature_plan(
+            plan,
+            sample_id_to_variant_id=bounded_map,
+        )
+        self.writer.write_json(
+            f"round_{round_id:02d}/researcher_phase_b.json",
+            {
+                "context_hash": stable_payload_hash(context),
+                "visible_record_ids": [item.record_id for item in rag_records],
+                "sample_ids": list(bounded_map),
+                "plan": plan,
+                "projected_steps": [asdict(item) for item in steps],
+            },
+        )
+        return plan, steps
+
+    def _record_researcher_receipt(
+        self,
+        *,
+        round_id: int,
+        interaction_result: Any,
+    ) -> None:
+        if self.researcher_client is None:
+            return
+        state = self._researcher_round_state.get(round_id, {})
+        profile_hash = str(
+            getattr(self.researcher_client, "profile_hash", "")
+            or stable_payload_hash(self.config.researcher.profile)
+        )
+        receipt = ResearcherRoundReceipt(
+            run_id=self.run_id,
+            round_id=round_id,
+            profile=self.config.researcher.profile,
+            profile_hash=profile_hash,
+            external_schema_hash=self.researcher_client.schema_hash(
+                ExternalRetrievalPlan
+            ),
+            feature_schema_hash=self.researcher_client.schema_hash(
+                FeatureEvidencePlan
+            ),
+            kg_snapshot_hash=stable_payload_hash(
+                {
+                    "phase_a": state.get("phase_a_context_hash"),
+                    "phase_b": state.get("phase_b_context_hash"),
+                }
+            ),
+            external_plan=state.get("external_plan"),
+            feature_plan=state.get("feature_plan"),
+            query_ids=tuple(state.get("query_ids", ())),
+            record_ids=tuple(state.get("record_ids", ())),
+            tool_query_ids=tuple(
+                pack.query_id
+                for pack in getattr(interaction_result, "packs", ())
+                if pack.operator
+                in {
+                    "query_physchem_delta",
+                    "query_evolutionary_profile",
+                    "query_structure_environment",
+                }
+            ),
+            skipped=tuple(
+                {"step_id": step_id, "reason": reason}
+                for step_id, reason in getattr(interaction_result, "skipped_steps", ())
+            ),
+            rejected=(),
+            budget_used={
+                "rag_queries": len(state.get("query_ids", ())),
+                "retrieved_records": len(state.get("record_ids", ())),
+                "feature_requests": sum(
+                    pack.operator
+                    in {
+                        "query_physchem_delta",
+                        "query_evolutionary_profile",
+                        "query_structure_environment",
+                    }
+                    for pack in getattr(interaction_result, "packs", ())
+                ),
+            },
+        )
+        self.writer.write_json(
+            f"round_{round_id:02d}/researcher_round_receipt.json", receipt
+        )
+
+    def _record_researcher_failure(
+        self,
+        *,
+        round_id: int,
+        phase: str,
+        error: Exception,
+    ) -> None:
+        """Persist a bounded failure receipt before the configured round abort."""
+
+        if self.researcher_client is None:
+            return
+        state = self._researcher_round_state.get(round_id, {})
+        reason = f"{type(error).__name__}: {str(error)[:500]}"
+        profile_hash = str(
+            getattr(self.researcher_client, "profile_hash", "")
+            or stable_payload_hash(self.config.researcher.profile)
+        )
+        receipt = ResearcherRoundReceipt(
+            run_id=self.run_id,
+            round_id=round_id,
+            profile=self.config.researcher.profile,
+            profile_hash=profile_hash,
+            external_schema_hash=self.researcher_client.schema_hash(
+                ExternalRetrievalPlan
+            ),
+            feature_schema_hash=self.researcher_client.schema_hash(
+                FeatureEvidencePlan
+            ),
+            kg_snapshot_hash=stable_payload_hash(
+                {
+                    "phase_a": state.get("phase_a_context_hash"),
+                    "phase_b": state.get("phase_b_context_hash"),
+                }
+            ),
+            external_plan=state.get("external_plan"),
+            feature_plan=state.get("feature_plan"),
+            query_ids=tuple(state.get("query_ids", ())),
+            record_ids=tuple(state.get("record_ids", ())),
+            rejected=({"step_id": phase, "reason": reason},),
+            budget_used={
+                "rag_queries": len(state.get("query_ids", ())),
+                "retrieved_records": len(state.get("record_ids", ())),
+                "feature_requests": 0,
+            },
+        )
+        payload = {
+            "phase": phase,
+            "failure_policy": self.config.researcher.failure_policy,
+            "reason": reason,
+        }
+        self.writer.write_json(
+            f"round_{round_id:02d}/researcher_failure.json", payload
+        )
+        self.writer.write_json(
+            f"round_{round_id:02d}/researcher_round_receipt.json", receipt
+        )
+        self.writer.event(
+            "researcher_round_rejected",
+            {"round_id": round_id, **payload},
+        )
+
+    def _run_kg_interaction(
+        self,
+        *,
+        round_id: int,
+        observed_variants: list[Any],
+        researcher_feature_steps: Sequence[KGQueryStep] = (),
+    ):
         if self.kg_interaction is None:
             return None
         observation_by_id = {item.variant_id: item for item in self.state.observed}
@@ -1037,43 +1590,56 @@ class CampaignRunner:
                         "Retrieve the configured channels as one joint evidence bundle.",
                     )
                 )
+        if self.config.kg_interaction.feature_tool_strategy == "agentic":
+            steps.extend(researcher_feature_steps)
         rag_allowed = (
             self.knowledge.local_knowledge is not None and self._scientist_local_context_allowed
         )
-        if rag_allowed and "query_local_knowledge" in enabled_operators:
+        local_retrieval = None
+        local_query = ""
+        local_anchors: tuple[str, ...] = ()
+        local_knowledge_types: tuple[str, ...] = ()
+        structured_query = ""
+        fixed_rag_query = False
+        if rag_allowed:
+            local_retrieval = self.config.knowledge.local_knowledge.retrieval
+            local_query = local_retrieval.runtime_query_by_round.get(
+                round_id, local_retrieval.runtime_query
+            )
+            local_anchors = local_retrieval.runtime_anchors_by_round.get(
+                round_id, local_retrieval.runtime_anchors
+            )
+            local_knowledge_types = local_retrieval.runtime_knowledge_types_by_round.get(
+                round_id, ()
+            )
+            structured_query = local_retrieval.structured_query_by_round.get(
+                round_id, local_retrieval.structured_query
+            )
+            fixed_rag_query = local_retrieval.query_mode == "fixed"
+        if rag_allowed and fixed_rag_query and "query_local_knowledge" in enabled_operators:
             steps.append(
                 KGQueryStep(
                     "local_knowledge",
                     "query_local_knowledge",
                     QueryIntent.SUPPORT,
                     {
-                        "query": (
-                            "general protein structure stability binding mutation "
-                            "physicochemical epistasis knowledge"
-                        ),
-                        "anchors": [
-                            "protein structure and stability",
-                            "binding interface mutation effects",
-                            "physicochemical substitution mechanisms",
-                            "epistasis and residue interactions",
-                        ],
-                        "limit": self.config.kg_interaction.max_rows,
+                        "query": local_query,
+                        "anchors": list(local_anchors),
+                        "knowledge_types": list(local_knowledge_types),
+                        "limit": local_retrieval.top_k,
                     },
                     ("context",),
                 )
             )
-        if rag_allowed and "query_structured_claims" in enabled_operators:
+        if rag_allowed and fixed_rag_query and "query_structured_claims" in enabled_operators:
             steps.append(
                 KGQueryStep(
                     "structured_claims",
                     "query_structured_claims",
                     QueryIntent.SUPPORT,
                     {
-                        "query": (
-                            "binding affinity maturation library selection "
-                            "mutation operational guideline"
-                        ),
-                        "limit": self.config.kg_interaction.max_rows,
+                        "query": structured_query,
+                        "limit": local_retrieval.structured_top_k,
                     },
                     ("context",),
                     "Read RAG-materialized claims from the structured KG snapshot.",
@@ -1134,6 +1700,7 @@ class CampaignRunner:
                 run_id=self.run_id,
                 round_id=round_id,
                 allowed_variant_ids=frozenset(item.variant_id for item in observed_variants),
+                allowed_positions=frozenset(self.config.task.mutable_positions),
                 max_rows=self.config.kg_interaction.max_rows,
             ),
         )
@@ -1390,6 +1957,35 @@ class CampaignRunner:
                     ),
                 },
                 "fallback_policy": self.config.critic.fallback_policy,
+                "policy_gate_enabled": self.config.critic.policy_gate_enabled,
+                "semantic_audit_failure_policy": (
+                    "abort_round"
+                    if self.config.critic.policy_gate_enabled
+                    else self.config.critic.fallback_policy
+                ),
+                "semantic_audit_policy": {
+                    "risk_codes": list(
+                        self.config.critic.semantic_audit_risk_codes
+                    ),
+                    "on_revision": (
+                        self.config.critic.semantic_audit_on_revision
+                    ),
+                    "on_uncalibrated_predictions": (
+                        self.config.critic.semantic_audit_on_uncalibrated_predictions
+                    ),
+                    "quality_statuses": list(
+                        self.config.critic.semantic_audit_quality_statuses
+                    ),
+                    "applicability_statuses": list(
+                        self.config.critic.semantic_audit_applicability_statuses
+                    ),
+                    "mutation_count_threshold": (
+                        self.config.critic.semantic_audit_mutation_count_threshold
+                    ),
+                    "warning_count_threshold": (
+                        self.config.critic.semantic_audit_warning_count_threshold
+                    ),
+                },
                 "review_controls": self.config.critic.review_controls,
                 "review_diversity": self.config.critic.review_diversity,
                 "min_batch_distance": self.config.critic.min_batch_distance,
@@ -1610,6 +2206,10 @@ class CampaignRunner:
             critic_role="batch_critic",
         )
         revision = critic_revision_payload(decision=decision, rejected_hypothesis=rejected)
+        hypothesis_attempt = _next_hypothesis_attempt(
+            rejected.hypothesis_id,
+            round_id=self.state.round_id,
+        )
         evidence_list = [
             *(local_evidence if self._scientist_local_context_allowed else ()),
             *self._scientist_prompt_evidence(evidence),
@@ -1628,7 +2228,7 @@ class CampaignRunner:
             kg_interaction=interaction_result,
             activation_state=activation_state,
             critic_revision=revision,
-            hypothesis_attempt=1,
+            hypothesis_attempt=hypothesis_attempt,
         )
         if hypothesis.preferred_residues == rejected.preferred_residues:
             retried = self.agent.propose_hypothesis(
@@ -1639,7 +2239,7 @@ class CampaignRunner:
                 kg_interaction=interaction_result,
                 activation_state=activation_state,
                 critic_revision={**revision, "identical_residues_rejected": True},
-                hypothesis_attempt=2,
+                hypothesis_attempt=hypothesis_attempt + 1,
             )
             if (
                 retried.preferred_residues != rejected.preferred_residues
@@ -1886,6 +2486,7 @@ class CampaignRunner:
 
             evidence: dict[str, list[Any]] = {}
             local_evidence: tuple[Any, ...] = ()
+            rag_record_cards: tuple[ResearcherKnowledgeRecordCard, ...] = ()
             if self.config.knowledge_enabled:
                 self._progress(
                     "evidence_started",
@@ -1955,13 +2556,59 @@ class CampaignRunner:
                 )
 
             if self.knowledge.local_knowledge is not None:
-                local_result, local_evidence = self.knowledge.prefetch_local_knowledge(
-                    round_id=round_id,
-                    objective=self.config.task.objective,
-                    assay_conditions=self.config.task.assay_conditions,
-                    anchors=tuple(sorted(self.knowledge.providers)),
-                    candidates=observed_variants,
-                )
+                retrieval_config = self.config.knowledge.local_knowledge.retrieval
+                local_results: tuple[Any, ...]
+                if retrieval_config.query_mode == "agentic":
+                    try:
+                        (
+                            _external_plan,
+                            local_results,
+                            local_evidence,
+                            rag_record_cards,
+                        ) = self._run_researcher_phase_a(
+                            round_id=round_id,
+                            observed_variants=observed_variants,
+                        )
+                    except Exception as error:  # noqa: BLE001 - audited provider boundary
+                        self._record_researcher_failure(
+                            round_id=round_id,
+                            phase="external_retrieval",
+                            error=error,
+                        )
+                        rounds_aborted += 1
+                        self._record_round_abort(
+                            round_id=round_id,
+                            reason=(
+                                "RESEARCHER_EXTERNAL_RETRIEVAL_FAILED:"
+                                f"{type(error).__name__}"
+                            ),
+                            planned_batch_sizes=planned_batch_sizes,
+                            actual_batch_sizes=actual_batch_sizes,
+                            message=(
+                                f"round {round_id} aborted by fail-closed Researcher Phase A"
+                            ),
+                        )
+                        break
+                else:
+                    prefetch_query = retrieval_config.runtime_query_by_round.get(
+                        round_id, retrieval_config.runtime_query
+                    )
+                    prefetch_anchors = retrieval_config.runtime_anchors_by_round.get(
+                        round_id, retrieval_config.runtime_anchors
+                    )
+                    prefetch_knowledge_types = (
+                        retrieval_config.runtime_knowledge_types_by_round.get(round_id, ())
+                    )
+                    local_result, local_evidence = self.knowledge.prefetch_local_knowledge(
+                        round_id=round_id,
+                        objective=self.config.task.objective,
+                        assay_conditions=self.config.task.assay_conditions,
+                        query=prefetch_query,
+                        anchors=prefetch_anchors,
+                        knowledge_types=prefetch_knowledge_types,
+                        candidates=observed_variants,
+                    )
+                    local_results = (local_result,) if local_result is not None else ()
                 selecting_local_evidence = []
                 for item in local_evidence:
                     if item.contributes_to_selection and item.variant_id in evidence:
@@ -1971,7 +2618,7 @@ class CampaignRunner:
                     self.knowledge.graph.add_evidence(selecting_local_evidence)
                 self.writer.write_json(
                     f"round_{round_id:02d}/local_rag_retrieval.json",
-                    local_result,
+                    local_results if retrieval_config.query_mode == "agentic" else local_results[0],
                 )
                 self.writer.write_json(
                     f"round_{round_id:02d}/local_rag_evidence.json",
@@ -1981,10 +2628,12 @@ class CampaignRunner:
                     "local_knowledge_retrieved",
                     {
                         "round_id": round_id,
-                        "query_id": local_result.query_id if local_result else None,
-                        "chunk_count": len(local_result.chunks) if local_result else 0,
+                        "query_ids": [item.query_id for item in local_results],
+                        "chunk_count": sum(len(item.chunks) for item in local_results),
                         "evidence_count": len(local_evidence),
-                        "policy_decision": (local_result.policy_decision if local_result else None),
+                        "policy_decisions": [
+                            item.policy_decision for item in local_results
+                        ],
                     },
                 )
 
@@ -2023,14 +2672,50 @@ class CampaignRunner:
                         "relation_count": len(structured_result.snapshot.relations),
                     },
                 )
+                researcher_feature_steps: tuple[KGQueryStep, ...] = ()
+                if self.config.kg_interaction.feature_tool_strategy == "agentic":
+                    try:
+                        _feature_plan, researcher_feature_steps = (
+                            self._run_researcher_phase_b(
+                                round_id=round_id,
+                                observed_variants=observed_variants,
+                                rag_records=rag_record_cards,
+                            )
+                        )
+                    except Exception as error:  # noqa: BLE001 - audited provider boundary
+                        self._record_researcher_failure(
+                            round_id=round_id,
+                            phase="feature_evidence",
+                            error=error,
+                        )
+                        rounds_aborted += 1
+                        self._record_round_abort(
+                            round_id=round_id,
+                            reason=(
+                                "RESEARCHER_FEATURE_EVIDENCE_FAILED:"
+                                f"{type(error).__name__}"
+                            ),
+                            planned_batch_sizes=planned_batch_sizes,
+                            actual_batch_sizes=actual_batch_sizes,
+                            message=(
+                                f"round {round_id} aborted by fail-closed Researcher Phase B"
+                            ),
+                        )
+                        break
                 interaction_result = self._run_kg_interaction(
                     round_id=round_id,
                     observed_variants=observed_variants,
+                    researcher_feature_steps=researcher_feature_steps,
                 )
                 if interaction_result is not None:
                     self._record_kg_interaction(
                         round_id=round_id, interaction_result=interaction_result
                     )
+                    if self.config.researcher.enabled:
+                        self._record_researcher_receipt(
+                            round_id=round_id,
+                            interaction_result=interaction_result,
+                        )
 
             hypothesis = None
             if self.config.mode in {"llm_agent", "knowledge_agent"}:
@@ -2129,24 +2814,111 @@ class CampaignRunner:
                     )
                     if pipeline_result.status != "SUCCEEDED":
                         failure = pipeline_result.failure_code or "HYPOTHESIS_PIPELINE_FAILED"
-                        rounds_aborted += 1
-                        self._record_round_abort(
-                            round_id=round_id,
-                            reason=failure,
-                            planned_batch_sizes=planned_batch_sizes,
-                            actual_batch_sizes=actual_batch_sizes,
-                            message=f"round {round_id} aborted by hypothesis review graph",
+                        cold_start_exploration = (
+                            failure == "NO_SUPPORTED_HYPOTHESIS"
+                            and round_id == 1
+                            and len(observed_variants) == 1
+                            and observed_variants[0].mutation_count == 0
+                            and self.config.prior_schedule.mode == "cold_start"
+                            and self.config.prior_schedule.no_supported_hypothesis_policy
+                            == "coverage_exploration"
                         )
-                        break
-                    hypothesis = Hypothesis(**(pipeline_result.main_hypothesis or {}))
-                    if pipeline_result.main_review is not None:
-                        self._record_hypothesis_explanation(
-                            hypothesis=hypothesis,
-                            decision_id=pipeline_result.main_review.decision_id,
-                            verdict=pipeline_result.main_review.verdict,
-                            explanation=pipeline_result.main_review.explanation,
-                            critic_role="main_hypothesis_critic",
+                        if not cold_start_exploration:
+                            rounds_aborted += 1
+                            self._record_round_abort(
+                                round_id=round_id,
+                                reason=failure,
+                                planned_batch_sizes=planned_batch_sizes,
+                                actual_batch_sizes=actual_batch_sizes,
+                                message=(
+                                    f"round {round_id} aborted by hypothesis review graph"
+                                ),
+                            )
+                            break
+                        abstention = pipeline_result.main_abstention
+                        hypothesis = Hypothesis(
+                            hypothesis_id=f"H-R{round_id:02d}-COVERAGE",
+                            statement=(
+                                "WT-only evidence supports no directional residue prior; "
+                                "run a bounded, deterministic coverage exploration batch."
+                            ),
+                            preferred_residues={},
+                            evidence_ids=(
+                                tuple(abstention.evidence_ids)
+                                if abstention is not None
+                                else ()
+                            ),
+                            expected_outcome=(
+                                "A complete wet batch expands the visible evidence base "
+                                "without asserting a fitness direction."
+                            ),
+                            falsification_criterion=(
+                                "The selected batch median must exceed the preregistered "
+                                "pre-round visible-observation median; missing required "
+                                "observations yield INCONCLUSIVE."
+                            ),
+                            claim_modality="association",
+                            falsification_template={
+                                "detector": "batch_median_lift",
+                                "target_relation": "selected_batch",
+                                "comparator_relation": (
+                                    "pre_round_visible_observations"
+                                ),
+                                "operator": "greater",
+                                "threshold_source": "zero_lift",
+                                "min_observations": "selected_batch_size",
+                                "missing_data_policy": "INCONCLUSIVE",
+                                "reduction_policy": (
+                                    "primary_contradiction_first_v1"
+                                ),
+                            },
                         )
+                        self.writer.write_json(
+                            f"round_{round_id:02d}/cold_start_exploration.json",
+                            {
+                                "schema_version": "cold-start-exploration:v1",
+                                "round_id": round_id,
+                                "trigger": failure,
+                                "initial_visible_count": len(observed_variants),
+                                "initial_visible_mutation_counts": [
+                                    item.mutation_count for item in observed_variants
+                                ],
+                                "candidate_limit": self.config.candidate_limit,
+                                "wet_validation_budget": self.config.budget_per_round,
+                                "preferred_residues": {},
+                                "round_quota_overrides": {
+                                    "hypothesis_target": 0,
+                                    "evidence_prior": 0,
+                                    "coverage_exploration": (
+                                        self.config.budget_per_round
+                                    ),
+                                    "matched_control": 0,
+                                },
+                                "fitness_predictor_used": False,
+                                "kermut_used": False,
+                            },
+                        )
+                        self.writer.event(
+                            "cold_start_coverage_exploration",
+                            {
+                                "round_id": round_id,
+                                "trigger": failure,
+                                "candidate_limit": self.config.candidate_limit,
+                                "wet_validation_budget": self.config.budget_per_round,
+                            },
+                        )
+                    else:
+                        hypothesis = Hypothesis(
+                            **(pipeline_result.main_hypothesis or {})
+                        )
+                        if pipeline_result.main_review is not None:
+                            self._record_hypothesis_explanation(
+                                hypothesis=hypothesis,
+                                decision_id=pipeline_result.main_review.decision_id,
+                                verdict=pipeline_result.main_review.verdict,
+                                explanation=pipeline_result.main_review.explanation,
+                                critic_role="main_hypothesis_critic",
+                            )
                 else:
                     try:
                         hypothesis = self.agent.propose_hypothesis(
@@ -2250,6 +3022,16 @@ class CampaignRunner:
                     "planned_candidate_count": self.config.candidate_limit,
                     "actual_candidate_count": len(eligible),
                     "candidate_ids": round_candidate_ids,
+                    "candidate_mutation_order_counts": {
+                        str(depth): sum(
+                            item.mutation_count == depth for item in eligible
+                        )
+                        for depth in sorted(
+                            {item.mutation_count for item in eligible}
+                        )
+                    },
+                    "hypothesis_match_policy": "edited_non_wild_type_sites_only",
+                    "evidence_prefilter_policy": "selection_authorized_only",
                     "candidate_scoring_hard_limit": self.config.candidate_limit,
                     "selection_budget": self.config.budget_per_round,
                     "oracle_measurement_budget": self.config.budget_per_round,
@@ -2572,7 +3354,9 @@ class CampaignRunner:
                     expected_batch_size,
                     diversity_lambda=self.config.diversity_lambda,
                     quota_overrides=(
-                        {"matched_control": 0} if allowed_mutation_orders else None
+                        self._agent_quota_overrides(
+                            hypothesis, allowed_mutation_orders
+                        )
                     ),
                 )
                 selected_ids = list(agent_quota_selection.selected_ids)
@@ -2933,6 +3717,7 @@ class CampaignRunner:
                 _context: dict[str, Any] = draft_context,
                 _round_id: int = round_id,
                 _allowed_mutation_orders: tuple[int, ...] | None = allowed_mutation_orders,
+                _hypothesis: Hypothesis = hypothesis,
             ):
                 _context["revision_constraints"] = constraints
                 _context["revision_feedback"] = revision_feedback
@@ -3002,9 +3787,9 @@ class CampaignRunner:
                             diversity_lambda=diversity,
                             constraints=constraints,
                             quota_overrides=(
-                                {"matched_control": 0}
-                                if _allowed_mutation_orders
-                                else None
+                                self._agent_quota_overrides(
+                                    _hypothesis, _allowed_mutation_orders
+                                )
                             ),
                             position_to_index=(
                                 self.task_context.position_to_variant_index
@@ -3123,6 +3908,9 @@ class CampaignRunner:
                     ),
                     review_controls=self.config.critic.review_controls,
                     review_diversity=self.config.critic.review_diversity,
+                    exploration_quota_supported=(
+                        self.agent_quota_acquisition is not None
+                    ),
                     control_feasibility=(
                         quota_selection.control_feasibility
                         if quota_selection is not None
@@ -3307,6 +4095,16 @@ class CampaignRunner:
                             "Critic revision limit exhausted",
                             decisions=requested.decisions,
                         ) from requested
+                    requested_plan = self.review_loop.revision_planner.plan(
+                        requested.decision,
+                        review_context=draft_context.get("batch_review_context"),
+                    )
+                    requested_feedback = (
+                        self.review_loop.revision_planner.feedback_receipt(
+                            requested.decision,
+                            requested_plan,
+                        )
+                    )
                     try:
                         hypothesis = self._repropose_after_critic(
                             requested.decision,
@@ -3386,7 +4184,9 @@ class CampaignRunner:
                                 expected_batch_size,
                                 diversity_lambda=self.config.diversity_lambda,
                                 quota_overrides=(
-                                    {"matched_control": 0} if allowed_mutation_orders else None
+                                    self._agent_quota_overrides(
+                                        hypothesis, allowed_mutation_orders
+                                    )
                                 ),
                             )
                             selected_ids = list(agent_quota_selection.selected_ids)
@@ -3591,20 +4391,226 @@ class CampaignRunner:
                         ],
                         on_attempt=record_review_attempt,
                         on_attempt_start=record_review_start,
+                        initial_revision_feedback=requested_feedback,
+                        initial_decisions=requested.decisions,
                     )
                 except (HypothesisRevisionRequested, ReviewRejected) as nested:
                     if isinstance(nested, HypothesisGenerationFailed):
                         raise
-                    error = (
-                        nested
-                        if isinstance(nested, ReviewRejected)
-                        and not isinstance(nested, HypothesisRevisionRequested)
-                        else ReviewRejected(
-                            "Critic revision limit exhausted",
-                            decisions=getattr(nested, "decisions", requested.decisions),
+                    if (
+                        isinstance(nested, HypothesisRevisionRequested)
+                        and len(nested.decisions)
+                        <= self.config.critic.max_revision_attempts
+                        and selection_driver == "agent_uq"
+                    ):
+                        nested_plan = self.review_loop.revision_planner.plan(
+                            nested.decision,
+                            review_context=draft_context.get("batch_review_context"),
                         )
-                    )
-                    raise error from nested
+                        nested_feedback = (
+                            self.review_loop.revision_planner.feedback_receipt(
+                                nested.decision,
+                                nested_plan,
+                            )
+                        )
+                        try:
+                            hypothesis = self._repropose_after_critic(
+                                nested.decision,
+                                hypothesis,
+                                observed_variants=observed_variants,
+                                evidence=evidence,
+                                local_evidence=local_evidence,
+                                interaction_result=interaction_result,
+                            )
+                        except Exception as error:
+                            if not is_hypothesis_generation_error(error):
+                                raise
+                            raise HypothesisGenerationFailed(
+                                error, decisions=nested.decisions
+                            ) from error
+                        revised_round_candidates = _filter_hard_residue_constraints(
+                            [public_by_id[item] for item in round_candidate_ids],
+                            hypothesis=hypothesis,
+                            position_to_index=(
+                                self.task_context.position_to_variant_index
+                            ),
+                        )
+                        eligible = self.generator.generate(
+                            revised_round_candidates,
+                            self.state,
+                            hypothesis,
+                            evidence,
+                            len(revised_round_candidates),
+                        )
+                        if len(eligible) < self.config.budget_per_round:
+                            raise RevisionConstraintInfeasible(
+                                RevisionQuotaShortfallReceipt(
+                                    required_batch_size=self.config.budget_per_round,
+                                    eligible_before_filter=len(round_candidate_ids),
+                                    eligible_after_filter=len(eligible),
+                                    selected_count=0,
+                                    shortfall=(
+                                        self.config.budget_per_round - len(eligible)
+                                    ),
+                                    quota_shortfalls={
+                                        "batch_total": (
+                                            self.config.budget_per_round - len(eligible)
+                                        )
+                                    },
+                                    excluded_candidate_count=(
+                                        len(round_candidate_ids) - len(eligible)
+                                    ),
+                                    constraints_id=f"RC{round_id:02d}-HYP2",
+                                ),
+                                decisions=nested.decisions,
+                            )
+                        expected_batch_size = self.config.budget_per_round
+                        prior_scores = self.knowledge.validation_prior_scores(
+                            eligible, round_id=round_id
+                        )
+                        design_scores = self.agent_selector.score(
+                            eligible,
+                            observed_variants=observed_variants,
+                            hypothesis=hypothesis,
+                            hypotheses=self.state.hypotheses,
+                            evidence=evidence,
+                            prior_scores=prior_scores,
+                            predictor_predictions=[],
+                        )
+                        design_predictions = self.agent_selector.as_predictions(
+                            design_scores
+                        )
+                        all_scores = {
+                            item.variant_id: item.fitness_mean
+                            for item in design_predictions
+                        }
+                        working_by_id = {
+                            item.variant_id: item for item in design_predictions
+                        }
+                        design_score_by_id = {
+                            item.variant_id: item for item in design_scores
+                        }
+                        if self.agent_quota_acquisition is not None:
+                            agent_quota_selection = self.agent_quota_acquisition.select(
+                                eligible,
+                                [
+                                    replace(
+                                        item,
+                                        utility=all_scores[item.variant_id],
+                                    )
+                                    for item in design_scores
+                                ],
+                                expected_batch_size,
+                                diversity_lambda=self.config.diversity_lambda,
+                                quota_overrides=(
+                                    self._agent_quota_overrides(
+                                        hypothesis, allowed_mutation_orders
+                                    )
+                                ),
+                            )
+                            selected_ids = list(agent_quota_selection.selected_ids)
+                        else:
+                            agent_quota_selection = None
+                            selected_ids = self.policy.select(
+                                eligible,
+                                [working_by_id[item.variant_id] for item in eligible],
+                                all_scores,
+                                expected_batch_size,
+                                self.config.diversity_lambda,
+                            )
+                        draft_context.update(
+                            {
+                                "hypothesis": hypothesis,
+                                "eligible": eligible,
+                                "working_by_id": working_by_id,
+                                "all_scores": all_scores,
+                                "expected_batch_size": expected_batch_size,
+                                "agent_quota_selection": agent_quota_selection,
+                                "initial_selected_ids": tuple(selected_ids),
+                                "design_score_by_id": design_score_by_id,
+                                "rationale_claims": {
+                                    item.variant_id: item.reason
+                                    for item in design_scores
+                                },
+                            }
+                        )
+                        draft_context["scoring_snapshot_version"] += 1
+                        draft_context["scoring_snapshot"] = _round_scoring_snapshot(
+                            hypothesis=hypothesis,
+                            version=draft_context["scoring_snapshot_version"],
+                            eligible=eligible,
+                            design_score_by_id=design_score_by_id,
+                            prediction_by_id=prediction_by_id,
+                            all_scores=all_scores,
+                        )
+                        ensure_dry_validation(
+                            selected_ids,
+                            reason="hypothesis_revision_2",
+                            _context=draft_context,
+                        )
+                        self.writer.event(
+                            "hypothesis_regenerated",
+                            {
+                                "round_id": round_id,
+                                "hypothesis_id": hypothesis.hypothesis_id,
+                                "parent_hypothesis_id": (
+                                    hypothesis.parent_hypothesis_id
+                                ),
+                                "critic_decision_id": nested.decision.decision_id,
+                                "revision_ordinal": 2,
+                            },
+                        )
+                        try:
+                            review_result = self.review_loop.run(
+                                draft_builder=draft_builder,
+                                variants=public_by_id,
+                                predictions=prediction_by_id,
+                                evidence=evidence,
+                                revealed_ids=set(self.state.revealed_variant_ids),
+                                pending_ids=set(),
+                                allowed_ids=round_candidate_id_set,
+                                expected_batch_size=expected_batch_size,
+                                context_evidence=(
+                                    local_evidence
+                                    if self._critic_local_context_allowed
+                                    else ()
+                                ),
+                                hypothesis=hypothesis,
+                                activation_state=self._role_activation_state(
+                                    "critic",
+                                    evidence=self._flatten_round_evidence(evidence),
+                                    local_evidence=local_evidence,
+                                    interaction_result=interaction_result,
+                                ),
+                                position_to_index=(
+                                    self.task_context.position_to_variant_index
+                                ),
+                                review_context_provider=lambda _draft, _context=draft_context: _context[
+                                    "batch_review_context"
+                                ],
+                                on_attempt=record_review_attempt,
+                                on_attempt_start=record_review_start,
+                                initial_revision_feedback=nested_feedback,
+                                initial_decisions=nested.decisions,
+                            )
+                        except HypothesisRevisionRequested as exhausted:
+                            raise ReviewRejected(
+                                "Critic revision limit exhausted",
+                                decisions=exhausted.decisions,
+                            ) from exhausted
+                    else:
+                        error = (
+                            nested
+                            if isinstance(nested, ReviewRejected)
+                            and not isinstance(nested, HypothesisRevisionRequested)
+                            else ReviewRejected(
+                                "Critic revision limit exhausted",
+                                decisions=getattr(
+                                    nested, "decisions", requested.decisions
+                                ),
+                            )
+                        )
+                        raise error from nested
             except ReviewRejected as error:
                 if isinstance(error, HypothesisGenerationFailed):
                     terminal_policy = "abort_round"

@@ -128,7 +128,6 @@ def test_subscientist_uses_shared_batch_submit_and_persists_typed_batch_outputs(
                     request_started=True,
                     detail="synthetic length boundary",
                 )
-            evidence_ids = [item["evidence_id"] for item in evidence]
             return PhyschemInterpretationOutput(
                 analysis_summary=f"Analyzed {len(sample_ids)} sample-local descriptor cards.",
                 interpretations=["The visible charge deltas span bounded directions."],
@@ -393,6 +392,66 @@ def test_physchem_interpretation_may_mention_visible_mutation_without_fact_ids()
     observations = [item for item in output.findings if item.kind == "OBSERVATION"]
     assert observations[0].fact_ids == ["D001"]
     assert observations[1].fact_ids == ["D002"]
+
+
+def test_physchem_materialization_drops_interpretation_without_typed_descriptor_fact() -> None:
+    raw = _context(1).model_dump(mode="python")
+    raw["visible_observations"][0]["mutation_notation"] = "V39A;D40Y"
+    raw["visible_observations"][0]["descriptor_facts"] = (
+        {
+            "fact_id": "D001",
+            "evidence_id": "ev:pc:0",
+            "sample_id": "sample:0",
+            "position": 39,
+            "from_residue": "V",
+            "to_residue": "A",
+            "descriptor": "charge_delta",
+            "delta": 1.0,
+        },
+    )
+    context = ChannelEvidenceInput.model_validate(raw)
+
+    output = subscientist_module._materialize_physchem_analysis(
+        context=context,
+        explanation=PhyschemInterpretationOutput(
+            analysis_summary="Only one typed descriptor card is visible.",
+            interpretations=[
+                "The typed descriptor supports V39A.",
+                "D40Y changes mass, but no typed descriptor card supports it.",
+            ],
+            counterevidence=[],
+            uncertainty="Descriptor changes do not establish assay performance.",
+        ),
+        batch_id="b000",
+    )
+
+    interpretations = [
+        item for item in output.findings if item.kind == "INTERPRETATION"
+    ]
+    assert [item.statement for item in interpretations] == [
+        "The typed descriptor supports V39A."
+    ]
+
+
+def test_physchem_materialization_drops_sample_mismatched_interpretation() -> None:
+    raw = _context(2).model_dump(mode="python")
+    raw["visible_observations"][1]["mutation_notation"] = "V39A"
+    raw["visible_observations"][1]["residues_by_position"] = {"39": "A"}
+    raw["visible_observations"][1]["descriptor_facts"] = ()
+    context = ChannelEvidenceInput.model_validate(raw)
+
+    output = subscientist_module._materialize_physchem_analysis(
+        context=context,
+        explanation=PhyschemInterpretationOutput(
+            analysis_summary="One sample has a typed descriptor card.",
+            interpretations=["sample:1 V39A has a charge shift."],
+            counterevidence=[],
+            uncertainty="Descriptor changes do not establish assay performance.",
+        ),
+        batch_id="b000",
+    )
+
+    assert not [item for item in output.findings if item.kind == "INTERPRETATION"]
 
 
 def test_physchem_materialization_expands_batch_local_sample_labels() -> None:

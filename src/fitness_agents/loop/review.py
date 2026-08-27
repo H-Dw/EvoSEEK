@@ -380,14 +380,37 @@ class BoundedReviewLoop:
         review_context_provider: Callable[[DraftBatch], BatchReviewContext] | None = None,
         on_attempt: Callable[[DraftBatch, ConflictReport, CritiqueDecision], Any] | None = None,
         on_attempt_start: Callable[[DraftBatch, ConflictReport], Any] | None = None,
+        initial_revision_feedback: BatchRevisionFeedbackReceipt | None = None,
+        initial_decisions: Sequence[CritiqueDecision] = (),
     ) -> ReviewLoopResult:
-        attempts: list[CritiqueDecision] = []
+        attempts = list(initial_decisions)
+        if len(attempts) > self.max_revision_attempts:
+            raise RevisionLimitExhausted(
+                "REVISION_LIMIT_EXHAUSTED", decisions=attempts
+            )
         exclusions: set[str] = set()
         constraints = RevisionConstraints()
-        parent_id: str | None = None
-        revision_feedback: BatchRevisionFeedbackReceipt | None = None
+        parent_id = attempts[-1].draft_batch_id if attempts else None
+        revision_feedback = initial_revision_feedback
         previous_draft_signature: tuple[str, ...] | None = None
-        for attempt in range(self.max_revision_attempts + 1):
+        validator_task = getattr(self.validator, "task", None)
+        design_space = getattr(self.validator, "design_space", None)
+        if validator_task is not None:
+            critic_allowed_positions = set(validator_task.mutable_positions)
+            critic_wild_type = {
+                position: validator_task.wild_type_sites[index]
+                for index, position in enumerate(validator_task.mutable_positions)
+            }
+        elif design_space is not None:
+            critic_allowed_positions = set(design_space.allowed_mutation_positions)
+            critic_wild_type = {
+                position: design_space.reference_sequence[index]
+                for position, index in design_space.position_to_sequence_index.items()
+            }
+        else:
+            critic_allowed_positions = None
+            critic_wild_type = None
+        for attempt in range(len(attempts), self.max_revision_attempts + 1):
             try:
                 parameters = signature(draft_builder).parameters
                 builder_kwargs: dict[str, Any] = {}
@@ -531,6 +554,8 @@ class BoundedReviewLoop:
                 hypothesis=hypothesis,
                 activation_state=activation_state,
                 batch_review_context=review_context,
+                allowed_positions=critic_allowed_positions,
+                wild_type_by_position=critic_wild_type,
             )
             attempts.append(decision)
             if on_attempt is not None:

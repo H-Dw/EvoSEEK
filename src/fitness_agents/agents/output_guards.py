@@ -11,6 +11,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from .short_ids import LocalIdResolutionError
+
 TRUNCATION_FINISH_REASONS = frozenset({"length", "max_tokens", "max_output_tokens"})
 MAX_OUTPUT_TOKENS = 131072
 ALLOWED_EVIDENCE_RETRY_CAP = 24
@@ -226,7 +228,7 @@ def classify_output_failure(
         kind = "truncated"
     elif isinstance(error, json.JSONDecodeError) or "JSON object" in str(error):
         kind = "syntax"
-    elif isinstance(error, SemanticOutputValidationError):
+    elif isinstance(error, (SemanticOutputValidationError, LocalIdResolutionError)):
         kind = "semantic"
     elif type(error).__name__ in {"ValidationError", "ValueError"}:
         kind = "schema"

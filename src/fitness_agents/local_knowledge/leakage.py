@@ -90,6 +90,9 @@ class TargetLeakageGuard:
                     "derive_from_task": config.derive_protected_terms_from_task,
                     "quarantine_target_documents": config.quarantine_target_documents,
                     "block_target_entities": config.block_target_entities,
+                    "allow_target_identity_context": (
+                        config.allow_target_identity_context
+                    ),
                     "minimum_sequence_fragment_length": (
                         config.minimum_sequence_fragment_length
                     ),
@@ -134,18 +137,28 @@ class TargetLeakageGuard:
     def sanitize_query(self, query: str, *, generic_terms: tuple[str, ...]) -> LeakageDecision:
         if not self.enabled:
             return LeakageDecision(True, query.strip(), False, ())
-        matched = self.matches(text=query)
+        matched = self.blocking_matches(text=query)
         if not matched:
             return LeakageDecision(True, query.strip(), False, ())
         safe_terms = tuple(
-            term for term in generic_terms if not self.matches(text=term) and normalize_identity(term)
+            term
+            for term in generic_terms
+            if not self.blocking_matches(text=term) and normalize_identity(term)
         )
         if not safe_terms:
             return LeakageDecision(False, "", True, matched)
         sanitized = "general protein property knowledge: " + "; ".join(safe_terms)
-        if self.matches(text=sanitized):
+        if self.blocking_matches(text=sanitized):
             return LeakageDecision(False, "", True, matched)
         return LeakageDecision(True, sanitized, True, matched)
 
+    def blocking_matches(
+        self, *, text: str, path: str | Path | None = None
+    ) -> tuple[str, ...]:
+        matches = self.matches(text=text, path=path)
+        if self.config.allow_target_identity_context:
+            return tuple(item for item in matches if item != "protected_term")
+        return matches
+
     def validate_result(self, *, text: str, path: str | Path) -> tuple[str, ...]:
-        return self.matches(text=text, path=path)
+        return self.blocking_matches(text=text, path=path)

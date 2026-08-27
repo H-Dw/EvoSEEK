@@ -1,0 +1,17 @@
+schema_version: gap-matrix:v2
+gaps:
+  - gap_id: GAP-V2-001
+    finding: every v1 RAG round received all five cards
+    impact: static context can dilute the current round objective
+    mitigation: one stage-specific card per round
+  - gap_id: GAP-V2-002
+    finding: final-best deltas tied while mean AUC declined
+    impact: RAG can reach useful regions later without improving search efficiency
+    mitigation: early binding-first card and late evidence-weighted exploitation
+  - gap_id: GAP-V2-003
+    finding: external evidence cannot replace current assay observations
+    impact: repeated prior text may overrule decision-bearing runtime evidence
+    mitigation: make runtime observations primary and RAG a boundary or tie-breaker
+remaining_uncertainty:
+  - stochastic LLM response variance
+  - transferability of static structure boundaries to mutant backgrounds

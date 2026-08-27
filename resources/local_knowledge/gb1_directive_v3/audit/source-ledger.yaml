@@ -1,0 +1,11 @@
+schema_version: source-ledger:v3
+mode: immutable_inheritance
+parent_bundle: resources/local_knowledge/gb1_directive_v2
+primary_evidence_parent: resources/local_knowledge/gb1_directive_v1
+allowed_source_spans: [SS-001, SS-002, SS-003, SS-004, SS-005, SS-006]
+inheritance_rule: >-
+  Publication, SourceSpan, EvidenceGroup, AtomicClaim, and LogicUnit records remain unchanged.
+  V3 changes only the runtime stage-route type assigned to each DecisionCard.
+new_publications: []
+human_reviewed: false
+selection_eligible: false

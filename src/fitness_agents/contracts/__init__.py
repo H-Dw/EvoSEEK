@@ -86,3 +86,32 @@ __all__ = [
     "UserConstraintIntent",
     "Variant",
 ]
+from .researcher import (
+    FEATURE_FOCUS_BY_CHANNEL,
+    ExternalRetrievalPlan,
+    FeatureEvidenceNeed,
+    FeatureEvidencePlan,
+    ResearcherAssayContext,
+    ResearcherContextInput,
+    ResearcherFacetCatalog,
+    ResearcherKnowledgeRecordCard,
+    ResearcherRoundReceipt,
+    ResearcherSampleCard,
+    ResearcherToolCard,
+    RetrievalNeed,
+)
+
+__all__ += [
+    "FEATURE_FOCUS_BY_CHANNEL",
+    "ExternalRetrievalPlan",
+    "FeatureEvidenceNeed",
+    "FeatureEvidencePlan",
+    "ResearcherAssayContext",
+    "ResearcherContextInput",
+    "ResearcherFacetCatalog",
+    "ResearcherKnowledgeRecordCard",
+    "ResearcherRoundReceipt",
+    "ResearcherSampleCard",
+    "ResearcherToolCard",
+    "RetrievalNeed",
+]

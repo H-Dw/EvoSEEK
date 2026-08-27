@@ -13,22 +13,21 @@ from fitness_agents.contracts.schemas import (
     Variant,
 )
 
+from .hypothesis_scoring import hypothesis_edit_match_fraction
+
 
 def _hypothesis_score(
     variant: Variant,
     hypothesis: Hypothesis | None,
     position_to_index: Mapping[int, int],
+    wild_type_by_position: Mapping[int, str] | None = None,
 ) -> float:
-    if hypothesis is None or not hypothesis.preferred_residues:
-        return 0.0
-    matches = 0
-    tested = 0
-    for position, residues in hypothesis.preferred_residues.items():
-        if position not in position_to_index or not residues:
-            continue
-        tested += 1
-        matches += variant.variant[position_to_index[position]] in residues
-    return float(matches / tested) if tested else 0.0
+    return hypothesis_edit_match_fraction(
+        variant,
+        hypothesis,
+        position_to_index,
+        wild_type_by_position,
+    )
 
 
 def reserve_hypothesis_negative_controls(
@@ -37,6 +36,7 @@ def reserve_hypothesis_negative_controls(
     *,
     hypothesis: Hypothesis | None,
     position_to_index: Mapping[int, int],
+    wild_type_by_position: Mapping[int, str] | None = None,
     strong_threshold: float,
     required_controls: int,
     candidate_limit: int,
@@ -62,7 +62,13 @@ def reserve_hypothesis_negative_controls(
     existing_controls = [
         item
         for item in selected
-        if _hypothesis_score(item, hypothesis, position_to_index) < strong_threshold
+        if _hypothesis_score(
+            item,
+            hypothesis,
+            position_to_index,
+            wild_type_by_position,
+        )
+        < strong_threshold
     ]
     desired_controls = min(
         len(selected),
@@ -73,7 +79,13 @@ def reserve_hypothesis_negative_controls(
     replaceable = [
         item
         for item in reversed(selected)
-        if _hypothesis_score(item, hypothesis, position_to_index) >= strong_threshold
+        if _hypothesis_score(
+            item,
+            hypothesis,
+            position_to_index,
+            wild_type_by_position,
+        )
+        >= strong_threshold
     ]
     reserve_target = min(reserve_target, available_slots + len(replaceable))
     if reserve_target <= 0:
@@ -96,13 +108,24 @@ def reserve_hypothesis_negative_controls(
         item
         for item in full_pool
         if item.variant_id not in selected_ids
-        and _hypothesis_score(item, hypothesis, position_to_index) < strong_threshold
+        and _hypothesis_score(
+            item,
+            hypothesis,
+            position_to_index,
+            wild_type_by_position,
+        )
+        < strong_threshold
     ]
     controls.sort(
         key=lambda item: (
             item.mutation_count in selected_depths,
             nearest_similarity(item),
-            _hypothesis_score(item, hypothesis, position_to_index),
+            _hypothesis_score(
+                item,
+                hypothesis,
+                position_to_index,
+                wild_type_by_position,
+            ),
             item.variant_id,
         ),
         reverse=True,
@@ -168,9 +191,11 @@ class AgentUncertaintySelector:
         config: GenerationConfig,
         *,
         position_to_index: Mapping[int, int] | None = None,
+        wild_type_by_position: Mapping[int, str] | None = None,
     ) -> None:
         self.config = config
         self.position_to_index = dict(position_to_index or {})
+        self.wild_type_by_position = dict(wild_type_by_position or {})
 
     def _coverage_uncertainty(
         self,
@@ -217,7 +242,12 @@ class AgentUncertaintySelector:
         output: list[DesignScore] = []
         for variant in candidates:
             hypothesis_values = [
-                _hypothesis_score(variant, item, self.position_to_index)
+                _hypothesis_score(
+                    variant,
+                    item,
+                    self.position_to_index,
+                    self.wild_type_by_position,
+                )
                 for item in active_hypotheses
             ]
             if hypothesis_values:

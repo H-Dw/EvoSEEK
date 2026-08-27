@@ -1,5 +1,6 @@
+# GENERATED-ONLY COMPATIBILITY SKELETON. Do not hand-author or ingest this file.
 schema_version: scientific-publications:v1
-generated_from: replace-with-metadata-source
+generated_from: release:replace
 verified_on: YYYY-MM-DD
 publications:
   - publication_id: doi:10.xxxx/example
@@ -11,6 +12,7 @@ publications:
     url: https://doi.org/10.xxxx/example
     publication_type: journal-article
     verification:
-      metadata_source: crossref
-      metadata_verified: false
-      full_text_verified: false
+      metadata_source: deep-research-evidence-product
+      metadata_verified: true
+      full_text_verified: true
+      source_release_id: release:replace

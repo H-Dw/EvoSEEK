@@ -30,6 +30,7 @@ from .protocols import EmbeddingBackend, RerankerBackend
 
 _ENV_REFERENCE = re.compile(r"^\$\{([A-Z_][A-Z0-9_]*)\}$")
 _PLACEHOLDER_MARKERS = ("<YOUR_", "{WORKSPACE_ID}", "YOUR_WORKSPACE_ID")
+MAX_REMOTE_INFERENCE_BACKOFF_SECONDS = 30.0
 
 
 @dataclass(frozen=True)
@@ -300,7 +301,12 @@ class _RemoteAPIBackend(ABC):
             except (OSError, TimeoutError, URLError) as error:
                 if attempt >= self.max_retries:
                     raise RuntimeError("Remote inference request failed after retries") from error
-                self._sleep(min(8.0, 0.25 * (2**attempt)))
+                self._sleep(
+                    min(
+                        MAX_REMOTE_INFERENCE_BACKOFF_SECONDS,
+                        0.25 * (2**attempt),
+                    )
+                )
                 continue
             last_status = response.status_code
             if 200 <= response.status_code < 300:
@@ -327,7 +333,10 @@ class _RemoteAPIBackend(ABC):
             try:
                 delay = min(30.0, max(0.0, float(raw_retry_after)))
             except ValueError:
-                delay = min(8.0, 0.25 * (2**attempt))
+                delay = min(
+                    MAX_REMOTE_INFERENCE_BACKOFF_SECONDS,
+                    0.25 * (2**attempt),
+                )
             self._sleep(delay)
         raise RuntimeError(f"Remote inference request failed with HTTP {last_status}")
 

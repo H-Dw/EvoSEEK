@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 from itertools import combinations
-from typing import Protocol
+from typing import Any, Protocol
 
 from fitness_agents.contracts.schemas import (
     Evidence,
@@ -1503,6 +1503,110 @@ class LocalRAGKnowledgeAdapter:
         del document_id
         return f"source:local_rag:{chunk_id}"
 
+    def _materialize_citation_support(
+        self,
+        *,
+        claim: Any,
+        supporting_chunks: list[Any],
+        source_ids: tuple[str, ...],
+        source_group: str,
+        query_id: str,
+        round_id: int,
+        entities: dict[str, EntityRecord],
+        relations: list[RelationRecord],
+    ) -> None:
+        for support in claim.citation_support:
+            publication_id = str(support.get("publication_id", "")).casefold()
+            publication = self.publication_catalog.require(publication_id)
+            support_id = str(
+                support.get("support_id")
+                or stable_record_id(
+                    "citation-support",
+                    claim.claim_id,
+                    publication_id,
+                    support.get("support_type"),
+                    support.get("locator"),
+                )
+            )
+            entities[publication_id] = EntityRecord(
+                entity_id=publication_id,
+                entity_type="Publication",
+                layer=KnowledgeLayer.LITERATURE,
+                modalities=frozenset({Modality.TEXT}),
+                properties={
+                    "title": publication["title"],
+                    "authors": publication["authors"],
+                    "year": publication["year"],
+                    "venue": publication["venue"],
+                    "doi": publication["doi"],
+                    "url": publication["url"],
+                    "publication_type": publication.get("publication_type"),
+                    "verification": publication.get("verification", {}),
+                },
+                source_ids=(publication_id,),
+                source_group="publication_catalog",
+                confidence=1.0,
+            )
+            entities[support_id] = EntityRecord(
+                entity_id=support_id,
+                entity_type="CitationSupport",
+                layer=KnowledgeLayer.PROVENANCE,
+                modalities=frozenset({Modality.TEXT}),
+                properties={
+                    "support_type": support.get("support_type"),
+                    "locator": support.get("locator"),
+                    "verified_against_source": bool(
+                        support.get("verified_against_source", False)
+                    ),
+                    "claim_id": claim.claim_id,
+                    "publication_id": publication_id,
+                },
+                source_ids=(publication_id, *source_ids),
+                source_group="citation_support",
+                confidence=claim.confidence,
+                valid_from_round=round_id,
+            )
+            relations.extend(
+                (
+                    _relation(
+                        self.name,
+                        claim.claim_id,
+                        "SUPPORTED_BY_CITATION",
+                        support_id,
+                        KnowledgeLayer.LITERATURE,
+                        modality=Modality.TEXT,
+                        source_id=publication_id,
+                        source_group="citation_support",
+                        context_id=query_id,
+                        valid_from_round=round_id,
+                    ),
+                    _relation(
+                        self.name,
+                        support_id,
+                        "CITES_PUBLICATION",
+                        publication_id,
+                        KnowledgeLayer.PROVENANCE,
+                        modality=Modality.TEXT,
+                        source_id=publication_id,
+                        source_group="publication_catalog",
+                        context_id=query_id,
+                        valid_from_round=round_id,
+                    ),
+                    _relation(
+                        self.name,
+                        support_id,
+                        "DERIVED_FROM",
+                        supporting_chunks[0].chunk_id,
+                        KnowledgeLayer.PROVENANCE,
+                        modality=Modality.TEXT,
+                        source_id=source_ids[0],
+                        source_group=source_group,
+                        context_id=query_id,
+                        valid_from_round=round_id,
+                    ),
+                )
+            )
+
     def extract(self, context: BuildContext) -> KnowledgeBatch:
         results = tuple(context.resources.get("local_retrieval_results", ()))
         if not all(isinstance(item, RetrievalResult) for item in results):
@@ -1600,7 +1704,152 @@ class LocalRAGKnowledgeAdapter:
                         valid_from_round=result.round_id,
                     )
                 )
+            native_record_ids = {item.record_id for item in result.records}
+            legacy_claim_by_id = {item.claim_id: item for item in result.claims}
+            for record in result.records:
+                supporting_chunks = [
+                    chunks[item]
+                    for item in record.evidence_chunk_ids
+                    if item in chunks
+                ]
+                if not supporting_chunks:
+                    continue
+                if (
+                    self.guard is not None
+                    and self.guard.enabled
+                    and self.guard.config.block_target_entities
+                ):
+                    matched = self.guard.matches(text=record.retrieval_text)
+                    if matched:
+                        raise ValueError(
+                            "Target leakage guard rejected KG record "
+                            f"{record.record_id}: {matched}"
+                        )
+                source_ids = tuple(
+                    self._chunk_source_id(item.document_id, item.chunk_id)
+                    for item in supporting_chunks
+                )
+                source_group = supporting_chunks[0].source_group
+                entities[record.record_id] = EntityRecord(
+                    entity_id=record.record_id,
+                    entity_type="Claim",
+                    layer=KnowledgeLayer.LITERATURE,
+                    modalities=frozenset({Modality.TEXT}),
+                    properties={
+                        "statement": record.retrieval_text,
+                        "record_type": record.record_type,
+                        "knowledge_type": record.knowledge_type,
+                        "permission": record.permission,
+                        "scientific_quality": record.scientific_quality,
+                        "task_applicability": record.task_applicability,
+                        "boundary_conditions": record.boundary_conditions,
+                        "counterclaims": record.counterclaims,
+                        "abstain_if": record.abstain_if,
+                        "facets": record.facets,
+                        "canonical_record_hash": record.canonical_record_hash,
+                        "selection_eligible": False,
+                    },
+                    source_ids=source_ids,
+                    source_group=source_group,
+                    # Retrieval relevance remains on DocumentChunk.scores and is
+                    # deliberately not promoted to scientific confidence.
+                    confidence=0.0,
+                    valid_from_round=result.round_id,
+                )
+                evidence_id = stable_record_id(
+                    "local-rag-native-evidence",
+                    record.record_id,
+                    supporting_chunks[0].chunk_id,
+                )
+                evidence_entity_id = f"evidence:{evidence_id}"
+                entities[evidence_entity_id] = EntityRecord(
+                    entity_id=evidence_entity_id,
+                    entity_type="Evidence",
+                    layer=KnowledgeLayer.AGENT,
+                    modalities=frozenset({Modality.TEXT}),
+                    properties={
+                        "channel": "local_rag",
+                        "statement": record.retrieval_text,
+                        "record_id": record.record_id,
+                        "record_type": record.record_type,
+                        "permission": record.permission,
+                        "contributes_to_selection": False,
+                        "round_id": result.round_id,
+                    },
+                    source_ids=source_ids,
+                    source_group=source_group,
+                    confidence=0.0,
+                    valid_from_round=result.round_id,
+                )
+                relations.append(
+                    RelationRecord(
+                        relation_id=stable_record_id(
+                            "rel",
+                            self.name,
+                            record.record_id,
+                            evidence_entity_id,
+                            result.query_id,
+                        ),
+                        subject_id=record.record_id,
+                        predicate="SUPPORTED_BY_SOURCE",
+                        object_id=evidence_entity_id,
+                        layer=KnowledgeLayer.LITERATURE,
+                        modalities=frozenset({Modality.TEXT}),
+                        source_ids=source_ids,
+                        evidence_ids=(evidence_id,),
+                        source_group=source_group,
+                        confidence=0.0,
+                        context_id=result.query_id,
+                        valid_from_round=result.round_id,
+                    )
+                )
+                legacy_claim = legacy_claim_by_id.get(record.record_id)
+                if legacy_claim is not None:
+                    self._materialize_citation_support(
+                        claim=legacy_claim,
+                        supporting_chunks=supporting_chunks,
+                        source_ids=source_ids,
+                        source_group=source_group,
+                        query_id=result.query_id,
+                        round_id=result.round_id,
+                        entities=entities,
+                        relations=relations,
+                    )
+                for chunk in supporting_chunks:
+                    source_id = self._chunk_source_id(
+                        chunk.document_id, chunk.chunk_id
+                    )
+                    relations.extend(
+                        (
+                            _relation(
+                                self.name,
+                                chunk.chunk_id,
+                                "ASSERTS",
+                                record.record_id,
+                                KnowledgeLayer.LITERATURE,
+                                modality=Modality.TEXT,
+                                source_id=source_id,
+                                source_group=chunk.source_group,
+                                context_id=result.query_id,
+                                valid_from_round=result.round_id,
+                            ),
+                            _relation(
+                                self.name,
+                                evidence_entity_id,
+                                "DERIVED_FROM",
+                                chunk.chunk_id,
+                                KnowledgeLayer.PROVENANCE,
+                                modality=Modality.TEXT,
+                                source_id=source_id,
+                                source_group=chunk.source_group,
+                                context_id=result.query_id,
+                                valid_from_round=result.round_id,
+                            ),
+                        )
+                    )
             for claim in result.claims:
+                if claim.claim_id in native_record_ids:
+                    continue
                 supporting_chunks = [
                     chunks[item] for item in claim.evidence_chunk_ids if item in chunks
                 ]
@@ -1689,97 +1938,16 @@ class LocalRAGKnowledgeAdapter:
                         valid_from_round=result.round_id,
                     )
                 )
-                for support in claim.citation_support:
-                    publication_id = str(support.get("publication_id", "")).casefold()
-                    publication = self.publication_catalog.require(publication_id)
-                    support_id = str(
-                        support.get("support_id")
-                        or stable_record_id(
-                            "citation-support",
-                            claim.claim_id,
-                            publication_id,
-                            support.get("support_type"),
-                            support.get("locator"),
-                        )
-                    )
-                    entities[publication_id] = EntityRecord(
-                        entity_id=publication_id,
-                        entity_type="Publication",
-                        layer=KnowledgeLayer.LITERATURE,
-                        modalities=frozenset({Modality.TEXT}),
-                        properties={
-                            "title": publication["title"],
-                            "authors": publication["authors"],
-                            "year": publication["year"],
-                            "venue": publication["venue"],
-                            "doi": publication["doi"],
-                            "url": publication["url"],
-                            "publication_type": publication.get("publication_type"),
-                            "verification": publication.get("verification", {}),
-                        },
-                        source_ids=(publication_id,),
-                        source_group="publication_catalog",
-                        confidence=1.0,
-                    )
-                    entities[support_id] = EntityRecord(
-                        entity_id=support_id,
-                        entity_type="CitationSupport",
-                        layer=KnowledgeLayer.PROVENANCE,
-                        modalities=frozenset({Modality.TEXT}),
-                        properties={
-                            "support_type": support.get("support_type"),
-                            "locator": support.get("locator"),
-                            "verified_against_source": bool(
-                                support.get("verified_against_source", False)
-                            ),
-                            "claim_id": claim.claim_id,
-                            "publication_id": publication_id,
-                        },
-                        source_ids=(publication_id, *source_ids),
-                        source_group="citation_support",
-                        confidence=claim.confidence,
-                        valid_from_round=result.round_id,
-                    )
-                    relations.extend(
-                        (
-                            _relation(
-                                self.name,
-                                claim.claim_id,
-                                "SUPPORTED_BY_CITATION",
-                                support_id,
-                                KnowledgeLayer.LITERATURE,
-                                modality=Modality.TEXT,
-                                source_id=publication_id,
-                                source_group="citation_support",
-                                context_id=result.query_id,
-                                valid_from_round=result.round_id,
-                            ),
-                            _relation(
-                                self.name,
-                                support_id,
-                                "CITES_PUBLICATION",
-                                publication_id,
-                                KnowledgeLayer.PROVENANCE,
-                                modality=Modality.TEXT,
-                                source_id=publication_id,
-                                source_group="publication_catalog",
-                                context_id=result.query_id,
-                                valid_from_round=result.round_id,
-                            ),
-                            _relation(
-                                self.name,
-                                support_id,
-                                "DERIVED_FROM",
-                                supporting_chunks[0].chunk_id,
-                                KnowledgeLayer.PROVENANCE,
-                                modality=Modality.TEXT,
-                                source_id=source_ids[0],
-                                source_group=source_group,
-                                context_id=result.query_id,
-                                valid_from_round=result.round_id,
-                            ),
-                        )
-                    )
+                self._materialize_citation_support(
+                    claim=claim,
+                    supporting_chunks=supporting_chunks,
+                    source_ids=source_ids,
+                    source_group=source_group,
+                    query_id=result.query_id,
+                    round_id=result.round_id,
+                    entities=entities,
+                    relations=relations,
+                )
                 for chunk in supporting_chunks:
                     source_id = self._chunk_source_id(chunk.document_id, chunk.chunk_id)
                     relations.append(

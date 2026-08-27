@@ -1,0 +1,50 @@
+schema_version: search-run-ledger:v1
+brief_id: RB-GB1-DIRECTIVE-V1
+runs:
+  - search_run_id: SR-001
+    timestamp: '2026-08-24T00:00:00+08:00'
+    provider: RCSB_PDB
+    operation: direct_record_and_coordinate_fetch
+    query: PDB 1PGA
+    disposition: included
+    result_ids: [PUB-001, SS-001, SS-006]
+  - search_run_id: SR-002
+    timestamp: '2026-08-24T00:01:00+08:00'
+    provider: PDBj
+    operation: direct_record
+    query: PDB 1FCC
+    disposition: included
+    result_ids: [PUB-002, SS-002]
+  - search_run_id: SR-003
+    timestamp: '2026-08-24T00:02:00+08:00'
+    provider: PMC
+    operation: direct_full_text_and_in_document_find
+    query_family:
+      - GB1 thermodynamic stability
+      - residue burial
+      - positions 41 and 54 sensitivity
+      - glycine and proline tolerance
+    disposition: included
+    result_ids: [PUB-003, SS-003, SS-004, SS-005]
+  - search_run_id: SR-004
+    timestamp: '2026-08-24T00:03:00+08:00'
+    provider: PubMed_and_publisher_metadata
+    operation: metadata_verification
+    query_family:
+      - stability mediated evolvability
+      - protein G Fc interface
+      - binding condition dependence
+    disposition: supporting_metadata_only
+    result_ids: [PUB-004, PUB-005, PUB-006]
+  - search_run_id: SR-005
+    timestamp: '2026-08-24T00:04:00+08:00'
+    provider: multi_source_web_search
+    operation: discovery
+    query_family: target-specific structure and stability
+    disposition: partially_quarantined
+    quarantined_results:
+      count: 3
+      opened: false
+      retained_fields: [opaque_result_id, provider, timestamp, exclusion_category]
+      exclusion_category: target_label_or_dataset_overlap
+      content_retained: false

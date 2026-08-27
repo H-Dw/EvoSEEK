@@ -1,0 +1,38 @@
+{
+  "schema_version": "gb1-directive-validation:v1",
+  "validated_at": "2026-08-25T06:22:06.006703+00:00",
+  "bundle_root": "D:\\fitness-agents\\resources\\local_knowledge\\gb1_agentic_candidate_v1",
+  "status": "passed",
+  "research_status": "research_candidate",
+  "human_reviewed": false,
+  "selection_eligible": false,
+  "permission": "explanation_only",
+  "cards": [],
+  "native_records": [
+    {
+      "path": "records\\atomic_claim\\folding_binding_separation.md",
+      "sha256": "a95afdac5cbcbf3f493a26a6b6d26dbe6a58cd2edaf41eeeb77b34e0262b9f2a"
+    },
+    {
+      "path": "records\\atomic_claim\\static_proximity_limit.md",
+      "sha256": "c4b1e61d83db7fb2099e4fe17fb8297ab395d34d24b1f56b3ec47402a4f24e9d"
+    },
+    {
+      "path": "records\\knowledge_decision_card\\fold_boundary_projection.md",
+      "sha256": "d59446263f1d4ebe1f48d3252dd1a8c51f46ab03da2b6414549bde23bf108942"
+    },
+    {
+      "path": "records\\knowledge_decision_card\\pairwise_evidence_projection.md",
+      "sha256": "5d4167cbd562ed6afe4dbe7650d6efae15eda4d8ef21b138ac46a5c8321048ee"
+    },
+    {
+      "path": "records\\logic_unit\\matched_pairwise_test.md",
+      "sha256": "2cc5a2510c1ecdd8ec264ae71606dd1a6f8558cff3a18019a908434b071b3e1d"
+    },
+    {
+      "path": "records\\logic_unit\\measurement_conditioned_boundary.md",
+      "sha256": "4cd8aa96d50993bf41e910fe2155edcef90be3bdc1d7601d179907f7d0b12e58"
+    }
+  ],
+  "errors": []
+}
